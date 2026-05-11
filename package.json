@@ -1,0 +1,13 @@
+{
+  "name": "asa_single_agent",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "astar_agent.js",
+  "scripts": {
+    "start": "node astar_agent.js"
+  },
+  "dependencies": {
+    "@unitn-asa/deliveroo-js-sdk": "^1.3.5",
+    "dotenv": "^16.0.3"
+  }
+}
