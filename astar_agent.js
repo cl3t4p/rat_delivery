@@ -90,50 +90,37 @@ socket.onSensing( (sensing) => {
 
 
 /**
- * A* on the tile grid.
+ * BFS on the tile grid.
  * Returns an array of {x,y} from start (excluded) to goal (included), or null if unreachable.
  */
-function astar(start, goal) {
+function bfs(start, goal) {
     const sx = Math.round(start.x), sy = Math.round(start.y);
     const gx = Math.round(goal.x), gy = Math.round(goal.y);
     if (sx === gx && sy === gy) return [];
     if (!isWalkable(tiles.get(tileKey(gx, gy))?.type)) return null;
 
-    const h = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-
-    /** @type { Map<string, {x:number, y:number, g:number, f:number, parent:string|null}> } */
-    const nodes = new Map();
-    const open = new Set();
-    const closed = new Set();
-
     const startKey = tileKey(sx, sy);
-    nodes.set(startKey, { x: sx, y: sy, g: 0, f: h({x:sx,y:sy}, {x:gx,y:gy}), parent: null });
-    open.add(startKey);
+    /** @type { Map<string, {x:number, y:number, parent:string|null}> } */
+    const visited = new Map();
+    visited.set(startKey, { x: sx, y: sy, parent: null });
 
-    while (open.size > 0) {
-        // Pick node in open with smallest f.
-        let currentKey = null;
-        let bestF = Infinity;
-        for (const k of open) {
-            const n = nodes.get(k);
-            if (n.f < bestF) { bestF = n.f; currentKey = k; }
-        }
-        const current = nodes.get(currentKey);
+    const queue = [startKey];
+    let head = 0;
+
+    while (head < queue.length) {
+        const currentKey = queue[head++];
+        const current = visited.get(currentKey);
 
         if (current.x === gx && current.y === gy) {
-            // Reconstruct path.
             const path = [];
             let k = currentKey;
             while (k !== startKey) {
-                const n = nodes.get(k);
+                const n = visited.get(k);
                 path.unshift({ x: n.x, y: n.y });
                 k = n.parent;
             }
             return path;
         }
-
-        open.delete(currentKey);
-        closed.add(currentKey);
 
         const neighbors = [
             { x: current.x + 1, y: current.y },
@@ -144,17 +131,13 @@ function astar(start, goal) {
 
         for (const n of neighbors) {
             const nk = tileKey(n.x, n.y);
-            if (closed.has(nk)) continue;
+            if (visited.has(nk)) continue;
             const tile = tiles.get(nk);
             if (!tile || !isWalkable(tile.type)) continue;
             if (!canEnter(current.x, current.y, tile)) continue;
 
-            const tentativeG = current.g + 1;
-            const existing = nodes.get(nk);
-            if (!existing || tentativeG < existing.g) {
-                nodes.set(nk, { x: n.x, y: n.y, g: tentativeG, f: tentativeG + h(n, {x:gx,y:gy}), parent: currentKey });
-                open.add(nk);
-            }
+            visited.set(nk, { x: n.x, y: n.y, parent: currentKey });
+            queue.push(nk);
         }
     }
 
@@ -165,7 +148,7 @@ function nearestDelivery(from) {
     let best = null;
     let bestLen = Infinity;
     for (const d of deliveryTiles) {
-        const path = astar(from, d);
+        const path = bfs(from, d);
         if (path && path.length < bestLen) { best = d; bestLen = path.length; }
     }
     return best;
@@ -189,12 +172,12 @@ function optionsGeneration() {
         if (d) { myAgent.push(['go_put_down', d.x, d.y]); return; }
     }
 
-    // Otherwise, find the nearest free parcel reachable via A*.
+    // Otherwise, find the nearest free parcel reachable via BFS.
     let bestOption = null;
     let bestLen = Infinity;
     for (const p of parcels.values()) {
         if (p.carriedBy) continue;
-        const path = astar(me, { x: p.x, y: p.y });
+        const path = bfs(me, { x: p.x, y: p.y });
         if (path && path.length < bestLen) {
             bestLen = path.length;
             bestOption = ['go_pick_up', p.x, p.y, p.id];
@@ -372,14 +355,14 @@ class GoPutDown extends PlanBase {
 }
 
 
-class AStarMove extends PlanBase {
+class BfsMove extends PlanBase {
     static isApplicableTo(verb) { return verb === 'go_to'; }
 
     async execute(_, x, y) {
         while (Math.round(me.x) !== x || Math.round(me.y) !== y) {
             if (this.stopped) throw ['stopped'];
 
-            const path = astar({ x: me.x, y: me.y }, { x, y });
+            const path = bfs({ x: me.x, y: me.y }, { x, y });
             if (!path) throw 'no path';
             if (path.length === 0) return true;
 
@@ -407,4 +390,4 @@ class AStarMove extends PlanBase {
 
 planLibrary.push(GoPickUp);
 planLibrary.push(GoPutDown);
-planLibrary.push(AStarMove);
+planLibrary.push(BfsMove);
