@@ -39,7 +39,6 @@ export function createIntention(type, parcelId, targetPos, score = 0) {
  * 2. se ci sono parcels liberi -> vai a prendere il migliore (go_pick_up)
  * 3. altrimenti -> esplora (explore)
 */
-
 export function getBestIntention() {
     // dove sono
     if (beliefs.me.x === null || beliefs.me.y === null) {
@@ -52,38 +51,45 @@ export function getBestIntention() {
     // ── CASO 1: Sto trasportando parcels → go_deliver ────────────────────────
     if (beliefs.me.carrying.length > 0) {
 
-        // quanti pacchi posso portare al massimo?
-        const capacity = beliefs.config?.MAX_PARCELS ?? 1;
+        // controllo: verifica che i pacchi siano davvero ancora nei beliefs
+        const realCarrying = beliefs.me.carrying.filter(id => beliefs.parcels.has(id));
+        if (realCarrying.length === 0) {
+            beliefs.me.carrying = []; // pulizia — il sensing non ha ancora aggiornato
+        } else {
 
-        // sono pieno → consegna subito
-        if (beliefs.me.carrying.length >= capacity) {
+            // quanti pacchi posso portare al massimo?
+            const capacity = beliefs.config?.MAX_PARCELS ?? 1;
+
+            // sono pieno → consegna subito
+            if (beliefs.me.carrying.length >= capacity) {
+                const target = findNearestDeliveryTile(me);
+                if (target) {
+                    const dist = manhattanDistance(me, target);
+                    const totalReward = beliefs.me.carrying
+                        .map(id => beliefs.parcels.get(id)?.reward ?? 0)
+                        .reduce((a, b) => a + b, 0);
+                    console.log(`[deliberation] go_deliver (pieno) verso (${target.x},${target.y})`);
+                    return createIntention('go_deliver', null, target, totalReward - dist);
+                }
+            }
+
+            // non sono pieno → c'è un parcel libero vicino che vale la pena raccogliere?
+            const pickUp = findBestPickUp(me);
+            if (pickUp && pickUp.score > 0) {
+                return pickUp;
+            }
+
+            // nessun altro parcel conveniente → vai a consegnare quello che hai
             const target = findNearestDeliveryTile(me);
             if (target) {
                 const dist = manhattanDistance(me, target);
                 const totalReward = beliefs.me.carrying
                     .map(id => beliefs.parcels.get(id)?.reward ?? 0)
                     .reduce((a, b) => a + b, 0);
-                console.log(`[deliberation] go_deliver (pieno) verso (${target.x},${target.y})`);
+                console.log(`[deliberation] go_deliver verso (${target.x},${target.y})`);
                 return createIntention('go_deliver', null, target, totalReward - dist);
             }
-        }
 
-        // non sono pieno → c'è un parcel libero vicino che vale la pena raccogliere?
-        const pickUp = findBestPickUp(me);
-        if (pickUp && pickUp.score > 0) {
-            // Preferisci raccogliere ancora prima di consegnare
-            return pickUp;
-        }
-
-        // nessun altro parcel conveniente → vai a consegnare quello che hai
-        const target = findNearestDeliveryTile(me);
-        if (target) {
-            const dist = manhattanDistance(me, target);
-            const totalReward = beliefs.me.carrying
-                .map(id => beliefs.parcels.get(id)?.reward ?? 0)
-                .reduce((a, b) => a + b, 0);
-            console.log(`[deliberation] go_deliver verso (${target.x},${target.y})`);
-            return createIntention('go_deliver', null, target, totalReward - dist);
         }
     }
 
@@ -91,10 +97,9 @@ export function getBestIntention() {
     const pickUp = findBestPickUp(me);
     if (pickUp) return pickUp;
 
-    // ── CASO 3: Niente da fare → explore ────────────────────────────────────
+    // ── CASO 3: Niente da fare → vai allo spawner più vicino ────────────────
     const spawner = findNearestSpawnerTile(me);
     if (spawner) {
-        // se sei già su uno spawner, aspetta
         if (manhattanDistance(me, spawner) === 0) {
             console.log('[deliberation] Sono su uno spawner → wait');
             return createIntention('wait', null, null, 0);
@@ -103,7 +108,6 @@ export function getBestIntention() {
         return createIntention('explore', null, spawner, 0);
     }
 
-    // nessuno spawner trovato → aspetta
     return createIntention('wait', null, null, 0);
 }
 

@@ -8,6 +8,18 @@
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "^1.3.5",
-    "dotenv": "^16.0.3"
-  }
+    "dotenv": "^16.6.1"
+  },
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cl3t4p/asa_agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/cl3t4p/asa_agent/issues"
+  },
+  "homepage": "https://github.com/cl3t4p/asa_agent#readme"
 }

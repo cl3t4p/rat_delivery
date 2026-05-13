@@ -72,10 +72,9 @@ export async function startExecutor(socket) {
 
         switch (intention.type) {
             case 'wait':
-            case 'explore':
-                // TODO Explore
                 continue;
 
+            case 'explore':
             case 'go_pick_up':
             case 'go_deliver':
                 await stepTowardsTarget(socket, intention);
@@ -157,12 +156,16 @@ async function finalize(socket, intention) {
     if (intention.type === 'go_deliver') {
         const dropped = await socket.emitPutdown();
 
-        // stesso trattamento ottimistico: rimuovi dal carrying e dai beliefs
-        for (const p of (dropped ?? [])) {
-            const id = p.id;
-            if (id) beliefs.parcels.delete(id);
+        // pulizia immediata e completa
+        for (const id of beliefs.me.carrying) {
+            beliefs.parcels.delete(id);   // rimuovi dai beliefs
         }
-        beliefs.me.carrying = [];
+        beliefs.me.carrying = [];         // svuota carrying
+
+        // poi aggiorna con quello che il server conferma
+        for (const p of (dropped ?? [])) {
+            if (p.id) beliefs.parcels.delete(p.id);
+        }
 
         console.log(`[executor] Delivery OK: ${(dropped ?? []).length} parcel(s)`);
         notifyIntentionDone();
