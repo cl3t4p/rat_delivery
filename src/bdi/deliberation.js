@@ -118,16 +118,6 @@ export function findBestPickUp(myPos) {
     return bestIntention;
 }
 
-// ── ESPORTA TIPI (JSDoc) ──────────────────────────────────────────────────
- 
-/**
- * @typedef { {
- *   type: 'go_pick_up' | 'go_deliver' | 'explore' | 'wait',
- *   parcelId: string | null,
- *   targetPos: {x:number, y:number} | null,
- *   plan: string[],
- *   status: 'pending' | 'active' | 'done' | 'failed',
- *   createdAt: number,
- *   score: number
- * } } Intention
- */
+// ── TIPI (JSDoc) ──────────────────────────────────────────────
+// Definito in src/shared/types.js
+/** @typedef {import('../shared/types.js').Intention} Intention */

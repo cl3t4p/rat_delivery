@@ -13,15 +13,14 @@
  *   deliveryTiles  → cache delle caselle di consegna (tipo '2')
 */
 
-// ── COSTANTI ──────────────────────────────────────────────────
+/** @typedef {import('../shared/types.js').Tile}        Tile */
+/** @typedef {import('../shared/types.js').Parcel}      Parcel */
+/** @typedef {import('../shared/types.js').Agent}       Agent */
+/** @typedef {import('../shared/types.js').Me}          Me */
+/** @typedef {import('../shared/types.js').BeliefStore} BeliefStore */
+/** @typedef {import('../shared/types.js').Position}    Position */
 
-// Dopo quanti millisecondi dimenticare un parcel non più visto
-export const PARCEL_FORGET_MS = 5000;
-
-// Dopo quanti ms marcare un agente come "stale" (posizione non aggiornata)
-export const AGENT_STALE_MS = 3000;
-
-// BELIEF STORE
+/** @type {BeliefStore} */
 
 export const beliefs = {
     grid: new Map(), // la mappa
@@ -36,6 +35,15 @@ export const beliefs = {
 		carrying: [],
 	},
 	deliveryTiles: [], // cache zone consegna
+	crates: new Map(), // crate veri visti adesso: key = "x,y" -> { id, x, y, lastSeen }
+	config: {
+		PARCEL_DECADING_INTERVAL: null,
+		OBSERVATION_DISTANCE: null,
+		MAX_PARCELS: 5,        // capacity (sovrascritto da onConfig)
+		//Non piu const solo per facilitare le modiche
+		PARCEL_FORGET_MS: 5000, // dimentica un parcel non più visto dopo X ms
+		AGENT_STALE_MS: 3000,   // marca un agente come stale dopo X ms
+	},
 };
 
 // ── FUNZIONI ──────────────────────────────────────────────────
@@ -64,7 +72,11 @@ export function updateMap(tiles) {
 	console.log(`[beliefs] Mappa: ${beliefs.grid.size} tiles, ${beliefs.deliveryTiles.length} delivery`);
 }
 
-// updateMe(data) -> aggiorna i miei dati (posizione, score) ad ogni sensing
+/**
+* aggiorna i miei dati (posizione, score) ad ogni sensing
+* @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent} data 
+* @returns {void}
+*/
 export function updateMe(data) {
 	beliefs.me.id = data.id;
 	beliefs.me.name = data.name;
@@ -73,8 +85,17 @@ export function updateMe(data) {
 	beliefs.me.score = data.score;
 }
 
-// updateBeliefs(sensedParcels, sensedAgents) -> aggiorna parcels, carrying e agents ad ogni sensing event
-export function updateBeliefs(sensedParcels, sensedAgents) {
+
+
+/**
+ * Aggiorna parcels, carrying, agents e crates ad ogni sensing event.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk').IOParcel[]} sensedParcels   pacchi visibili nel raggio attuale
+ * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent[]}  sensedAgents    agenti visibili nel raggio attuale (incluso me, filtrato dentro)
+ * @param {import('@unitn-asa/deliveroo-js-sdk').IOCrate[]}  [sensedCrates=[]] crate visibili nel raggio attuale
+ * @returns {void}
+ */
+export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 	// aggiorna i parcels visti adesso
 	const now = Date.now();
 
@@ -107,7 +128,7 @@ export function updateBeliefs(sensedParcels, sensedAgents) {
 		if (seenParcelIds.has(id)) continue; // l'abbiamo appena visto
 
 		const age = now - p.lastSeen;
-		if (age > PARCEL_FORGET_MS || p.reward <= 0) {
+		if (age > beliefs.config.PARCEL_FORGET_MS || p.reward <= 0) {
 			beliefs.parcels.delete(id);
 			console.log(`[beliefs] Parcel rimosso: ${id}`);
 		}
@@ -134,11 +155,21 @@ export function updateBeliefs(sensedParcels, sensedAgents) {
 	// marca come stale gli agenti che non vediamo più
 	for (const [id, agent] of beliefs.agents) {
 		if (!seenAgentIds.has(id) && id !== beliefs.me.id) {
-			if (Date.now() - agent.lastSeen > AGENT_STALE_MS) {
+			if (Date.now() - agent.lastSeen > beliefs.config.AGENT_STALE_MS) {
 				// non lo rimuove, ma segniamo che la posizione non è aggiornata
 				beliefs.agents.set(id, {...agent, stale: true});
 			}
 		}
+	}
+
+	// ── 3. AGGIORNA CRATES ───────────────────────────────────────────────────
+	// I crate spawnano/scompaiono dinamicamente sulle tile '5'/'5!'.
+	// Sovrascriviamo l'intero Map: vediamo solo quelli nel raggio attuale,
+	// quelli fuori non sappiamo se ci sono ancora -> approccio ottimistico (libera la tile).
+	beliefs.crates.clear();
+	for (const c of sensedCrates) {
+		const key = `${Math.round(c.x)},${Math.round(c.y)}`;
+		beliefs.crates.set(key, { id: c.id, x: c.x, y: c.y, lastSeen: now });
 	}
 }
 
@@ -156,14 +187,50 @@ export function decayParcelsReward() {
 	}
 }
 
-// manhattanDistance(a,b) => distanza Manhattan tra due punti
+/**
+ * Distanza Manhattan tra due punti
+ * @param {Position} a
+ * @param {Position} b
+ * @returns {number}
+ */
 export function manhattanDistance(a, b) {
 	return Math.abs(Math.round(a.x) - Math.round(b.x))
 		+ Math.abs(Math.round(a.y) - Math.round(b.y));
 }
 
-// isWalkable(x,y) => controlla se una tile è calpestabile (tipo 1, 2 o 3)
+// Solo i muri ('0') sono bloccanti per tipo di tile.
+const BLOCKING_TYPES = new Set(['0']);
+
+// Frecce one-way: NON puoi entrare da direzione opposta alla freccia.
+// '↑' (dy=+1) -> vietato entrare da sopra (dy=-1)
+// '→' (dx=+1) -> vietato entrare da destra (dx=-1)
+// '↓' (dy=-1) -> vietato entrare da sotto (dy=+1)
+// '←' (dx=-1) -> vietato entrare da sinistra (dx=+1)
+const ARROW_VEC = { '↑': [0, 1], '→': [1, 0], '↓': [0, -1], '←': [-1, 0] };
+
+// isWalkable(x,y) => tile esiste ed è transitabile (no muri, no crate)
 export function isWalkable(x, y) {
 	const tile = beliefs.grid.get(`${x},${y}`);
-	return tile !== undefined && tile.type !== '0';
+	if (!tile) return false;
+	return !BLOCKING_TYPES.has(tile.type);
+}
+
+// canEnter(fromX, fromY, toX, toY) => puoi entrare in (toX,toY) venendo da (fromX,fromY)?
+// Combina isWalkable + crate veri sensed + check direzione per le frecce.
+export function canEnter(fromX, fromY, toX, toY) {
+	const key = `${toX},${toY}`;
+	const tile = beliefs.grid.get(key);
+	if (!tile) return false;
+	if (BLOCKING_TYPES.has(tile.type)) return false;
+
+	// crate vero presente sulla tile -> bloccante (anche se la tile sotto è '5' o '3')
+	if (beliefs.crates.has(key)) return false;
+
+	const v = ARROW_VEC[tile.type];
+	if (!v) return true; // tile normale, nessun vincolo direzionale
+
+	const dx = toX - fromX;
+	const dy = toY - fromY;
+	// vietato entrare se la direzione di ingresso è opposta alla freccia
+	return !(dx === -v[0] && dy === -v[1]);
 }
