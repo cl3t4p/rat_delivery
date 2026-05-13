@@ -51,15 +51,38 @@ export function getBestIntention() {
 
     // ── CASO 1: Sto trasportando parcels → go_deliver ────────────────────────
     if (beliefs.me.carrying.length > 0) {
+
+        // quanti pacchi posso portare al massimo?
+        const capacity = beliefs.config?.MAX_PARCELS ?? 1;
+
+        // sono pieno → consegna subito
+        if (beliefs.me.carrying.length >= capacity) {
+            const target = findNearestDeliveryTile(me);
+            if (target) {
+                const dist = manhattanDistance(me, target);
+                const totalReward = beliefs.me.carrying
+                    .map(id => beliefs.parcels.get(id)?.reward ?? 0)
+                    .reduce((a, b) => a + b, 0);
+                console.log(`[deliberation] go_deliver (pieno) verso (${target.x},${target.y})`);
+                return createIntention('go_deliver', null, target, totalReward - dist);
+            }
+        }
+
+        // non sono pieno → c'è un parcel libero vicino che vale la pena raccogliere?
+        const pickUp = findBestPickUp(me);
+        if (pickUp && pickUp.score > 0) {
+            // Preferisci raccogliere ancora prima di consegnare
+            return pickUp;
+        }
+
+        // nessun altro parcel conveniente → vai a consegnare quello che hai
         const target = findNearestDeliveryTile(me);
         if (target) {
             const dist = manhattanDistance(me, target);
-            // stima del reward totale che consegneremmo
             const totalReward = beliefs.me.carrying
                 .map(id => beliefs.parcels.get(id)?.reward ?? 0)
                 .reduce((a, b) => a + b, 0);
-
-            console.log(`[deliberation] go_deliver verso (${target.x},${target.y}) score=${totalReward - dist}`);
+            console.log(`[deliberation] go_deliver verso (${target.x},${target.y})`);
             return createIntention('go_deliver', null, target, totalReward - dist);
         }
     }
@@ -69,8 +92,19 @@ export function getBestIntention() {
     if (pickUp) return pickUp;
 
     // ── CASO 3: Niente da fare → explore ────────────────────────────────────
-    console.log('[deliberation] Nessun parcel disponibile → explore');
-    return createIntention('explore', null, null, 0);
+    const spawner = findNearestSpawnerTile(me);
+    if (spawner) {
+        // se sei già su uno spawner, aspetta
+        if (manhattanDistance(me, spawner) === 0) {
+            console.log('[deliberation] Sono su uno spawner → wait');
+            return createIntention('wait', null, null, 0);
+        }
+        console.log(`[deliberation] Vado allo spawner (${spawner.x},${spawner.y})`);
+        return createIntention('explore', null, spawner, 0);
+    }
+
+    // nessuno spawner trovato → aspetta
+    return createIntention('wait', null, null, 0);
 }
 
 // ── FUNZIONI HELPER ──────────────────────────────────────────────────
@@ -116,6 +150,23 @@ export function findBestPickUp(myPos) {
     }
 
     return bestIntention;
+}
+
+// findNearestSpawnerTile(myPos) -> trova la tile spawner (tipo '1') più vicina
+function findNearestSpawnerTile(myPos) {
+    let nearest = null;
+    let nearestDist = Infinity;
+
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type !== '1') continue;
+        const [x, y] = key.split(',').map(Number);
+        const dist = manhattanDistance(myPos, { x, y });
+        if (dist < nearestDist) {
+            nearestDist = dist;
+            nearest = { x, y };
+        }
+    }
+    return nearest;
 }
 
 // ── TIPI (JSDoc) ──────────────────────────────────────────────
