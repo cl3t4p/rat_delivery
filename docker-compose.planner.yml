@@ -1,0 +1,74 @@
+# Minimal stack to run the planning-as-a-service PDDL solver locally.
+# Reuses the build contexts from the cloned planning-as-a-service repo,
+# but only brings up the services strictly needed by @unitn-asa/pddl-client:
+#   - web    (HTTP API on :5001 — this is what PAAS_HOST should point to)
+#   - worker (Celery worker that runs the actual PDDL planner)
+#   - redis  (broker between web and worker)
+#   - mysql  (result store used by the worker)
+#
+# Skipped vs upstream compose: frontend (:80), mcp (:5002), monitor/flower (:5555).
+#
+# Usage:
+#   npm run planner:build   # one-time: builds the paas:latest base image
+#   npm run planner:up      # starts the stack
+#   npm run planner:down    # stops the stack
+
+services:
+  web:
+    build:
+      context: ./planning-as-a-service/server/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    depends_on:
+      - redis
+      - mysql
+
+  worker:
+    privileged: true
+    build:
+      context: ./planning-as-a-service/server/celery-queue
+      dockerfile: Dockerfile
+    environment:
+      - TIME_LIMIT=${TIME_LIMIT:-20}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-password}
+      - MYSQL_USER=${MYSQL_USER:-user}
+      - CELERY_RESULT_EXPIRE=${CELERY_RESULT_EXPIRE:-86400}
+    entrypoint: celery
+    command: -A tasks worker --loglevel=info
+    restart: unless-stopped
+    # planutils runs each planner via Apptainer (Singularity), which needs loop
+    # devices to mount the planner image. Without this bind, Apptainer fails with
+    # "could not open /dev/loop0: no such file or directory".
+    volumes:
+      - /dev:/dev
+    deploy:
+      mode: replicated
+      replicas: ${WORKER_NUMBERS:-1}
+      resources:
+        limits:
+          memory: ${MAX_MEMORY_PER_DOCKER_WORKER:-500M}
+    depends_on:
+      - redis
+      - mysql
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command: --wait_timeout=600 --max_connections=2048
+    environment:
+      MYSQL_DATABASE: db
+      MYSQL_USER: ${MYSQL_USER:-user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-password}
+    volumes:
+      - ./planning-as-a-service/server/init:/docker-entrypoint-initdb.d:ro
+      - planner_db_data:/var/lib/mysql
+
+volumes:
+  planner_db_data:

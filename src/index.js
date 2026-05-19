@@ -17,7 +17,7 @@ const socket = DjsConnect();
 
 // ── 1. RICEZIONE MAPPA ──────────────────────────────────────────────────
 socket.on('map', (width, height, tiles) => {
-    console.log(`[index] Mappa ricevuta: ${width}x${height}`);
+    console.log(`[index] Map received: ${width}x${height}`);
     updateMap(tiles);
 
     // DEBUG: stampa la griglia (usa estensione reale dai tiles)
@@ -71,7 +71,7 @@ function logState() {
         `score=${beliefs.me.score}`,
         `carrying=${beliefs.me.carrying.length}`,
         `parcels=${beliefs.parcels.size}`,
-        `intention=${intention?.type ?? 'nessuna'}`,
+        `intention=${intention?.type ?? 'none'}`,
         intention?.parcelId ? `→ ${intention.parcelId}` : ''
     );
 }

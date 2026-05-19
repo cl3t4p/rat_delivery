@@ -42,7 +42,7 @@ export function createIntention(type, parcelId, targetPos, score = 0) {
 export function getBestIntention() {
     // dove sono
     if (beliefs.me.x === null || beliefs.me.y === null) {
-        console.log('[deliberation] Posizione sconosciuta, aspetto...')
+        console.log('[deliberation] Position unknown, waiting...')
         return createIntention('wait', null, null, 0);
     }
 
@@ -68,7 +68,7 @@ export function getBestIntention() {
                     const totalReward = beliefs.me.carrying
                         .map(id => beliefs.parcels.get(id)?.reward ?? 0)
                         .reduce((a, b) => a + b, 0);
-                    console.log(`[deliberation] go_deliver (pieno) verso (${target.x},${target.y})`);
+                    console.log(`[deliberation] go_deliver (full) to (${target.x},${target.y})`);
                     return createIntention('go_deliver', null, target, totalReward - dist);
                 }
             }
@@ -86,7 +86,7 @@ export function getBestIntention() {
                 const totalReward = beliefs.me.carrying
                     .map(id => beliefs.parcels.get(id)?.reward ?? 0)
                     .reduce((a, b) => a + b, 0);
-                console.log(`[deliberation] go_deliver verso (${target.x},${target.y})`);
+                console.log(`[deliberation] go_deliver to (${target.x},${target.y})`);
                 return createIntention('go_deliver', null, target, totalReward - dist);
             }
 
@@ -101,10 +101,10 @@ export function getBestIntention() {
     const spawner = findNearestSpawnerTile(me);
     if (spawner) {
         if (manhattanDistance(me, spawner) === 0) {
-            console.log('[deliberation] Sono su uno spawner → wait');
+            console.log('[deliberation] On a spawner → wait');
             return createIntention('wait', null, null, 0);
         }
-        console.log(`[deliberation] Vado allo spawner (${spawner.x},${spawner.y})`);
+        console.log(`[deliberation] Heading to spawner (${spawner.x},${spawner.y})`);
         return createIntention('explore', null, spawner, 0);
     }
 

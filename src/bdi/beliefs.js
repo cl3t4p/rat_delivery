@@ -69,7 +69,7 @@ export function updateMap(tiles) {
 		}
 	}
 
-	console.log(`[beliefs] Mappa: ${beliefs.grid.size} tiles, ${beliefs.deliveryTiles.length} delivery`);
+	console.log(`[beliefs] Map: ${beliefs.grid.size} tiles, ${beliefs.deliveryTiles.length} delivery`);
 }
 
 /**
@@ -119,7 +119,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 
 		// nuovo parcel apparso: logga per debug
         if (!existing) {
-            console.log(`[beliefs] Nuovo parcel rilevato: ${p.id} a (${p.x},${p.y}) reward=${p.reward}`);
+            console.log(`[beliefs] New parcel detected: ${p.id} at (${p.x},${p.y}) reward=${p.reward}`);
         }
 	}
 
@@ -130,7 +130,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 		const age = now - p.lastSeen;
 		if (age > beliefs.config.PARCEL_FORGET_MS || p.reward <= 0) {
 			beliefs.parcels.delete(id);
-			console.log(`[beliefs] Parcel rimosso: ${id}`);
+			console.log(`[beliefs] Parcel removed: ${id}`);
 		}
 	}
 

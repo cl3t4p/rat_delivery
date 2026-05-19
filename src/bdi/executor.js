@@ -10,13 +10,29 @@
  *   5. notifica done / failed a intentionRevision
 */
 
-import { beliefs } from './beliefs.js';
+import { beliefs, canEnter } from './beliefs.js';
 import { planTo } from './pathfinding.js';
+import { planWithPDDL } from '../pddl/pddlPlanner.js';
 import {
     getCurrentIntention,
     notifyIntentionDone,
     notifyActionFailed,
 } from './intentionRevision.js';
+
+// Planner selector:
+//   USE_PDDL=true                    → use PDDL only (no fallback)
+//   USE_PDDL=true + PDDL_FALLBACK=true → use PDDL, fall back to A* if it fails
+//   default (USE_PDDL unset)         → use A* only
+const USE_PDDL = process.env.USE_PDDL === 'true';
+const PDDL_FALLBACK = process.env.PDDL_FALLBACK === 'true';
+
+// Mappa direzione → delta, usata per il pre-check di canEnter prima di emitMove.
+const DIR_DELTA = {
+    up:    { dx:  0, dy:  1 },
+    down:  { dx:  0, dy: -1 },
+    left:  { dx: -1, dy:  0 },
+    right: { dx:  1, dy:  0 },
+};
 
 // Tipi condivisi (definiti in src/shared/types.js)
 /** @typedef {import('../shared/types.js').Intention} Intention */
@@ -96,24 +112,37 @@ async function stepTowardsTarget(socket, intention) {
         return;
     }
 
-    // 2. plan vuoto -> calcola
+    // 2. plan vuoto -> calcola (PDDL se abilitato, altrimenti A*; fallback su A*)
     if (!intention.plan || intention.plan.length === 0) {
-        const moves = planTo(intention.targetPos);
+        const moves = await computePlan(intention);
         if (moves.length === 0) {
-            console.log(`[executor] Nessun path verso (${intention.targetPos.x},${intention.targetPos.y})`);
+            console.log(`[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`);
             notifyActionFailed('no_path');
             return;
         }
         intention.plan = moves;
     }
 
-    // 3. esegui la prossima mossa
+    // 3. replan dinamico: la prossima tile del piano è ancora valida?
+    //    Tra il momento in cui abbiamo pianificato e adesso può essere comparso
+    //    un crate, un agente avversario, o l'arrow direction non torna.
+    const next = intention.plan[0];
+    if (!isStepValid(next)) {
+        console.log(`[executor] Step ${next} no longer valid → replan`);
+        intention.plan = [];
+        return; // al prossimo giro entra nel ramo 2 e ricalcola
+    }
+
+    // 4. esegui la prossima mossa
     const dir = intention.plan.shift();
+    const fxBefore = Math.round(beliefs.me.x);
+    const fyBefore = Math.round(beliefs.me.y);
     const moved = await socket.emitMove(dir);
 
     if (!moved) {
         // tile bloccata (muro, avversario, arrow). Buttiamo il plan, al prossimo giro replana.
-        console.log(`[executor] Mossa fallita: ${dir} -> blocked`);
+        const targetTile = beliefs.grid.get(`${fxBefore + (DIR_DELTA[dir]?.dx ?? 0)},${fyBefore + (DIR_DELTA[dir]?.dy ?? 0)}`);
+        console.log(`[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) → tile=${targetTile?.type} moved=${JSON.stringify(moved)}`);
         intention.plan = [];
         notifyActionFailed('move_blocked');
         return;
@@ -122,6 +151,42 @@ async function stepTowardsTarget(socket, intention) {
     // aggiorna subito la pos di me, così non aspettiamo il prossimo sensing
     beliefs.me.x = moved.x;
     beliefs.me.y = moved.y;
+}
+
+/**
+ * Verifica che la prossima direzione del piano sia ancora percorribile
+ * rispetto allo stato corrente dei beliefs (muri, crate, frecce one-way).
+ * @param {Direction} dir
+ * @returns {boolean}
+ */
+function isStepValid(dir) {
+    const delta = DIR_DELTA[dir];
+    if (!delta) return false;
+    const fx = Math.round(beliefs.me.x);
+    const fy = Math.round(beliefs.me.y);
+    return canEnter(fx, fy, fx + delta.dx, fy + delta.dy);
+}
+
+/**
+ * Calcola il piano per raggiungere targetPos: prima PDDL se USE_PDDL=true,
+ * poi cade su A*. Restituisce [] se entrambi falliscono.
+ * @param {Intention} intention
+ * @returns {Promise<Direction[]>}
+ */
+async function computePlan(intention) {
+    if (USE_PDDL) {
+        const pddlMoves = await planWithPDDL(intention);
+        if (pddlMoves && pddlMoves.length > 0) {
+            console.log(`[executor] PDDL plan (${pddlMoves.length} moves)`);
+            return pddlMoves;
+        }
+        if (!PDDL_FALLBACK) {
+            console.log('[executor] PDDL unavailable, no fallback configured (set PDDL_FALLBACK=true to enable A*)');
+            return [];
+        }
+        console.log('[executor] PDDL unavailable → A* fallback');
+    }
+    return planTo(intention.targetPos);
 }
 
 // ── AZIONE FINALE: PICKUP / PUTDOWN ──────────────────────────
@@ -134,7 +199,7 @@ async function finalize(socket, intention) {
     if (intention.type === 'go_pick_up') {
         const picked = await socket.emitPickup();
         if (!picked || picked.length === 0) {
-            console.log(`[executor] Pickup vuoto (parcel ${intention.parcelId} probabilmente preso da altri)`);
+            console.log(`[executor] Empty pickup (parcel ${intention.parcelId} probably taken by another agent)`);
             notifyActionFailed('pickup_empty');
             return;
         }

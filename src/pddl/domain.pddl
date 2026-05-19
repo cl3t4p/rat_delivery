@@ -2,7 +2,7 @@
 ; Modella le azioni di un agente che raccoglie e consegna pacchi su una griglia
 
 (define (domain deliveroo)
-    (:requirements :strips) ; :strips = azioni con predizioni ed effetti semplici (aggiungi/rimuovi fatti)
+    (:requirements :strips :negative-preconditions) ; :strips = azioni semplici; :negative-preconditions richiesto per (not ...) nei goal (es. go_deliver)
 
     ; I predicati sono i "fatti" che descrivono lo stato del mondo
     ; Possono essere veri o falsi in ogni momento
@@ -108,6 +108,7 @@
         )
         :effect (and
             (not (carrying ?me ?p)) ; l'agente non porta più il pacco
+            (at ?p ?t)              ; il pacco rimane sulla tile di consegna
         )
     )
 )

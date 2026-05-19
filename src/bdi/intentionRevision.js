@@ -36,14 +36,14 @@ export function getCurrentIntention() {
 
 // notifyActionFailed(reason) -> chiamata da Persona B quando una mossa fallisce
 export function notifyActionFailed(reason) {
-    console.log(`[intentionRevision] Fallita: ${reason} → rivaluto`);
+    console.log(`[intentionRevision] Failed: ${reason} → re-evaluating`);
     if (currentIntention) currentIntention.status = 'failed';
     revise(true);
 }
 
 // notifyIntentionDone() ->  chiamata da Persona B quando ha completato l'intention con successo
 export function notifyIntentionDone() {
-    console.log(`[intentionRevision] Completata: ${currentIntention?.type}`);
+    console.log(`[intentionRevision] Completed: ${currentIntention?.type}`);
     if (currentIntention) currentIntention.status = 'done';
     currentIntention = null;
     revise(true);
@@ -58,15 +58,15 @@ function isIntentionStillValid(intention) {
             if (!intention.parcelId) return false;
             const parcel = beliefs.parcels.get(intention.parcelId);
             if (!parcel) { // sparito
-                console.log(`[intentionRevision] Parcel ${intention.parcelId} sparito`);
+                console.log(`[intentionRevision] Parcel ${intention.parcelId} disappeared`);
                 return false;
             }
             if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) { // preso da altri
-                console.log(`[intentionRevision] Parcel ${intention.parcelId} preso da qualcun altro (${parcel.carriedBy})`);
+                console.log(`[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`);
                 return false;
             }
             if (parcel.reward <= 0) { // esaurito
-                console.log(`[intentionRevision] Parcel ${intention.parcelId} reward esaurito`);
+                console.log(`[intentionRevision] Parcel ${intention.parcelId} reward depleted`);
                 return false;
             }
             return true;
@@ -93,7 +93,7 @@ export function revise(force = false) {
     // ── 1. VERIFICA VALIDITÀ INTENTION CORRENTE ──────────────────────────────
     if (currentIntention && currentIntention.status === 'active') {
         if (!isIntentionStillValid(currentIntention)) {
-            console.log(`[intentionRevision] Non più valida: ${currentIntention.type}`);
+            console.log(`[intentionRevision] No longer valid: ${currentIntention.type}`);
             currentIntention.status = 'failed';
             currentIntention = null;
         }
@@ -102,7 +102,7 @@ export function revise(force = false) {
     // ── 2. SE NON HO INTENTION ATTIVA → CALCOLA NUOVA ───────────────────────
     if (!currentIntention || currentIntention.status === 'failed' || currentIntention.status === 'done') {
         currentIntention = getBestIntention();
-        console.log(`[intentionRevision] Nuova: ${currentIntention?.type} score=${currentIntention?.score}`);
+        console.log(`[intentionRevision] New: ${currentIntention?.type} score=${currentIntention?.score}`);
         return;
     }
 
@@ -113,7 +113,7 @@ export function revise(force = false) {
 
         const improvement = candidate.score - currentIntention.score;
         if (improvement > IMPROVEMENT_THRESHOLD) {
-            console.log(`[intentionRevision] Migliore trovata (+${improvement}): sostituisco`);
+            console.log(`[intentionRevision] Better option found (+${improvement}): replacing`);
             currentIntention.status = 'failed';
             currentIntention = candidate;
         }
