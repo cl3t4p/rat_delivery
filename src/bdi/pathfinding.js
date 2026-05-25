@@ -7,9 +7,8 @@
  *
 */
 
-import { beliefs, isWalkable, canEnter } from './beliefs.js';
-
-
+import { beliefs } from './beliefs.js';
+import { isWalkable, canEnter } from './grid.js';
 
 // Tipi condivisi (definiti in src/shared/types.js)
 /** @typedef {import('../shared/types.js').Position}   Position */
