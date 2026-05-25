@@ -12,6 +12,7 @@ import {DjsConnect} from '@unitn-asa/deliveroo-js-sdk/client';
 import { beliefs, updateMap, updateMe, updateBeliefs, decayParcelsReward } from './bdi/beliefs.js';
 import { onSensingRevise, getCurrentIntention } from './bdi/intentionRevision.js';
 import { startExecutor } from './bdi/executor.js';
+import { updateContext, setObjective } from './llm/llmAgent.js';
 
 const socket = DjsConnect();
 
@@ -43,6 +44,7 @@ socket.on('you', (agent) => {
 socket.on('sensing', (sensing) => {
     updateBeliefs(sensing.parcels ?? [], sensing.agents ?? [], sensing.crates ?? []);
     onSensingRevise();
+    updateContext();
     logState();
 });
 
@@ -63,6 +65,14 @@ setInterval(() => {
 // ── AVVIO EXECUTOR ──────────────────────────────────────────────────────
 startExecutor(socket);
 
+// ── 5. RICEZIONE OBIETTIVO LLM ──────────────────────────────────────────
+socket.onMsg((id, name, msg, reply) => {
+    console.log(`[index] Messaggio da ${name}: ${msg}`);
+    if (typeof msg === 'string' && msg.trim() !== '') {
+        setObjective(msg);
+    }
+})
+
 // ── DEBUG: LOG DELLO STATO CORRENTE ─────────────────────────────────────
 function logState() {
     const intention = getCurrentIntention();
@@ -75,7 +85,3 @@ function logState() {
         intention?.parcelId ? `→ ${intention.parcelId}` : ''
     );
 }
-
-
-
-
