@@ -33,17 +33,15 @@ const PDDL_FALLBACK = process.env.PDDL_FALLBACK === 'true';
 
 // Maps each direction to its delta, used for the canEnter pre-check before emitMove.
 const DIR_DELTA = {
-    up:    { dx:  0, dy:  1 },
-    down:  { dx:  0, dy: -1 },
-    left:  { dx: -1, dy:  0 },
-    right: { dx:  1, dy:  0 },
+    up: { dx: 0, dy: 1 },
+    down: { dx: 0, dy: -1 },
+    left: { dx: -1, dy: 0 },
+    right: { dx: 1, dy: 0 },
 };
-
 
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Direction} Direction */
 /** @typedef {import('../shared/types.js').Position}  Position */
-
 
 /**
  * Checks if the agent is at the target position.
@@ -53,8 +51,7 @@ const DIR_DELTA = {
  */
 function isAtTarget(target) {
     if (!target) return false;
-    return Math.round(beliefs.me.x) === target.x
-        && Math.round(beliefs.me.y) === target.y;
+    return Math.round(beliefs.me.x) === target.x && Math.round(beliefs.me.y) === target.y;
 }
 
 /**
@@ -80,7 +77,7 @@ export async function startExecutor(socket) {
     let lastIntention = null;
 
     while (true) {
-        await new Promise(r => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
 
         if (!meReady()) continue;
 
@@ -129,7 +126,9 @@ async function stepTowardsTarget(socket, intention) {
     if (!intention.plan || intention.plan.length === 0) {
         const moves = await computePlan(intention);
         if (moves.length === 0) {
-            console.log(`[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`);
+            console.log(
+                `[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`
+            );
             notifyActionFailed('no_path');
             return;
         }
@@ -152,8 +151,12 @@ async function stepTowardsTarget(socket, intention) {
 
     if (!moved) {
         // Move failed, clear the plan and retry later
-        const targetTile = beliefs.grid.get(`${fxBefore + (DIR_DELTA[dir]?.dx ?? 0)},${fyBefore + (DIR_DELTA[dir]?.dy ?? 0)}`);
-        console.log(`[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) → tile=${targetTile?.type} moved=${JSON.stringify(moved)}`);
+        const targetTile = beliefs.grid.get(
+            `${fxBefore + (DIR_DELTA[dir]?.dx ?? 0)},${fyBefore + (DIR_DELTA[dir]?.dy ?? 0)}`
+        );
+        console.log(
+            `[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) → tile=${targetTile?.type} moved=${JSON.stringify(moved)}`
+        );
         intention.plan = [];
         notifyActionFailed('move_blocked');
         return;
@@ -195,7 +198,9 @@ async function computePlan(intention) {
             return pddlMoves;
         }
         if (!PDDL_FALLBACK) {
-            console.log('[executor] PDDL unavailable, no fallback configured (set PDDL_FALLBACK=true to enable A*)');
+            console.log(
+                '[executor] PDDL unavailable, no fallback configured (set PDDL_FALLBACK=true to enable A*)'
+            );
             return [];
         }
         console.log('[executor] PDDL unavailable → A* fallback');
@@ -218,7 +223,9 @@ async function finalize(socket, intention) {
     if (intention.type === 'go_pick_up') {
         const picked = await socket.emitPickup();
         if (!picked || picked.length === 0) {
-            console.log(`[executor] Empty pickup (parcel ${intention.parcelId} probably taken by another agent)`);
+            console.log(
+                `[executor] Empty pickup (parcel ${intention.parcelId} probably taken by another agent)`
+            );
             notifyActionFailed('pickup_empty');
             return;
         }
@@ -231,7 +238,9 @@ async function finalize(socket, intention) {
             if (id && !beliefs.me.carrying.includes(id)) beliefs.me.carrying.push(id);
         }
 
-        console.log(`[executor] Pickup OK: ${picked.length} parcel(s) (carrying=${beliefs.me.carrying.length})`);
+        console.log(
+            `[executor] Pickup OK: ${picked.length} parcel(s) (carrying=${beliefs.me.carrying.length})`
+        );
         notifyIntentionDone();
         return;
     }
@@ -239,7 +248,6 @@ async function finalize(socket, intention) {
     if (intention.type === 'go_deliver') {
         const dropped = await socket.emitPutdown();
 
-        
         // Remove all carried parcels locally
         for (const id of beliefs.me.carrying) {
             beliefs.parcels.delete(id);
@@ -247,7 +255,7 @@ async function finalize(socket, intention) {
         beliefs.me.carrying = [];
 
         // Remove parcels confirmed by the server
-        for (const p of (dropped ?? [])) {
+        for (const p of dropped ?? []) {
             if (p.id) beliefs.parcels.delete(p.id);
         }
 

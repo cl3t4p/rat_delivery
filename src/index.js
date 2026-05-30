@@ -7,7 +7,7 @@
  */
 
 import 'dotenv/config';
-import {DjsConnect} from '@unitn-asa/deliveroo-js-sdk/client';
+import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk/client';
 
 import { beliefs, updateMap, updateMe, updateBeliefs, decayParcelsReward } from './bdi/beliefs.js';
 import { onSensingRevise, getCurrentIntention } from './bdi/intentionRevision.js';
@@ -22,12 +22,12 @@ socket.on('map', (width, height, tiles) => {
     updateMap(tiles);
 
     // Debug stuff
-    const maxX = Math.max(...tiles.map(t => t.x));
-    const maxY = Math.max(...tiles.map(t => t.y));
+    const maxX = Math.max(...tiles.map((t) => t.x));
+    const maxY = Math.max(...tiles.map((t) => t.y));
     for (let y = maxY; y >= 0; y--) {
         let row = '';
         for (let x = 0; x <= maxX; x++) {
-            const t = tiles.find(t => t.x === x && t.y === y);
+            const t = tiles.find((t) => t.x === x && t.y === y);
             row += t ? t.type : '.';
             row += ' ';
         }
@@ -49,13 +49,12 @@ socket.on('sensing', (sensing) => {
 });
 
 // Load config
-socket.onConfig(config => {
+socket.onConfig((config) => {
     beliefs.config.PARCEL_DECADING_INTERVAL = config?.GAME?.parcels?.decaying_event ?? null;
-    beliefs.config.OBSERVATION_DISTANCE     = config?.GAME?.player?.observation_distance ?? null;
-    beliefs.config.MAX_PARCELS              = config?.GAME?.player?.capacity ?? 1;
+    beliefs.config.OBSERVATION_DISTANCE = config?.GAME?.player?.observation_distance ?? null;
+    beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
     console.log('[index] Config:', beliefs.config);
 });
-
 
 // Decay local parcels
 setInterval(() => {
@@ -71,7 +70,7 @@ socket.onMsg((id, name, msg, reply) => {
     if (typeof msg === 'string' && msg.trim() !== '') {
         setObjective(msg);
     }
-})
+});
 
 // Debug: log the current state.
 function logState() {

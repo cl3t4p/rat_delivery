@@ -2,7 +2,6 @@
  * types.js — Shared JSDoc type definitions for all project modules.
  */
 
-
 // Single Objects
 
 /** @typedef {{ x: number, y: number }} Position */
@@ -18,7 +17,6 @@
  * @property {Position[]} path - Array of tiles from the tile immediately after the start position up to and including the goal.
  * @property {Direction[]} moves - Sequence of moves to execute.
  */
-
 
 /**
  * @typedef {Object} Parcel
@@ -69,9 +67,6 @@
  * @property {GameConfig} config - Game constants received from the server.
  */
 
-
-
-
 /**
  * @typedef {Object} Intention
  * @property {IntentionType} type
@@ -83,4 +78,4 @@
  * @property {number} score - Utility value
  */
 
-export { };
+export {};

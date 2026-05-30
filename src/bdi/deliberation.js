@@ -5,7 +5,6 @@
  *
  */
 
-
 import { beliefs, manhattanDistance } from './beliefs.js';
 
 /** @typedef {import('../shared/types.js').Intention} Intention */
@@ -33,7 +32,6 @@ export function createIntention(type, parcelId, targetPos, score = 0) {
     };
 }
 
-
 /**
  * Computes and returns the best possible Intention based on the current beliefs.
  *
@@ -47,21 +45,19 @@ export function createIntention(type, parcelId, targetPos, score = 0) {
 export function getBestIntention() {
     // Current position
     if (beliefs.me.x === null || beliefs.me.y === null) {
-        console.log('[deliberation] Position unknown, waiting...')
+        console.log('[deliberation] Position unknown, waiting...');
         return createIntention('wait', null, null, 0);
     }
 
-    const me = {x: beliefs.me.x, y: beliefs.me.y};
+    const me = { x: beliefs.me.x, y: beliefs.me.y };
 
     // Case 1: carrying parcels, so consider delivery.
     if (beliefs.me.carrying.length > 0) {
-
         // Check that carried parcels still exist in the beliefs.
-        const realCarrying = beliefs.me.carrying.filter(id => beliefs.parcels.has(id));
+        const realCarrying = beliefs.me.carrying.filter((id) => beliefs.parcels.has(id));
         if (realCarrying.length === 0) {
             beliefs.me.carrying = []; // Cleanup: sensing has not updated this state yet.
         } else {
-
             // Maximum number of parcels the agent can carry.
             const capacity = beliefs.config?.MAX_PARCELS ?? 1;
 
@@ -71,7 +67,7 @@ export function getBestIntention() {
                 if (target) {
                     const dist = manhattanDistance(me, target);
                     const totalReward = beliefs.me.carrying
-                        .map(id => beliefs.parcels.get(id)?.reward ?? 0)
+                        .map((id) => beliefs.parcels.get(id)?.reward ?? 0)
                         .reduce((a, b) => a + b, 0);
                     console.log(`[deliberation] go_deliver (full) to (${target.x},${target.y})`);
                     return createIntention('go_deliver', null, target, totalReward - dist);
@@ -89,12 +85,11 @@ export function getBestIntention() {
             if (target) {
                 const dist = manhattanDistance(me, target);
                 const totalReward = beliefs.me.carrying
-                    .map(id => beliefs.parcels.get(id)?.reward ?? 0)
+                    .map((id) => beliefs.parcels.get(id)?.reward ?? 0)
                     .reduce((a, b) => a + b, 0);
                 console.log(`[deliberation] go_deliver to (${target.x},${target.y})`);
                 return createIntention('go_deliver', null, target, totalReward - dist);
             }
-
         }
     }
 
@@ -155,17 +150,24 @@ export function findBestPickUp(myPos) {
         if (parcel.carriedBy) continue; // Skip parcels that have already been picked up by another agent.
         if (parcel.reward <= 0) continue; // Skip parcels with no remaining reward.
 
-        const dist = manhattanDistance(myPos, {x: parcel.x, y: parcel.y});
+        const dist = manhattanDistance(myPos, { x: parcel.x, y: parcel.y });
         const score = parcel.reward - dist;
 
-        if(score > bestScore) {
+        if (score > bestScore) {
             bestScore = score;
-            bestIntention = createIntention('go_pick_up', parcel.id, {x: parcel.x, y: parcel.y}, score);
+            bestIntention = createIntention(
+                'go_pick_up',
+                parcel.id,
+                { x: parcel.x, y: parcel.y },
+                score
+            );
         }
     }
 
     if (bestIntention) {
-        console.log(`[deliberation] go_pick_up parcel=${bestIntention.parcelId} score=${bestIntention.score.toFixed(1)}`);
+        console.log(
+            `[deliberation] go_pick_up parcel=${bestIntention.parcelId} score=${bestIntention.score.toFixed(1)}`
+        );
     }
 
     return bestIntention;

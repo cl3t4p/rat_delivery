@@ -2,7 +2,7 @@
 import { beliefs } from './beliefs.js';
 
 const BLOCKING_TYPES = new Set(['0']);
-const ARROW_VEC = { '↑': [0,1], '→': [1,0], '↓': [0,-1], '←': [-1,0] };
+const ARROW_VEC = { '↑': [0, 1], '→': [1, 0], '↓': [0, -1], '←': [-1, 0] };
 
 /**
  * Checks whether a tile can be walked on.

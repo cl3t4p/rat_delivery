@@ -5,8 +5,8 @@
  *
  */
 
-import { beliefs } from "./beliefs.js";
-import { getBestIntention, createIntention } from "./deliberation.js";
+import { beliefs } from './beliefs.js';
+import { getBestIntention, createIntention } from './deliberation.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
@@ -50,7 +50,6 @@ export function notifyIntentionDone() {
     revise(true);
 }
 
-
 // Validity check.
 
 /**
@@ -61,18 +60,23 @@ export function notifyIntentionDone() {
  */
 function isIntentionStillValid(intention) {
     switch (intention.type) {
-        case 'go_pick_up' : {
+        case 'go_pick_up': {
             if (!intention.parcelId) return false;
             const parcel = beliefs.parcels.get(intention.parcelId);
-            if (!parcel) { // Parcel disappeared.
+            if (!parcel) {
+                // Parcel disappeared.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} disappeared`);
                 return false;
             }
-            if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) { // Parcel was picked up by another agent.
-                console.log(`[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`);
+            if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) {
+                // Parcel was picked up by another agent.
+                console.log(
+                    `[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`
+                );
                 return false;
             }
-            if (parcel.reward <= 0) { // Parcel reward has reached zero.
+            if (parcel.reward <= 0) {
+                // Parcel reward has reached zero.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} reward depleted`);
                 return false;
             }
@@ -108,9 +112,15 @@ export function revise(force = false) {
     }
 
     // If there is no active intention, create a new one
-    if (!currentIntention || currentIntention.status === 'failed' || currentIntention.status === 'done') {
+    if (
+        !currentIntention ||
+        currentIntention.status === 'failed' ||
+        currentIntention.status === 'done'
+    ) {
         currentIntention = getBestIntention();
-        console.log(`[intentionRevision] New: ${currentIntention?.type} score=${currentIntention?.score}`);
+        console.log(
+            `[intentionRevision] New: ${currentIntention?.type} score=${currentIntention?.score}`
+        );
         return;
     }
 

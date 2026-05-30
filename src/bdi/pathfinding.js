@@ -9,11 +9,9 @@
 import { beliefs } from './beliefs.js';
 import { isWalkable, canEnter } from './grid.js';
 
-
 /** @typedef {import('../shared/types.js').Position}   Position */
 /** @typedef {import('../shared/types.js').Direction}  Direction */
 /** @typedef {import('../shared/types.js').PathResult} PathResult */
-
 
 /** @typedef {string} TileKey  index as "x,y" */
 /** @typedef {{ from: TileKey, dir: Direction }} ParentLink */
@@ -34,8 +32,10 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
     const opts = { ...DEFAULT_OPTIONS, ...options };
 
     //Number is a float
-    const sx = Math.round(start.x), sy = Math.round(start.y);
-    const gx = Math.round(goal.x),  gy = Math.round(goal.y);
+    const sx = Math.round(start.x),
+        sy = Math.round(start.y);
+    const gx = Math.round(goal.x),
+        gy = Math.round(goal.y);
 
     if (sx === gx && sy === gy) return { path: [], moves: [] };
     if (!isWalkable(gx, gy)) return null;
@@ -57,10 +57,10 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
 
     /** @type {{dx: number, dy: number, dir: Direction}[]} */
     const neighbors = [
-        { dx:  1, dy:  0, dir: 'right' },
-        { dx: -1, dy:  0, dir: 'left'  },
-        { dx:  0, dy:  1, dir: 'up'    },
-        { dx:  0, dy: -1, dir: 'down'  },
+        { dx: 1, dy: 0, dir: 'right' },
+        { dx: -1, dy: 0, dir: 'left' },
+        { dx: 0, dy: 1, dir: 'up' },
+        { dx: 0, dy: -1, dir: 'down' },
     ];
 
     while (open.size > 0) {
@@ -69,7 +69,11 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
         let curNode = null;
         let bestF = Infinity;
         for (const [k, node] of open) {
-            if (node.f < bestF) { bestF = node.f; curKey = k; curNode = node; }
+            if (node.f < bestF) {
+                bestF = node.f;
+                curKey = k;
+                curNode = node;
+            }
         }
         open.delete(curKey);
 
@@ -99,7 +103,6 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
 
     return null;
 }
-
 
 /**
  * Manhattan distance between two cells, used as the A* heuristic.
@@ -162,8 +165,6 @@ export function planTo(target, options = DEFAULT_OPTIONS) {
 
     return result ? result.moves : [];
 }
-
-
 
 /**
  * Find the goal with the shortest path

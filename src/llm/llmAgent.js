@@ -33,9 +33,9 @@ export const llmClient = new OpenAI({ baseURL, apiKey });
  *   - environmentSnapshot: current game state
  */
 export const llmMemory = {
-    objective: null,            // es. "Pick up the nearest parcel and deliver it"
-    environmentSnapshot: null,  // posizione, parcels visibili, delivery tiles
-}
+    objective: null, // es. "Pick up the nearest parcel and deliver it"
+    environmentSnapshot: null, // posizione, parcels visibili, delivery tiles
+};
 
 // Context update
 
@@ -54,8 +54,8 @@ export function updateContext() {
             carrying: beliefs.me.carrying.length,
         },
         freeParcels: [...beliefs.parcels.values()]
-            .filter(p => !p.carriedBy)
-            .map(p => ({ id: p.id, x: p.x, y: p.y, reward: p.reward })),
+            .filter((p) => !p.carriedBy)
+            .map((p) => ({ id: p.id, x: p.x, y: p.y, reward: p.reward })),
         deliveryTiles: beliefs.deliveryTiles,
     };
 }

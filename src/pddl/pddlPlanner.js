@@ -41,19 +41,24 @@ const PDDL_TIMEOUT_MS = 5000;
 export async function planWithPDDL(intention) {
     const problem = buildProblem(intention);
     if (!problem) {
-        console.log(`[pddl] buildProblem returned null for ${intention.type} → ${intention.parcelId ?? ''}`);
+        console.log(
+            `[pddl] buildProblem returned null for ${intention.type} → ${intention.parcelId ?? ''}`
+        );
         return [];
     }
 
     try {
-        console.log(`[pddl] calling solver for ${intention.type} → (${intention.targetPos.x},${intention.targetPos.y})`);
+        console.log(
+            `[pddl] calling solver for ${intention.type} → (${intention.targetPos.x},${intention.targetPos.y})`
+        );
         const plan = await withTimeout(onlineSolver(domainFile, problem), PDDL_TIMEOUT_MS);
         if (!plan || plan.length === 0) {
             console.log('[pddl] solver returned empty plan');
             return [];
         }
         const moves = parsePlan(plan);
-        if (moves.length === 0) console.log('[pddl] parsePlan returned 0 moves (no move-* actions?)');
+        if (moves.length === 0)
+            console.log('[pddl] parsePlan returned 0 moves (no move-* actions?)');
         return moves;
     } catch (err) {
         console.log(`[pddl] planner failed: ${err.message ?? err}`);
@@ -96,7 +101,7 @@ function buildProblem(intention) {
 
     // Define the PDDL objects: agent, tiles, and involved parcels.
     // The target parcel for go_pick_up is added by goalForIntention only if it is still valid.
-    const tileNames = [...tiles].map(k => `t_${k.replace(',', '_')}`);
+    const tileNames = [...tiles].map((k) => `t_${k.replace(',', '_')}`);
     const parcelNames = [];
     for (const id of me.carrying) parcelNames.push(`p_${id}`);
 
@@ -120,9 +125,9 @@ function buildProblem(intention) {
         const from = `t_${x}_${y}`;
 
         addEdge(init, from, x, y, x + 1, y, 'right', tiles);
-        addEdge(init, from, x, y, x - 1, y, 'left',  tiles);
-        addEdge(init, from, x, y, x, y + 1, 'up',    tiles);
-        addEdge(init, from, x, y, x, y - 1, 'down',  tiles);
+        addEdge(init, from, x, y, x - 1, y, 'left', tiles);
+        addEdge(init, from, x, y, x, y + 1, 'up', tiles);
+        addEdge(init, from, x, y, x, y - 1, 'down', tiles);
     }
 
     // Add parcel facts for carried parcels and, when picking up, the target parcel.
@@ -152,8 +157,6 @@ function buildProblem(intention) {
     (:goal ${goal})
 )`;
 }
-
-
 
 /**
  * Builds the PDDL goal for the given intention.
@@ -188,12 +191,13 @@ function goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames
     }
     if (intention.type === 'go_deliver') {
         if (beliefs.me.carrying.length === 0) return null;
-        const drops = beliefs.me.carrying.map(id => `(not (carrying ${agentName} p_${id}))`);
+        const drops = beliefs.me.carrying.map((id) => `(not (carrying ${agentName} p_${id}))`);
         return drops.length === 1 ? drops[0] : `(and ${drops.join(' ')})`;
     }
     if (intention.type === 'explore') {
         const t = intention.targetPos;
-        const tx = Math.round(t.x), ty = Math.round(t.y);
+        const tx = Math.round(t.x),
+            ty = Math.round(t.y);
         if (!tiles.has(`${tx},${ty}`)) return null;
         return `(at ${agentName} t_${tx}_${ty})`;
     }
@@ -212,14 +216,18 @@ function goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames
  * @returns {{ goal: string, tag: string }|null} Fallback goal data, or null if no goal exists.
  */
 function nearestSpawnerGoal(agentName, mx, my, tiles) {
-    let best = null, bestDist = Infinity;
+    let best = null,
+        bestDist = Infinity;
     for (const key of tiles) {
         const tile = beliefs.grid.get(key);
         if (!tile || tile.type !== '1') continue;
         const [x, y] = key.split(',').map(Number);
         if (x === mx && y === my) continue; // già qui, sarebbe goal banale
         const d = Math.abs(x - mx) + Math.abs(y - my);
-        if (d < bestDist) { bestDist = d; best = { x, y }; }
+        if (d < bestDist) {
+            bestDist = d;
+            best = { x, y };
+        }
     }
     if (!best) return null;
     return { goal: `(at ${agentName} t_${best.x}_${best.y})`, tag: `(${best.x},${best.y})` };
@@ -277,17 +285,23 @@ function parsePlan(plan) {
     for (const step of plan) {
         const a = (step?.action ?? '').toLowerCase();
         switch (a) {
-            case 'move-right': moves.push('right'); break;
-            case 'move-left':  moves.push('left');  break;
-            case 'move-up':    moves.push('up');    break;
-            case 'move-down':  moves.push('down');  break;
+            case 'move-right':
+                moves.push('right');
+                break;
+            case 'move-left':
+                moves.push('left');
+                break;
+            case 'move-up':
+                moves.push('up');
+                break;
+            case 'move-down':
+                moves.push('down');
+                break;
             // pick-up / put-down: ignorate (gestite dall'executor)
         }
     }
     return moves;
 }
-
-
 
 /**
  * Rejects the promise after `ms` milliseconds.

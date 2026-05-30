@@ -28,8 +28,6 @@ Return ONLY this JSON, no markdown, no extra text:
   ]
 }`.trim();
 
-
-
 /**
  * Creates a natural-language plan for the given objective.
  *
@@ -41,26 +39,28 @@ Return ONLY this JSON, no markdown, no extra text:
  * @returns {Promise<string[]>} List of plan steps.
  */
 export async function createPlan(objective, environmentSnapshot) {
-	const messages = [
-		{ role: 'system', content: PLANNER_PROMPT },
-		{ role: 'user', content:
-			`Objective: ${objective}\n\n` +
-			`Current environment: \n${JSON.stringify(environmentSnapshot, null, 2)}`
-		},
-	];
+    const messages = [
+        { role: 'system', content: PLANNER_PROMPT },
+        {
+            role: 'user',
+            content:
+                `Objective: ${objective}\n\n` +
+                `Current environment: \n${JSON.stringify(environmentSnapshot, null, 2)}`,
+        },
+    ];
 
-	console.log('[planner] Calling the LLM to create a plan...');
-	const raw = await callLLM(messages, { temperature: 0 });
-	console.log('[planner] Raw output:\n', raw, '\n');
+    console.log('[planner] Calling the LLM to create a plan...');
+    const raw = await callLLM(messages, { temperature: 0 });
+    console.log('[planner] Raw output:\n', raw, '\n');
 
-	const plan = parsePlan(raw);
+    const plan = parsePlan(raw);
 
-	if (!plan || plan.length === 0) {
-		console.log('[planner] Invalid plan, using fallback.');
-		return [`Achieve the objective: ${objective}`];
-	}
+    if (!plan || plan.length === 0) {
+        console.log('[planner] Invalid plan, using fallback.');
+        return [`Achieve the objective: ${objective}`];
+    }
 
-	return plan;
+    return plan;
 }
 
 // Plan parsing
