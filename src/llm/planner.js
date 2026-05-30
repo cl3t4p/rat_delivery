@@ -1,18 +1,11 @@
 /**
- * Il planner deve:
- * 		1. ricevere l'obiettivo + stato ambiente
- * 		2. ragionare con Chain-of-Tought
- * 		3. restituire un piano JSON con una lista di step
+ * The planner must:
+ *   1. Receive the goal and environment state.
+ *   2. Reason internally.
+ *   3. Return a JSON plan containing a list of steps.
  */
 
 import { callLLM } from './llmAgent.js';
-
-// ── PROMPT DEL PLANNER ───────────────────────────────────────────────────
-/**
- * Il prompt definisce il comportamento del planner.
- * Tecnica: Chain-of-Tought -> il modello ragiona prima di produrre il piano.
- * Il piano deve essere JSON puro così il programm può parsarlo facilmente.
- */
 
 const PLANNER_PROMPT = `
 You are a planning module inside a Deliveroo.js AI agent.
@@ -35,15 +28,15 @@ Return ONLY this JSON, no markdown, no extra text:
   ]
 }`.trim();
 
-// ── FUNZIONE PRINCIPALE ───────────────────────────────────────────────────
-/**
- * Crea un piano in linguaggio naturale per raggiungere l'obiettivo.
- * 
- * @param {string} objective				obiettivo in linguaggio naturale
- * @param {object} environmentSnapshot		snapshot corrente dei beliefs
- * @returns {Promise<string[]>}				array di step del piano
- */
 
+
+/**
+ * Creates a natural-language plan to achieve the objective.
+ *
+ * @param {string} objective - Natural-language objective.
+ * @param {object} environmentSnapshot - Current beliefs snapshot.
+ * @returns {Promise<string[]>} Array of plan steps.
+ */
 export async function createPlan(objective, environmentSnapshot) {
 	const messages = [
 		{ role: 'system', content: PLANNER_PROMPT },
@@ -67,22 +60,22 @@ export async function createPlan(objective, environmentSnapshot) {
 	return plan;
 }
 
-// ── PARSING DEL PIANO ────────────────────────────────────────────────────
-/**
- * Estrae il piano JSON dall'output del modello.
- * Il modello può includere testo di Chain-of-Thought prima del JSON.
- * quindi cerchiamo il blocco JSON dentro la risposta.
- * 
- * @param {string} text 			output grezzo del modello
- * @returns {string[]|null} 		array di step o null se non parsabile
- */
+// Plan parsing.
 
+/**
+ * Extracts the JSON plan from the model output.
+ * The model may include extra text before the JSON, so this function
+ * searches for the JSON block inside the response.
+ *
+ * @param {string} text - Raw model output.
+ * @returns {string[]|null} Array of steps, or null if parsing fails.
+ */
 function parsePlan(text) {
-	// cerca il blocco JSON nell'output (dopo il CoT)
+	// find json
 	const jsonMatch = text.match(/\{[\s\S]*"steps"[\s\S]*\}/);
 	if (!jsonMatch) return null;
 
-	// rimuove eventuali backtick markdown tipo ```json
+	// clean markdown syntax like ```json
 	const cleaned = jsonMatch[0]
 		.replace(/```json/gi, '')
 		.replace(/```/g, '')

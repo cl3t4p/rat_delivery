@@ -1,10 +1,10 @@
 /**
- * index.js 
+ * index.js
  *
- * Collega il socket di Deliveroo.js ai moduli BDI.
- * Questo file è il "collante": riceve gli eventi del gioco e
- * li smista ai moduli giusti.
-*/
+ * Connects the Deliveroo.js socket to the BDI modules.
+ * This file acts as the glue layer: it receives game events
+ * and forwards them to the appropriate modules.
+ */
 
 import 'dotenv/config';
 import {DjsConnect} from '@unitn-asa/deliveroo-js-sdk/client';
@@ -16,12 +16,12 @@ import { updateContext, setObjective } from './llm/llmAgent.js';
 
 const socket = DjsConnect();
 
-// ── 1. RICEZIONE MAPPA ──────────────────────────────────────────────────
+// Receive map data.
 socket.on('map', (width, height, tiles) => {
     console.log(`[index] Map received: ${width}x${height}`);
     updateMap(tiles);
 
-    // DEBUG: stampa la griglia (usa estensione reale dai tiles)
+    // Debug stuff
     const maxX = Math.max(...tiles.map(t => t.x));
     const maxY = Math.max(...tiles.map(t => t.y));
     for (let y = maxY; y >= 0; y--) {
@@ -35,12 +35,12 @@ socket.on('map', (width, height, tiles) => {
     }
 });
 
-// ── 2. AGGIORNAMENTO "ME" ───────────────────────────────────────────────
+// Update agent
 socket.on('you', (agent) => {
     updateMe(agent);
 });
 
-// ── 3. SENSING LOOP ─────────────────────────────────────────────────────
+// Sensing loop
 socket.on('sensing', (sensing) => {
     updateBeliefs(sensing.parcels ?? [], sensing.agents ?? [], sensing.crates ?? []);
     onSensingRevise();
@@ -48,7 +48,7 @@ socket.on('sensing', (sensing) => {
     logState();
 });
 
-// ── 4. CONFIG DEL GIOCO ─────────────────────────────────────────────────
+// Load config
 socket.onConfig(config => {
     beliefs.config.PARCEL_DECADING_INTERVAL = config?.GAME?.parcels?.decaying_event ?? null;
     beliefs.config.OBSERVATION_DISTANCE     = config?.GAME?.player?.observation_distance ?? null;
@@ -57,15 +57,15 @@ socket.onConfig(config => {
 });
 
 
-// ── DECAY LOCALE DEI PARCELS ────────────────────────────────────────────
+// Decay local parcels
 setInterval(() => {
     decayParcelsReward();
 }, 1000);
 
-// ── AVVIO EXECUTOR ──────────────────────────────────────────────────────
+// Start of the executor
 startExecutor(socket);
 
-// ── 5. RICEZIONE OBIETTIVO LLM ──────────────────────────────────────────
+// Receive LLM goal.
 socket.onMsg((id, name, msg, reply) => {
     console.log(`[index] Messaggio da ${name}: ${msg}`);
     if (typeof msg === 'string' && msg.trim() !== '') {
@@ -73,7 +73,7 @@ socket.onMsg((id, name, msg, reply) => {
     }
 })
 
-// ── DEBUG: LOG DELLO STATO CORRENTE ─────────────────────────────────────
+// Debug: log the current state.
 function logState() {
     const intention = getCurrentIntention();
     console.log(

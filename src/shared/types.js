@@ -78,4 +78,4 @@
  * @property {number} score - Utility value
  */
 
-export {};
+export { };

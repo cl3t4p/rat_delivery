@@ -1,17 +1,16 @@
 /**
  * beliefs.js
  *
- * Il "taccuino" dell'agente: tutto ciò che sa sull'ambiente.
- * Viene aggiornato dai sensing events del socket.
- * Viene LETTO da deliberation.js (Persona A) e da pathfinding/executor (Persona B).
+ * It is updated by socket sensing events.
+ * It is READ by deliberation.js and by pathfinding/executor.
  *
- * Struttura:
- *   grid           → mappa fissa ricevuta alla connessione
- *   parcels        → pacchi visibili, con reward decrementato localmente
- *   agents         → altri giocatori, marcati "stale" se escono dal campo visivo
- *   me             → lo stato dell'agente stesso
- *   deliveryTiles  → cache delle caselle di consegna (tipo '2')
-*/
+ * Structure:
+ *   grid           → static map received upon connection
+ *   parcels        → visible parcels, with rewards decremented locally
+ *   agents         → other players, marked as "stale" when they leave the field of view
+ *   me             → the agent's own state
+ *   deliveryTiles  → cache of delivery tiles (type '2')
+ */
 
 /** @typedef {import('../shared/types.js').Tile}        Tile */
 /** @typedef {import('../shared/types.js').Parcel}      Parcel */
@@ -23,11 +22,11 @@
 /** @type {BeliefStore} */
 
 export const beliefs = {
-    grid: new Map(),
-    parcels: new Map(),
+	grid: new Map(),
+	parcels: new Map(),
 	agents: new Map(),
 	me: {
-		id: null, 
+		id: null,
 		name: null,
 		x: null,
 		y: null,
@@ -45,7 +44,8 @@ export const beliefs = {
 	},
 };
 
-// ── FUNZIONI ──────────────────────────────────────────────────
+
+// Functions
 
 export function updateMap(tiles) {
 	beliefs.grid.clear();
@@ -58,7 +58,7 @@ export function updateMap(tiles) {
 			delivery: tile.type === '2',
 		});
 		if (tile.type === '2') {
-			beliefs.deliveryTiles.push({x: tile.x, y: tile.y});
+			beliefs.deliveryTiles.push({ x: tile.x, y: tile.y });
 		}
 	}
 
@@ -84,7 +84,7 @@ export function updateMe(data) {
 export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 	const now = Date.now();
 
-	// ── 1. AGGIORNA PARCELS ──────────────────────────────────────────────────
+	// 1. Update parcels
 	const seenParcelIds = new Set(sensedParcels.map(p => p.id));
 
 	for (const p of sensedParcels) {
@@ -97,9 +97,9 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 			carriedBy: p.carriedBy ?? null,
 			lastSeen: now,
 		});
-        if (!existing) {
-            console.log(`[beliefs] New parcel detected: ${p.id} at (${p.x},${p.y}) reward=${p.reward}`);
-        }
+		if (!existing) {
+			console.log(`[beliefs] New parcel detected: ${p.id} at (${p.x},${p.y}) reward=${p.reward}`);
+		}
 	}
 
 	for (const [id, p] of beliefs.parcels) {
@@ -113,27 +113,27 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 
 	if (beliefs.me.id) {
 		beliefs.me.carrying = [...beliefs.parcels.values()]
-		.filter(p => p.carriedBy === beliefs.me.id)
-		.map(p => p.id);
+			.filter(p => p.carriedBy === beliefs.me.id)
+			.map(p => p.id);
 	}
 
-	// ── 2. AGGIORNA AGENTI ───────────────────────────────────────────────────
+	// 2. Update agents
 	const seenAgentIds = new Set(sensedAgents.map(a => a.id));
 
-	for(const a of sensedAgents) {
+	for (const a of sensedAgents) {
 		if (a.id === beliefs.me.id) continue;
-		beliefs.agents.set(a.id, {...a, lastSeen: now, stale: false});
+		beliefs.agents.set(a.id, { ...a, lastSeen: now, stale: false });
 	}
 
 	for (const [id, agent] of beliefs.agents) {
 		if (!seenAgentIds.has(id) && id !== beliefs.me.id) {
 			if (Date.now() - agent.lastSeen > beliefs.config.AGENT_STALE_MS) {
-				beliefs.agents.set(id, {...agent, stale: true});
+				beliefs.agents.set(id, { ...agent, stale: true });
 			}
 		}
 	}
 
-	// ── 3. AGGIORNA CRATES ───────────────────────────────────────────────────
+	// 3. Update Crates
 	beliefs.crates.clear();
 	for (const c of sensedCrates) {
 		const key = `${Math.round(c.x)},${Math.round(c.y)}`;
@@ -141,14 +141,13 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 	}
 }
 
-// ── FUNZIONI DI SUPPORTO ──────────────────────────────────────────────────
 
 export function decayParcelsReward() {
 	for (const [id, p] of beliefs.parcels) {
 		if (p.reward - 1 <= 0) {
 			beliefs.parcels.delete(id);
 		} else {
-			beliefs.parcels.set(id, {...p, reward: p.reward - 1});
+			beliefs.parcels.set(id, { ...p, reward: p.reward - 1 });
 		}
 	}
 }
@@ -163,5 +162,5 @@ export function manhattanDistance(a, b) {
 		+ Math.abs(Math.round(a.y) - Math.round(b.y));
 }
 
-// re-export da grid.js → tutti gli altri file che importano da beliefs.js non vanno toccati
+
 export { isWalkable, canEnter } from './grid.js';
