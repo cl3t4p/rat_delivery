@@ -46,9 +46,10 @@ const DIR_DELTA = {
 
 
 /**
- * Check if the agent is at the target
- * @param {Position} target 
- * @returns {boolean}
+ * Checks if the agent is at the target position.
+ *
+ * @param {Position|null} target - Target position to check.
+ * @returns {boolean} True if the agent is at the target position.
  */
 function isAtTarget(target) {
     if (!target) return false;
@@ -67,9 +68,12 @@ function meReady() {
 // Loop
 
 /**
- * Starts the executor loop. Must be called only once after creating the socket.
+ * Starts the executor loop.
  *
- * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
+ * Must be called only once after the socket is created.
+ * Reads the current intention and executes it until it is completed or fails.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send actions.
  */
 export async function startExecutor(socket) {
     /** @type {Intention | null} */
@@ -83,7 +87,7 @@ export async function startExecutor(socket) {
         const intention = getCurrentIntention();
         if (!intention) continue;
 
-        // A new intention was selected, so mark it as the current active one.
+        // Mark the new intention as active
         if (intention !== lastIntention) {
             lastIntention = intention;
             intention.status = 'active';
@@ -105,17 +109,23 @@ export async function startExecutor(socket) {
 // Step toward the target.
 
 /**
- * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
- * @param {Intention} intention
+ * Moves the agent one step toward the target of the intention.
+ *
+ * If the agent is already at the target, the intention is finalized.
+ * If there is no plan, a new one is computed.
+ * If the next step is no longer valid, the plan is cleared and recomputed later.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send moves.
+ * @param {Intention} intention - Current intention to execute.
  */
 async function stepTowardsTarget(socket, intention) {
-    // 1. is at goal ?
+    // Check if the agent is already at the target
     if (isAtTarget(intention.targetPos)) {
         await finalize(socket, intention);
         return;
     }
 
-    //2. If the plan is empty, compute it using the selected planner.
+    // If the plan is empty, compute it
     if (!intention.plan || intention.plan.length === 0) {
         const moves = await computePlan(intention);
         if (moves.length === 0) {
@@ -126,7 +136,7 @@ async function stepTowardsTarget(socket, intention) {
         intention.plan = moves;
     }
 
-    //3. Dynamic replanning: check whether the next planned tile is still valid.
+    // Check if the next step is still valid
     const next = intention.plan[0];
     if (!isStepValid(next)) {
         console.log(`[executor] Step ${next} no longer valid → replan`);
@@ -134,14 +144,14 @@ async function stepTowardsTarget(socket, intention) {
         return;
     }
 
-    // 4. Execute next step
+    // Execute the next step
     const dir = intention.plan.shift();
     const fxBefore = Math.round(beliefs.me.x);
     const fyBefore = Math.round(beliefs.me.y);
     const moved = await socket.emitMove(dir);
 
     if (!moved) {
-        // Blocked tile: discard the current plan and replan on the next iteration.
+        // Move failed, clear the plan and retry later
         const targetTile = beliefs.grid.get(`${fxBefore + (DIR_DELTA[dir]?.dx ?? 0)},${fyBefore + (DIR_DELTA[dir]?.dy ?? 0)}`);
         console.log(`[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) → tile=${targetTile?.type} moved=${JSON.stringify(moved)}`);
         intention.plan = [];
@@ -149,7 +159,7 @@ async function stepTowardsTarget(socket, intention) {
         return;
     }
 
-    // Update our position immediately instead of waiting for the next sensing update.
+    // Update the position without waiting for the next sensing update
     beliefs.me.x = moved.x;
     beliefs.me.y = moved.y;
 }
@@ -196,8 +206,13 @@ async function computePlan(intention) {
 // Final Actions
 
 /**
- * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
- * @param {Intention} intention
+ * Finalizes the current intention.
+ *
+ * For go_pick_up, tries to pick up the parcel and updates the local beliefs.
+ * For go_deliver, drops the carried parcels and removes them from the local beliefs.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send actions.
+ * @param {Intention} intention - Intention to finalize.
  */
 async function finalize(socket, intention) {
     if (intention.type === 'go_pick_up') {
@@ -208,8 +223,7 @@ async function finalize(socket, intention) {
             return;
         }
 
-        // Optimistic update: prevents the next deliberation from treating
-        // the parcel as free before the next sensing update arrives.
+        // Update beliefs before the next sensing event
         for (const p of picked) {
             const id = p.id ?? intention.parcelId;
             const parcel = beliefs.parcels.get(id);
@@ -226,13 +240,13 @@ async function finalize(socket, intention) {
         const dropped = await socket.emitPutdown();
 
         
-        // Immediate cleanup of all carried parcels.
+        // Remove all carried parcels locally
         for (const id of beliefs.me.carrying) {
             beliefs.parcels.delete(id);
         }
         beliefs.me.carrying = [];
 
-        // Then apply the server-confirmed dropped parcels.
+        // Remove parcels confirmed by the server
         for (const p of (dropped ?? [])) {
             if (p.id) beliefs.parcels.delete(p.id);
         }

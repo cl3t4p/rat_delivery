@@ -1,46 +1,51 @@
 /**
- * deliberation.js  —  Persona A
+ * deliberation.js — Person A
  *
- * La "mente decisionale" dell'agente: dato il Belief Store, sceglie cosa fare.
+ * The agent's decision-making layer: given the Belief Store, chooses what to do.
  *
- * Responsabilità:
- *   1. Genera opzioni possibili (go_pick_up per ogni parcel libero)
- *   2. Assegna uno score di utilità a ogni opzione:
- *         utilità = reward_residuo - distanza_manhattan
- *   3. Sceglie l'opzione migliore e crea un oggetto Intention
- *   4. Gestisce anche il caso in cui non ci sono parcels (→ explore)
- *
- * INTERFACCIA CON PERSONA B:
- *   - Persona B chiama getBestIntention() per sapere cosa fare
- *   - Persona B segnala actionFailed(reason) per triggerare una revisione
-*/
+ */
 
-// oggetto standard
+
 import { beliefs, manhattanDistance } from './beliefs.js';
 
-// createIntention(type, parcelId, targetPos, score = 0) -> oggetto Intention standard
-export function createIntention(type, parcelId, targetPos, score = 0) {
-    return {
-        type, // 'go_pick_up' | 'go_deliver' | 'explore' | 'wait'
-        parcelId, // id del parcel target, null se non applicabile
-        targetPos, // { x, y } destinazione, null se non applicabile
-        plan: [], // mosse: ['up','up','right',...]
-        status: 'pending', // ciclo di vita: pending -> active -> done o failed
-        createdAt: Date.now(),
-        score, // quanto vale questa intention
-    }; 
-}
-
-// ── FUNZIONE PRINCIPALE ──────────────────────────────────────────────────
+/** @typedef {import('../shared/types.js').Intention} Intention */
+/** @typedef {import('../shared/types.js').Position} Position */
+/** @typedef {import('../shared/types.js').IntentionType} IntentionType */
 
 /**
- * getBestIntention() -> calcola e restituisce la migliore Intention possibile dato lo stato corrente dei beliefs
- * 1. se sto trasportando parcels -> vai a consegnare (go_deliver)
- * 2. se ci sono parcels liberi -> vai a prendere il migliore (go_pick_up)
- * 3. altrimenti -> esplora (explore)
-*/
+ * Creates a standard Intention object.
+ *
+ * @param {IntentionType} type - Intention type.
+ * @param {string|null} parcelId - Target parcel id, or null if not applicable.
+ * @param {Position|null} targetPos - Destination position, or null if not applicable.
+ * @param {number} [score=0] - Utility score assigned to this intention.
+ * @returns {Intention}
+ */
+export function createIntention(type, parcelId, targetPos, score = 0) {
+    return {
+        type,
+        parcelId,
+        targetPos,
+        plan: [],
+        status: 'pending',
+        createdAt: Date.now(),
+        score,
+    };
+}
+
+
+/**
+ * Computes and returns the best possible Intention based on the current beliefs.
+ *
+ * Priority:
+ *   1. If carrying parcels, deliver them.
+ *   2. If free parcels are available, pick up the best one.
+ *   3. Otherwise, explore.
+ *
+ * @returns {Intention}
+ */
 export function getBestIntention() {
-    // dove sono
+    // Current position
     if (beliefs.me.x === null || beliefs.me.y === null) {
         console.log('[deliberation] Position unknown, waiting...')
         return createIntention('wait', null, null, 0);
@@ -48,19 +53,19 @@ export function getBestIntention() {
 
     const me = {x: beliefs.me.x, y: beliefs.me.y};
 
-    // ── CASO 1: Sto trasportando parcels → go_deliver ────────────────────────
+    // Case 1: carrying parcels, so consider delivery.
     if (beliefs.me.carrying.length > 0) {
 
-        // controllo: verifica che i pacchi siano davvero ancora nei beliefs
+        // Check that carried parcels still exist in the beliefs.
         const realCarrying = beliefs.me.carrying.filter(id => beliefs.parcels.has(id));
         if (realCarrying.length === 0) {
-            beliefs.me.carrying = []; // pulizia — il sensing non ha ancora aggiornato
+            beliefs.me.carrying = []; // Cleanup: sensing has not updated this state yet.
         } else {
 
-            // quanti pacchi posso portare al massimo?
+            // Maximum number of parcels the agent can carry.
             const capacity = beliefs.config?.MAX_PARCELS ?? 1;
 
-            // sono pieno → consegna subito
+            // If at full capacity, deliver immediately.
             if (beliefs.me.carrying.length >= capacity) {
                 const target = findNearestDeliveryTile(me);
                 if (target) {
@@ -73,13 +78,13 @@ export function getBestIntention() {
                 }
             }
 
-            // non sono pieno → c'è un parcel libero vicino che vale la pena raccogliere?
+            // If not at full capacity, check whether a nearby free parcel is worth picking up.
             const pickUp = findBestPickUp(me);
             if (pickUp && pickUp.score > 0) {
                 return pickUp;
             }
 
-            // nessun altro parcel conveniente → vai a consegnare quello che hai
+            // No convenient parcel found, so deliver the currently carried parcels.
             const target = findNearestDeliveryTile(me);
             if (target) {
                 const dist = manhattanDistance(me, target);
@@ -93,11 +98,11 @@ export function getBestIntention() {
         }
     }
 
-    // ── CASO 2: Ci sono parcels liberi → go_pick_up ──────────────────────────
+    // Case 2: free parcels are available, so pick one up.
     const pickUp = findBestPickUp(me);
     if (pickUp) return pickUp;
 
-    // ── CASO 3: Niente da fare → vai allo spawner più vicino ────────────────
+    // Case 3: nothing else to do, so move to the nearest spawner.
     const spawner = findNearestSpawnerTile(me);
     if (spawner) {
         if (manhattanDistance(me, spawner) === 0) {
@@ -111,9 +116,14 @@ export function getBestIntention() {
     return createIntention('wait', null, null, 0);
 }
 
-// ── FUNZIONI HELPER ──────────────────────────────────────────────────
+// Helper function
 
-// findNearestDeliveryTile(myPos) -> trova la delivery tile più vicina alla posizione corrente
+/**
+ * Finds the delivery tile nearest to the current position.
+ *
+ * @param {Position} myPos - Current position.
+ * @returns {Position|null}
+ */
 export function findNearestDeliveryTile(myPos) {
     if (beliefs.deliveryTiles.length === 0) return null;
 
@@ -131,14 +141,19 @@ export function findNearestDeliveryTile(myPos) {
     return nearest;
 }
 
-// findBestPickUp(myPos) -> cerca il parcel libero con la migliore utilità
+/**
+ * Finds the free parcel with the highest utility score.
+ *
+ * @param {Position} myPos - Current position.
+ * @returns {Intention|null}
+ */
 export function findBestPickUp(myPos) {
     let bestScore = -Infinity;
     let bestIntention = null;
 
     for (const parcel of beliefs.parcels.values()) {
-        if (parcel.carriedBy) continue; // salta i parcels già presi da qualcuno
-        if (parcel.reward <= 0) continue; // salta i parcels senza reward
+        if (parcel.carriedBy) continue; // Skip parcels that have already been picked up by another agent.
+        if (parcel.reward <= 0) continue; // Skip parcels with no remaining reward.
 
         const dist = manhattanDistance(myPos, {x: parcel.x, y: parcel.y});
         const score = parcel.reward - dist;
@@ -156,7 +171,12 @@ export function findBestPickUp(myPos) {
     return bestIntention;
 }
 
-// findNearestSpawnerTile(myPos) -> trova la tile spawner (tipo '1') più vicina
+/**
+ * Finds the spawner tile nearest to the current position.
+ *
+ * @param {Position} myPos - Current position.
+ * @returns {Position|null}
+ */
 function findNearestSpawnerTile(myPos) {
     let nearest = null;
     let nearestDist = Infinity;
@@ -172,7 +192,3 @@ function findNearestSpawnerTile(myPos) {
     }
     return nearest;
 }
-
-// ── TIPI (JSDoc) ──────────────────────────────────────────────
-// Definito in src/shared/types.js
-/** @typedef {import('../shared/types.js').Intention} Intention */

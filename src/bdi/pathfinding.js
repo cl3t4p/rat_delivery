@@ -15,7 +15,7 @@ import { isWalkable, canEnter } from './grid.js';
 /** @typedef {import('../shared/types.js').PathResult} PathResult */
 
 
-/** @typedef {string} TileKey  chiave della griglia, formato "x,y" */
+/** @typedef {string} TileKey  index as "x,y" */
 /** @typedef {{ from: TileKey, dir: Direction }} ParentLink */
 /** @typedef {Map<TileKey, ParentLink | null>} Parents */
 /** @typedef {{avoidAgents?: boolean}} PathOptions  default: {avoidAgents: true} */

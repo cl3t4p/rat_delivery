@@ -4,12 +4,28 @@ import { beliefs } from './beliefs.js';
 const BLOCKING_TYPES = new Set(['0']);
 const ARROW_VEC = { '↑': [0,1], '→': [1,0], '↓': [0,-1], '←': [-1,0] };
 
+/**
+ * Checks whether a tile can be walked on.
+ *
+ * @param {number} x
+ * @param {number} y
+ * @returns {boolean}
+ */
 export function isWalkable(x, y) {
     const tile = beliefs.grid.get(`${x},${y}`);
     if (!tile) return false;
     return !BLOCKING_TYPES.has(tile.type);
 }
 
+/**
+ * Checks whether the agent can move from one tile to another.
+ *
+ * @param {number} fromX
+ * @param {number} fromY
+ * @param {number} toX
+ * @param {number} toY
+ * @returns {boolean}
+ */
 export function canEnter(fromX, fromY, toX, toY) {
     const key = `${toX},${toY}`;
     const tile = beliefs.grid.get(key);

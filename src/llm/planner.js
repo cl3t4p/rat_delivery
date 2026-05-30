@@ -31,11 +31,14 @@ Return ONLY this JSON, no markdown, no extra text:
 
 
 /**
- * Creates a natural-language plan to achieve the objective.
+ * Creates a natural-language plan for the given objective.
  *
- * @param {string} objective - Natural-language objective.
- * @param {object} environmentSnapshot - Current beliefs snapshot.
- * @returns {Promise<string[]>} Array of plan steps.
+ * Sends the objective and the current environment snapshot to the LLM.
+ * If the model output is not valid, a simple fallback plan is returned.
+ *
+ * @param {string} objective - Objective written in natural language.
+ * @param {object} environmentSnapshot - Current environment state.
+ * @returns {Promise<string[]>} List of plan steps.
  */
 export async function createPlan(objective, environmentSnapshot) {
 	const messages = [
@@ -46,48 +49,48 @@ export async function createPlan(objective, environmentSnapshot) {
 		},
 	];
 
-	console.log('[planner] Chiamata all\'LLM per il piano...');
+	console.log('[planner] Calling the LLM to create a plan...');
 	const raw = await callLLM(messages, { temperature: 0 });
-	console.log('[planner] Output grezzo:\n', raw, '\n');
+	console.log('[planner] Raw output:\n', raw, '\n');
 
 	const plan = parsePlan(raw);
 
 	if (!plan || plan.length === 0) {
-		console.log('[planner] Piano non valido, uso fallback.');
+		console.log('[planner] Invalid plan, using fallback.');
 		return [`Achieve the objective: ${objective}`];
 	}
 
 	return plan;
 }
 
-// Plan parsing.
+// Plan parsing
 
 /**
  * Extracts the JSON plan from the model output.
- * The model may include extra text before the JSON, so this function
- * searches for the JSON block inside the response.
+ *
+ * Searches for a JSON object containing the steps field.
  *
  * @param {string} text - Raw model output.
- * @returns {string[]|null} Array of steps, or null if parsing fails.
+ * @returns {string[]|null} List of steps, or null if parsing fails.
  */
 function parsePlan(text) {
-	// find json
-	const jsonMatch = text.match(/\{[\s\S]*"steps"[\s\S]*\}/);
-	if (!jsonMatch) return null;
+    // Find JSON
+    const jsonMatch = text.match(/\{[\s\S]*"steps"[\s\S]*\}/);
+    if (!jsonMatch) return null;
 
-	// clean markdown syntax like ```json
-	const cleaned = jsonMatch[0]
-		.replace(/```json/gi, '')
-		.replace(/```/g, '')
-		.trim();
+    // Remove markdown syntax like ```json
+    const cleaned = jsonMatch[0]
+        .replace(/```json/gi, '')
+        .replace(/```/g, '')
+        .trim();
 
-	try {
-		const parsed = JSON.parse(cleaned);
-		if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
-			return parsed.steps;
-		}
-		return null;
-	} catch {
-		return null;
-	}
+    try {
+        const parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
+            return parsed.steps;
+        }
+        return null;
+    } catch {
+        return null;
+    }
 }

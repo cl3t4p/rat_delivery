@@ -20,7 +20,6 @@
 /** @typedef {import('../shared/types.js').Position}    Position */
 
 /** @type {BeliefStore} */
-
 export const beliefs = {
 	grid: new Map(),
 	parcels: new Map(),
@@ -46,7 +45,13 @@ export const beliefs = {
 
 
 // Functions
-
+/**
+ * Updates the known map tiles.
+ *
+ * Clears the old map, stores the new tiles, and saves all delivery tiles.
+ *
+ * @param {{ x: number, y: number, type: string }[]} tiles - Tiles received from the server.
+ */
 export function updateMap(tiles) {
 	beliefs.grid.clear();
 	beliefs.deliveryTiles = [];
@@ -66,8 +71,10 @@ export function updateMap(tiles) {
 }
 
 /**
-* @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent} data 
-*/
+ * Updates the agent state.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent} data 
+ */
 export function updateMe(data) {
 	beliefs.me.id = data.id;
 	beliefs.me.name = data.name;
@@ -77,9 +84,14 @@ export function updateMe(data) {
 }
 
 /**
- * @param {import('@unitn-asa/deliveroo-js-sdk').IOParcel[]} sensedParcels
- * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent[]}  sensedAgents
- * @param {import('@unitn-asa/deliveroo-js-sdk').IOCrate[]}  [sensedCrates=[]]
+ * Updates the belief store with the latest sensed objects.
+ *
+ * Updates parcels, agents, carried parcels, and crates.
+ * Old parcels are removed, while agents not seen for a while are marked as stale.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk').IOParcel[]} sensedParcels - Parcels currently visible.
+ * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent[]} sensedAgents - Agents currently visible.
+ * @param {import('@unitn-asa/deliveroo-js-sdk').IOCrate[]} [sensedCrates=[]] - Crates currently visible.
  */
 export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 	const now = Date.now();

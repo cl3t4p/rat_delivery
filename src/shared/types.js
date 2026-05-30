@@ -3,11 +3,15 @@
  */
 
 
-// Movement
+// Single Objects
 
 /** @typedef {{ x: number, y: number }} Position */
 
 /** @typedef {'up'|'down'|'left'|'right'} Direction */
+
+/** @typedef {'go_pick_up'|'go_deliver'|'explore'|'wait'} IntentionType */
+
+/** @typedef {{ type: '0'|'1'|'2'|'3', delivery: boolean }} Tile */
 
 /**
  * @typedef {Object} PathResult
@@ -15,8 +19,6 @@
  * @property {Direction[]} moves - Sequence of moves to execute.
  */
 
-// Tile / Map
-/** @typedef {{ type: '0'|'1'|'2'|'3', delivery: boolean }} Tile */
 
 /**
  * @typedef {Object} Parcel
@@ -67,9 +69,12 @@
  * @property {GameConfig} config - Game constants received from the server.
  */
 
+
+
+
 /**
  * @typedef {Object} Intention
- * @property {'go_pick_up'|'go_deliver'|'explore'|'wait'} type
+ * @property {IntentionType} type
  * @property {string|null} parcelId
  * @property {Position|null} targetPos
  * @property {Direction[]} plan - Sequence of moves
