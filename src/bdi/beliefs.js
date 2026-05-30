@@ -1,15 +1,15 @@
 /**
  * beliefs.js
  *
- * It is updated by socket sensing events.
- * It is READ by deliberation.js and by pathfinding/executor.
+ * Updated by socket sensing events.
+ * Read by deliberation.js, pathfinding.js, and executor.js.
  *
  * Structure:
- *   grid           → static map received upon connection
- *   parcels        → visible parcels, with rewards decremented locally
- *   agents         → other players, marked as "stale" when they leave the field of view
- *   me             → the agent's own state
- *   deliveryTiles  → cache of delivery tiles (type '2')
+ *   grid          - Static map received upon connection.
+ *   parcels       - Visible parcels, with rewards decremented locally.
+ *   agents        - Other players, marked as stale when they leave the field of view.
+ *   me            - The agent's own state.
+ *   deliveryTiles - Cached delivery tiles.
  */
 
 /** @typedef {import('../shared/types.js').Tile}        Tile */
