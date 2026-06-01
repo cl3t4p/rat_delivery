@@ -1,22 +1,19 @@
 /**
- * pathfinding.js  —  Persona B
+ * pathfinding.js
  *
- * BFS sulla griglia del Belief Store.
- * Restituisce una sequenza di mosse ('up'|'down'|'left'|'right')
- * pronta per essere consumata dall'executor.
- *
-*/
+ * BFS on the Belief Store grid.
+ * Returns a sequence of moves ('up', 'down', 'left', 'right')
+ * ready to be consumed by the executor.
+ */
 
 import { beliefs } from './beliefs.js';
 import { isWalkable, canEnter } from './grid.js';
 
-// Tipi condivisi (definiti in src/shared/types.js)
 /** @typedef {import('../shared/types.js').Position}   Position */
 /** @typedef {import('../shared/types.js').Direction}  Direction */
 /** @typedef {import('../shared/types.js').PathResult} PathResult */
 
-// Tipi interni al pathfinding
-/** @typedef {string} TileKey  chiave della griglia, formato "x,y" */
+/** @typedef {string} TileKey  index as "x,y" */
 /** @typedef {{ from: TileKey, dir: Direction }} ParentLink */
 /** @typedef {Map<TileKey, ParentLink | null>} Parents */
 /** @typedef {{avoidAgents?: boolean}} PathOptions  default: {avoidAgents: true} */
@@ -24,19 +21,21 @@ import { isWalkable, canEnter } from './grid.js';
 const DEFAULT_OPTIONS = { avoidAgents: true };
 
 /**
- * A* con euristica Manhattan.
+ * A* search using the Manhattan distance heuristic.
  *
- * @param {Position} start         posizione di partenza
- * @param {Position} goal          tile di destinazione
+ * @param {Position} start - Starting position.
+ * @param {Position} goal - Destination tile.
  * @param {PathOptions} [options]
  * @returns {PathResult | null}
  */
 export function aStar(start, goal, options = DEFAULT_OPTIONS) {
     const opts = { ...DEFAULT_OPTIONS, ...options };
 
-    //Because java number
-    const sx = Math.round(start.x), sy = Math.round(start.y);
-    const gx = Math.round(goal.x),  gy = Math.round(goal.y);
+    //Number is a float
+    const sx = Math.round(start.x),
+        sy = Math.round(start.y);
+    const gx = Math.round(goal.x),
+        gy = Math.round(goal.y);
 
     if (sx === gx && sy === gy) return { path: [], moves: [] };
     if (!isWalkable(gx, gy)) return null;
@@ -48,29 +47,33 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
     const parents = new Map();
     parents.set(startKey, null);
 
-    /** g-score: costo reale dallo start a un nodo */
+    /** g-score: actual cost from the start node to a given node. */
     const gScore = new Map();
     gScore.set(startKey, 0);
 
-    /** Open set: Map per dedup + scan lineare per estrarre min(f). */
+    /** Open set: Map used for deduplication and linear scan to extract min(f). */
     const open = new Map();
     open.set(startKey, { x: sx, y: sy, f: heuristic(sx, sy, gx, gy) });
 
     /** @type {{dx: number, dy: number, dir: Direction}[]} */
     const neighbors = [
-        { dx:  1, dy:  0, dir: 'right' },
-        { dx: -1, dy:  0, dir: 'left'  },
-        { dx:  0, dy:  1, dir: 'up'    },
-        { dx:  0, dy: -1, dir: 'down'  },
+        { dx: 1, dy: 0, dir: 'right' },
+        { dx: -1, dy: 0, dir: 'left' },
+        { dx: 0, dy: 1, dir: 'up' },
+        { dx: 0, dy: -1, dir: 'down' },
     ];
 
     while (open.size > 0) {
-        // estrai il nodo con f minimo
+        // Extract the node with the lowest f-score.
         let curKey = null;
         let curNode = null;
         let bestF = Infinity;
         for (const [k, node] of open) {
-            if (node.f < bestF) { bestF = node.f; curKey = k; curNode = node; }
+            if (node.f < bestF) {
+                bestF = node.f;
+                curKey = k;
+                curNode = node;
+            }
         }
         open.delete(curKey);
 
@@ -101,9 +104,9 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
     return null;
 }
 
-
 /**
- * Manhattan distance fra due celle (heuristica per A*).
+ * Manhattan distance between two cells, used as the A* heuristic.
+ *
  * @param {number} x1
  * @param {number} y1
  * @param {number} x2
@@ -115,7 +118,7 @@ function heuristic(x1, y1, x2, y2) {
 }
 
 /**
- * Ricostruisce path e moves risalendo i parent dal goal allo start.
+ * Reconstructs the path and moves by following the parent links from the goal back to the start.
  *
  * @param {Parents} parents
  * @param {TileKey} goalKey
@@ -141,9 +144,9 @@ function reconstruct(parents, goalKey, startKey) {
 }
 
 /**
- * array of moves to go to the target from the belifes.me
+ * Returns the sequence of moves needed to reach the target from beliefs.me.
  *
- * @param {Position} target                tile di destinazione
+ * @param {Position} target - Destination tile.
  * @param {PathOptions} [options]
  * @returns {Direction[]}
  */
@@ -154,16 +157,14 @@ export function planTo(target, options = DEFAULT_OPTIONS) {
 
     let result = aStar(start, target, opts);
 
-    // Fallback: se con avoidAgents non c'è path, riprova ignorando gli agenti.
-    // Loro si muovono, magari quando ci arriviamo non bloccano più.
+    // Fallback: if no path is found while avoiding agents,
+    // retry without considering agents as blockers.
     if (!result && opts.avoidAgents) {
         result = aStar(start, target, { avoidAgents: false });
     }
 
     return result ? result.moves : [];
 }
-
-
 
 /**
  * Find the goal with the shortest path
@@ -191,8 +192,8 @@ export function nearestReachable(start, goals, options = DEFAULT_OPTIONS) {
 }
 
 /**
- * Costruisce il set di tile occupate da avversari non-stale, da trattare come ostacoli.
- * Le tile di "me" non sono mai incluse (gli avversari sono già filtrati in updateBeliefs).
+ * Builds the set of tiles occupied by non-stale opponents to treat as obstacles.
+ * Tiles occupied by me are never included.
  *
  * @param {boolean} [enabled=false]
  * @returns {Set<TileKey>}

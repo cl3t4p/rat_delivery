@@ -1,18 +1,11 @@
 /**
- * Il planner deve:
- * 		1. ricevere l'obiettivo + stato ambiente
- * 		2. ragionare con Chain-of-Tought
- * 		3. restituire un piano JSON con una lista di step
+ * The planner must:
+ *   1. Receive the goal and environment state.
+ *   2. Reason internally.
+ *   3. Return a JSON plan containing a list of steps.
  */
 
 import { callLLM } from './llmAgent.js';
-
-// ── PROMPT DEL PLANNER ───────────────────────────────────────────────────
-/**
- * Il prompt definisce il comportamento del planner.
- * Tecnica: Chain-of-Tought -> il modello ragiona prima di produrre il piano.
- * Il piano deve essere JSON puro così il programm può parsarlo facilmente.
- */
 
 const PLANNER_PROMPT = `
 You are a planning module inside a Deliveroo.js AI agent.
@@ -35,66 +28,69 @@ Return ONLY this JSON, no markdown, no extra text:
   ]
 }`.trim();
 
-// ── FUNZIONE PRINCIPALE ───────────────────────────────────────────────────
 /**
- * Crea un piano in linguaggio naturale per raggiungere l'obiettivo.
- * 
- * @param {string} objective				obiettivo in linguaggio naturale
- * @param {object} environmentSnapshot		snapshot corrente dei beliefs
- * @returns {Promise<string[]>}				array di step del piano
+ * Creates a natural-language plan for the given objective.
+ *
+ * Sends the objective and the current environment snapshot to the LLM.
+ * If the model output is not valid, a simple fallback plan is returned.
+ *
+ * @param {string} objective - Objective written in natural language.
+ * @param {object} environmentSnapshot - Current environment state.
+ * @returns {Promise<string[]>} List of plan steps.
  */
-
 export async function createPlan(objective, environmentSnapshot) {
-	const messages = [
-		{ role: 'system', content: PLANNER_PROMPT },
-		{ role: 'user', content:
-			`Objective: ${objective}\n\n` +
-			`Current environment: \n${JSON.stringify(environmentSnapshot, null, 2)}`
-		},
-	];
+    const messages = [
+        { role: 'system', content: PLANNER_PROMPT },
+        {
+            role: 'user',
+            content:
+                `Objective: ${objective}\n\n` +
+                `Current environment: \n${JSON.stringify(environmentSnapshot, null, 2)}`,
+        },
+    ];
 
-	console.log('[planner] Chiamata all\'LLM per il piano...');
-	const raw = await callLLM(messages, { temperature: 0 });
-	console.log('[planner] Output grezzo:\n', raw, '\n');
+    console.log('[planner] Calling the LLM to create a plan...');
+    const raw = await callLLM(messages, { temperature: 0 });
+    console.log('[planner] Raw output:\n', raw, '\n');
 
-	const plan = parsePlan(raw);
+    const plan = parsePlan(raw);
 
-	if (!plan || plan.length === 0) {
-		console.log('[planner] Piano non valido, uso fallback.');
-		return [`Achieve the objective: ${objective}`];
-	}
+    if (!plan || plan.length === 0) {
+        console.log('[planner] Invalid plan, using fallback.');
+        return [`Achieve the objective: ${objective}`];
+    }
 
-	return plan;
+    return plan;
 }
 
-// ── PARSING DEL PIANO ────────────────────────────────────────────────────
+// Plan parsing
+
 /**
- * Estrae il piano JSON dall'output del modello.
- * Il modello può includere testo di Chain-of-Thought prima del JSON.
- * quindi cerchiamo il blocco JSON dentro la risposta.
- * 
- * @param {string} text 			output grezzo del modello
- * @returns {string[]|null} 		array di step o null se non parsabile
+ * Extracts the JSON plan from the model output.
+ *
+ * Searches for a JSON object containing the steps field.
+ *
+ * @param {string} text - Raw model output.
+ * @returns {string[]|null} List of steps, or null if parsing fails.
  */
-
 function parsePlan(text) {
-	// cerca il blocco JSON nell'output (dopo il CoT)
-	const jsonMatch = text.match(/\{[\s\S]*"steps"[\s\S]*\}/);
-	if (!jsonMatch) return null;
+    // Find JSON
+    const jsonMatch = text.match(/\{[\s\S]*"steps"[\s\S]*\}/);
+    if (!jsonMatch) return null;
 
-	// rimuove eventuali backtick markdown tipo ```json
-	const cleaned = jsonMatch[0]
-		.replace(/```json/gi, '')
-		.replace(/```/g, '')
-		.trim();
+    // Remove markdown syntax like ```json
+    const cleaned = jsonMatch[0]
+        .replace(/```json/gi, '')
+        .replace(/```/g, '')
+        .trim();
 
-	try {
-		const parsed = JSON.parse(cleaned);
-		if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
-			return parsed.steps;
-		}
-		return null;
-	} catch {
-		return null;
-	}
+    try {
+        const parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
+            return parsed.steps;
+        }
+        return null;
+    } catch {
+        return null;
+    }
 }

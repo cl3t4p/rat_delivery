@@ -1,47 +1,48 @@
 /**
  * intentionRevision.js
  *
- * Gestisce il ciclo di vita delle Intentions.
+ * Manages the lifecycle of Intentions.
  *
- * Responsabilità:
- *   1. Mantiene l'intention corrente
- *   2. Controlla se l'intention è ancora valida ad ogni sensing
- *      (es: il parcel target è sparito? Qualcuno lo ha preso?)
- *   3. Sostituisce l'intention con una migliore se ne appare una con score molto più alto
- *   4. Espone setCurrentIntention() per Persona B
- *   5. Riceve actionFailed() da Persona B per triggerare una revisione forzata
- *
- * INTERFACCIA CON PERSONA B:
- *   Persona B chiama:  getCurrentIntention()  per leggere l'intention attiva
- *   Persona B chiama:  notifyActionFailed(reason)  quando una mossa fallisce
- *   Persona B chiama:  notifyIntentionDone()  quando ha completato l'intention
-*/
+ */
 
-// ── STATO INTERNO E COSTANTI ──────────────────────────────────────────────────
-import { beliefs } from "./beliefs.js";
-import { getBestIntention, createIntention } from "./deliberation.js";
+import { beliefs } from './beliefs.js';
+import { getBestIntention, createIntention } from './deliberation.js';
 
-// soglia di miglioramento: sostituiamo l'intention corrente solo se quella nuova
+// Improvement threshold: replace the current intention only if the new one
+// is significantly better.
 const IMPROVEMENT_THRESHOLD = 5;
 
-// intention che l'agente sta perseguendo in questo momento
+/** @type {Intention|null} */
 let currentIntention = null;
 
-// ── FUNZIONI PUBBLICHE ────────────────────────────────────────────────────────
+// Public functions
 
-// getCurrentIntention() -> restituisce l'intention corrente
+/**
+ * Returns the current intention.
+ *
+ * @returns {Intention|null}
+ */
 export function getCurrentIntention() {
     return currentIntention;
 }
 
-// notifyActionFailed(reason) -> chiamata da Persona B quando una mossa fallisce
+/**
+ * Marks the current intention as failed and triggers a forced revision.
+ *
+ * @param {string} reason - Reason why the action failed.
+ * @returns {void}
+ */
 export function notifyActionFailed(reason) {
     console.log(`[intentionRevision] Failed: ${reason} → re-evaluating`);
     if (currentIntention) currentIntention.status = 'failed';
     revise(true);
 }
 
-// notifyIntentionDone() ->  chiamata da Persona B quando ha completato l'intention con successo
+/**
+ * Marks the current intention as completed and triggers a forced revision.
+ *
+ * @returns {void}
+ */
 export function notifyIntentionDone() {
     console.log(`[intentionRevision] Completed: ${currentIntention?.type}`);
     if (currentIntention) currentIntention.status = 'done';
@@ -49,23 +50,33 @@ export function notifyIntentionDone() {
     revise(true);
 }
 
-// ── FUNZIONE DI VALIDITÀ ────────────────────────────────────────────────────────
+// Validity check.
 
-// isIntentionStillValid(intention) -> controlla se l'intention corrente ha ancora senso
+/**
+ * Checks whether the current intention is still valid.
+ *
+ * @param {Intention} intention
+ * @returns {boolean}
+ */
 function isIntentionStillValid(intention) {
     switch (intention.type) {
-        case 'go_pick_up' : {
+        case 'go_pick_up': {
             if (!intention.parcelId) return false;
             const parcel = beliefs.parcels.get(intention.parcelId);
-            if (!parcel) { // sparito
+            if (!parcel) {
+                // Parcel disappeared.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} disappeared`);
                 return false;
             }
-            if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) { // preso da altri
-                console.log(`[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`);
+            if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) {
+                // Parcel was picked up by another agent.
+                console.log(
+                    `[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`
+                );
                 return false;
             }
-            if (parcel.reward <= 0) { // esaurito
+            if (parcel.reward <= 0) {
+                // Parcel reward has reached zero.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} reward depleted`);
                 return false;
             }
@@ -73,24 +84,25 @@ function isIntentionStillValid(intention) {
         }
 
         case 'go_deliver': {
-            return beliefs.me.carrying.length > 0; // valida solo se sto portando qualcosa
+            return beliefs.me.carrying.length > 0; // Valid only if i am carrying something
         }
 
         case 'explore':
         case 'wait':
-            return true;  // sempre valide
+            return true;
     }
 }
 
-// ── FUNZIONE PRINCIPALE ────────────────────────────────────────────────────────
+// Main function
 
 /**
- * revise(force = false) -> funzione principale di revisione. Chiamata:
- *   - Ad ogni sensing event (da index.js)
- *   - In modo forzato dopo un fallimento o completamento
-*/
+ * revise(force = false) - Main revision function.
+ * Called:
+ *   - On each sensing event from index.js
+ *   - In forced mode after a failure or completion
+ */
 export function revise(force = false) {
-    // ── 1. VERIFICA VALIDITÀ INTENTION CORRENTE ──────────────────────────────
+    // Check if the current intention is still valid
     if (currentIntention && currentIntention.status === 'active') {
         if (!isIntentionStillValid(currentIntention)) {
             console.log(`[intentionRevision] No longer valid: ${currentIntention.type}`);
@@ -99,14 +111,20 @@ export function revise(force = false) {
         }
     }
 
-    // ── 2. SE NON HO INTENTION ATTIVA → CALCOLA NUOVA ───────────────────────
-    if (!currentIntention || currentIntention.status === 'failed' || currentIntention.status === 'done') {
+    // If there is no active intention, create a new one
+    if (
+        !currentIntention ||
+        currentIntention.status === 'failed' ||
+        currentIntention.status === 'done'
+    ) {
         currentIntention = getBestIntention();
-        console.log(`[intentionRevision] New: ${currentIntention?.type} score=${currentIntention?.score}`);
+        console.log(
+            `[intentionRevision] New: ${currentIntention?.type} score=${currentIntention?.score}`
+        );
         return;
     }
 
-    // ── 3. HO GIÀ UN'INTENTION ATTIVA → CONFRONTA CON LA MIGLIORE ──────────
+    // If there is already an active intention, compare it with the best option
     if (!force && currentIntention.status === 'active') {
         const candidate = getBestIntention();
         if (!candidate) return;
@@ -120,8 +138,7 @@ export function revise(force = false) {
     }
 }
 
-// Chiamata da index.js ad ogni sensing
+// Called by index.js on each sensing event
 export function onSensingRevise() {
     revise(false);
 }
-
