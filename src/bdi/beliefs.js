@@ -179,21 +179,29 @@ export function manhattanDistance(a, b) {
 }
 
 /**
- * Converts a Deliveroo clock-event name into milliseconds.
+ * Converts a Deliveroo clock-event value into milliseconds.
  *
- * The server expresses parcel generation/decay rates as named clock events
- * ('frame', '1s', '2s', '5s', '10s') rather than raw numbers. A larger value
- * means the event fires less often — e.g. a higher generation interval means
- * parcels spawn more rarely, so camping a spawner pays off less.
+ * The server expresses parcel generation/decay rates either as a number (ms)
+ * or as a duration string with a unit: "<n>ms" | "<n>s" | "<n>m" (e.g. "2s",
+ * "500ms", "1m"). The special event "frame" means one clock tick (~40ms). A
+ * larger value means the event fires less often — a higher generation interval
+ * means parcels spawn more rarely, so camping a spawner pays off less.
  *
  * @param {string|number|null|undefined} event
- * @returns {number|null} interval in ms, or null if unknown / never fires.
+ * @returns {number|null} interval in ms, or null if it is not a parseable duration.
  */
 export function clockEventToMs(event) {
     if (event == null) return null;
-    if (typeof event === 'number') return event;
-    const MAP = { frame: 40, '1s': 1000, '2s': 2000, '5s': 5000, '10s': 10000 };
-    return MAP[event] ?? null;
+    if (typeof event === 'number') return Number.isFinite(event) ? event : null;
+    if (event === 'frame') return 40; // one clock tick (~25 fps)
+
+    const match = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m)?\s*$/.exec(event);
+    if (!match) return null;
+
+    const value = parseFloat(match[1]);
+    const unit = match[2] ?? 's'; // bare number defaults to seconds
+    const factor = unit === 'ms' ? 1 : unit === 'm' ? 60_000 : 1000;
+    return value * factor;
 }
 
 export { isWalkable, canEnter } from './grid.js';
