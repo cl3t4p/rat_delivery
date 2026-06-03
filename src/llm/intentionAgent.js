@@ -232,7 +232,7 @@ function buildGridMap() {
  * @param {Position} me
  * @returns {object}
  */
-function buildStateSnapshot(me) {
+export function buildStateSnapshot(me) {
     return {
         me: {
             x: me.x,
@@ -253,6 +253,10 @@ function buildStateSnapshot(me) {
         otherAgents: [...beliefs.agents.values()]
             .filter((a) => !a.stale)
             .map((a) => ({ x: a.x, y: a.y })),
+        blacklist: [...beliefs.blacklist].map((k) => {
+            const [x, y] = k.split(',').map(Number);
+            return { x, y };
+        }),
         world: {
             // How often new parcels spawn, in ms. Higher = parcels are rare,
             // so camping a spawner is less worthwhile than relocating.

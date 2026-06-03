@@ -34,6 +34,7 @@ export const beliefs = {
     },
     deliveryTiles: [],
     crates: new Map(),
+    blacklist: new Set(), // cell keys "x,y" the agent must avoid (set by the policy/LLM)
     config: {
         PARCEL_DECADING_INTERVAL: null,
         PARCEL_GENERATION_INTERVAL: null, // ms between parcel spawns (see clockEventToMs)
@@ -58,11 +59,15 @@ export function updateMap(tiles) {
 
     for (const tile of tiles) {
         const key = `${tile.x},${tile.y}`;
+        // Built-in maps send tile types as strings ('2'), but file-loaded JSON
+        // maps send them as numbers (2). Normalise to string so every '0'/'1'/'2'
+        // comparison downstream (grid walls, spawners, delivery) works either way.
+        const type = String(tile.type);
         beliefs.grid.set(key, {
-            type: tile.type,
-            delivery: tile.type === '2',
+            type,
+            delivery: type === '2',
         });
-        if (tile.type === '2') {
+        if (type === '2') {
             beliefs.deliveryTiles.push({ x: tile.x, y: tile.y });
         }
     }
@@ -202,6 +207,31 @@ export function clockEventToMs(event) {
     const unit = match[2] ?? 's'; // bare number defaults to seconds
     const factor = unit === 'ms' ? 1 : unit === 'm' ? 60_000 : 1000;
     return value * factor;
+}
+
+// Blacklisted cells
+//
+// Cells the agent must treat as impassable for now. Honoured by isWalkable /
+// canEnter (grid.js), so A* pathfinding, go_to and the executor all route
+// around them. Populated by the LLM policy (or coordination) at runtime.
+
+/** @param {number} x @param {number} y */
+export function blacklistCell(x, y) {
+    beliefs.blacklist.add(`${x},${y}`);
+}
+
+/** @param {number} x @param {number} y */
+export function unblacklistCell(x, y) {
+    beliefs.blacklist.delete(`${x},${y}`);
+}
+
+/** @param {number} x @param {number} y @returns {boolean} */
+export function isBlacklisted(x, y) {
+    return beliefs.blacklist.has(`${x},${y}`);
+}
+
+export function clearBlacklist() {
+    beliefs.blacklist.clear();
 }
 
 export { isWalkable, canEnter } from './grid.js';

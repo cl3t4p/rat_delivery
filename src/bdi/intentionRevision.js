@@ -8,6 +8,7 @@
 import { beliefs, isWalkable } from './beliefs.js';
 import { getBestIntention, createIntention } from './deliberation.js';
 import { generateBestIntention } from '../llm/intentionAgent.js';
+import { generateBestIntentionFromPolicy } from '../llm/policyAgent.js';
 import { broadcastIntention } from '../multi/notifier.js';
 import { isParcelClaimedByPeer, requestTakeover } from '../multi/coordinator.js';
 
@@ -18,6 +19,11 @@ const IMPROVEMENT_THRESHOLD = 5;
 // When enabled, the next intention is chosen by the standalone LLM agent
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
 const USE_LLM = process.env.USE_LLM === 'true';
+
+// When enabled, the LLM instead *writes* the deliberation code once and we run
+// the compiled policy every tick (see ../llm/policyAgent.js). Takes precedence
+// over USE_LLM.
+const USE_LLM_CODEGEN = process.env.USE_LLM_CODEGEN === 'true';
 
 /** @type {Intention|null} */
 let currentIntention = null;
@@ -32,6 +38,7 @@ let deliberationInFlight = false;
  * @returns {Promise<Intention>}
  */
 async function deliberate() {
+    if (USE_LLM_CODEGEN) return generateBestIntentionFromPolicy();
     if (USE_LLM) return generateBestIntention();
     return getBestIntention();
 }

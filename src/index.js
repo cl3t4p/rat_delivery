@@ -67,7 +67,9 @@ socket.on('sensing', (sensing) => {
 // Load config
 socket.onConfig((config) => {
     beliefs.config.PARCEL_DECADING_INTERVAL = config?.GAME?.parcels?.decaying_event ?? null;
-    beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(config?.GAME?.parcels?.generation_event);
+    beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(
+        config?.GAME?.parcels?.generation_event
+    );
     beliefs.config.OBSERVATION_DISTANCE = config?.GAME?.player?.observation_distance ?? null;
     beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
     console.log('[index] Config:', beliefs.config);

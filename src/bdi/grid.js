@@ -12,8 +12,10 @@ const ARROW_VEC = { '↑': [0, 1], '→': [1, 0], '↓': [0, -1], '←': [-1, 0]
  * @returns {boolean}
  */
 export function isWalkable(x, y) {
-    const tile = beliefs.grid.get(`${x},${y}`);
+    const key = `${x},${y}`;
+    const tile = beliefs.grid.get(key);
     if (!tile) return false;
+    if (beliefs.blacklist.has(key)) return false;
     return !BLOCKING_TYPES.has(tile.type);
 }
 
@@ -32,6 +34,7 @@ export function canEnter(fromX, fromY, toX, toY) {
     if (!tile) return false;
     if (BLOCKING_TYPES.has(tile.type)) return false;
     if (beliefs.crates.has(key)) return false;
+    if (beliefs.blacklist.has(key)) return false;
     const v = ARROW_VEC[tile.type];
     if (!v) return true;
     const dx = toX - fromX;

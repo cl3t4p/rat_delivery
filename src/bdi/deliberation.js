@@ -8,6 +8,17 @@
 import { beliefs, manhattanDistance } from './beliefs.js';
 import { shouldYieldParcel } from '../multi/coordinator.js';
 
+// When parcels spawn at least this rarely, camping one spawner is wasteful, so
+// we roam between spawn points instead. Compared against the already-parsed
+// beliefs.config.PARCEL_GENERATION_INTERVAL (ms, via clockEventToMs). Tunable.
+const SLOW_SPAWN_THRESHOLD_MS = Number(process.env.SLOW_SPAWN_MS) || 5000;
+
+// Normalised spawner spread (0 = single tight blob, 1 = across the whole map)
+// above which we roam regardless of spawn rate: sparse spawners mean parcels can
+// appear far apart, so we patrol them. Below it the spawners are one blob and we
+// just camp it. Tunable via SPAWNER_SPARSE_THRESHOLD.
+const SPARSE_THRESHOLD = Number(process.env.SPAWNER_SPARSE_THRESHOLD) || 0.25;
+
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
 /** @typedef {import('../shared/types.js').IntentionType} IntentionType */
@@ -98,7 +109,40 @@ export function getBestIntention() {
     const pickUp = findBestPickUp(me);
     if (pickUp) return pickUp;
 
-    // Case 3: nothing else to do, so move to the nearest spawner.
+    // Case 3: nothing else to do, so head for the spawners.
+    const genMs = beliefs.config?.PARCEL_GENERATION_INTERVAL ?? null;
+    const spawnsAreRare = genMs !== null && genMs >= SLOW_SPAWN_THRESHOLD_MS;
+    const spawners = findSpawnerTiles();
+    // Roam when spawners are scattered beyond what the agent can watch from one
+    // spot (parcels can appear out of sight) even if the spawn rate is fine; a
+    // single blob that fits in the view range is worth camping instead.
+    const sparse = spawnersAreSparse(spawners);
+
+    if (spawners.length > 1 && (spawnsAreRare || sparse)) {
+        // Don't camp one tile: roam between spawn points.
+        // Standing on a spawner → move to the next one (round-robin over a stable
+        // order); otherwise go to the nearest to start the rotation. go_to is used
+        // so arrival completes the intention and the next spawner is picked.
+        spawners.sort((a, b) => a.x - b.x || a.y - b.y);
+        const onIdx = spawners.findIndex((s) => s.x === me.x && s.y === me.y);
+        let target;
+        if (onIdx !== -1) {
+            target = spawners[(onIdx + 1) % spawners.length];
+        } else {
+            target = spawners.reduce((best, s) =>
+                manhattanDistance(me, s) < manhattanDistance(me, best) ? s : best
+            );
+        }
+        const reason = spawnsAreRare
+            ? `spawns rare (${genMs}ms)`
+            : 'spawners spread beyond view range';
+        console.log(
+            `[deliberation] ${reason} → roam to spawner (${target.x},${target.y})`
+        );
+        return createIntention('go_to', null, target, 0);
+    }
+
+    // Frequent spawns (or a single spawner): camp the nearest one.
     const spawner = findNearestSpawnerTile(me);
     if (spawner) {
         if (manhattanDistance(me, spawner) === 0) {
@@ -173,6 +217,85 @@ export function findBestPickUp(myPos) {
     }
 
     return bestIntention;
+}
+
+/**
+ * Returns every spawner tile on the known map.
+ *
+ * @returns {Position[]}
+ */
+export function findSpawnerTiles() {
+    const out = [];
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type !== '1') continue;
+        const [x, y] = key.split(',').map(Number);
+        out.push({ x, y });
+    }
+    return out;
+}
+
+/**
+ * Measures how spread out the spawner tiles are, normalised to [0, 1].
+ *
+ * 0 means every spawner sits on (essentially) one tile — a single blob;
+ * values near 1 mean they are scattered across the whole map. Computed as the
+ * mean distance of spawners from their centroid, divided by the map's
+ * half-extent so it is comparable across map sizes.
+ *
+ * @param {Position[]} [spawners] - Precomputed spawners (defaults to all).
+ * @returns {number}
+ */
+export function spawnerSparseness(spawners = findSpawnerTiles()) {
+    if (spawners.length < 2) return 0;
+
+    const cx = spawners.reduce((s, p) => s + p.x, 0) / spawners.length;
+    const cy = spawners.reduce((s, p) => s + p.y, 0) / spawners.length;
+    const meanRadius =
+        spawners.reduce((s, p) => s + Math.abs(p.x - cx) + Math.abs(p.y - cy), 0) /
+        spawners.length;
+
+    let maxX = 0;
+    let maxY = 0;
+    for (const key of beliefs.grid.keys()) {
+        const [x, y] = key.split(',').map(Number);
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+    }
+    const halfExtent = (maxX + maxY) / 2 || 1;
+    return Math.min(1, meanRadius / halfExtent);
+}
+
+/**
+ * Decides whether the spawners are spread out enough to warrant roaming rather
+ * than camping, taking the agent's view range into account.
+ *
+ * With a finite view range the key question is visibility: if a single vantage
+ * point can't keep every spawner in sight (cluster radius > view range) the
+ * agent must patrol them. With unlimited vision (OBSERVATION_DISTANCE < 0 or
+ * unset) visibility never forces roaming, so we fall back to the normalised
+ * geometric spread.
+ *
+ * @param {Position[]} [spawners] - Precomputed spawners (defaults to all).
+ * @returns {boolean}
+ */
+export function spawnersAreSparse(spawners = findSpawnerTiles()) {
+    if (spawners.length < 2) return false;
+
+    const view = beliefs.config?.OBSERVATION_DISTANCE ?? null;
+
+    const cx = spawners.reduce((s, p) => s + p.x, 0) / spawners.length;
+    const cy = spawners.reduce((s, p) => s + p.y, 0) / spawners.length;
+    // Cluster radius: farthest spawner from the centroid.
+    const radius = Math.max(
+        ...spawners.map((p) => Math.abs(p.x - cx) + Math.abs(p.y - cy))
+    );
+
+    if (view !== null && view > 0) {
+        // Finite vision: sparse if one vantage point can't watch them all.
+        return radius > view;
+    }
+    // Unlimited vision: fall back to normalised geometric spread.
+    return spawnerSparseness(spawners) >= SPARSE_THRESHOLD;
 }
 
 /**
