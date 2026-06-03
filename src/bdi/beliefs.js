@@ -36,6 +36,7 @@ export const beliefs = {
     crates: new Map(),
     config: {
         PARCEL_DECADING_INTERVAL: null,
+        PARCEL_GENERATION_INTERVAL: null, // ms between parcel spawns (see clockEventToMs)
         OBSERVATION_DISTANCE: null,
         MAX_PARCELS: 5,
         PARCEL_FORGET_MS: 5000,
@@ -175,6 +176,24 @@ export function manhattanDistance(a, b) {
     return (
         Math.abs(Math.round(a.x) - Math.round(b.x)) + Math.abs(Math.round(a.y) - Math.round(b.y))
     );
+}
+
+/**
+ * Converts a Deliveroo clock-event name into milliseconds.
+ *
+ * The server expresses parcel generation/decay rates as named clock events
+ * ('frame', '1s', '2s', '5s', '10s') rather than raw numbers. A larger value
+ * means the event fires less often — e.g. a higher generation interval means
+ * parcels spawn more rarely, so camping a spawner pays off less.
+ *
+ * @param {string|number|null|undefined} event
+ * @returns {number|null} interval in ms, or null if unknown / never fires.
+ */
+export function clockEventToMs(event) {
+    if (event == null) return null;
+    if (typeof event === 'number') return event;
+    const MAP = { frame: 40, '1s': 1000, '2s': 2000, '5s': 5000, '10s': 10000 };
+    return MAP[event] ?? null;
 }
 
 export { isWalkable, canEnter } from './grid.js';

@@ -186,6 +186,11 @@ Rules of thumb:
   reasons (camp a particular spawner, move toward a parcel-rich or contested
   area) rather than just heading to the nearest spawner. The cell must be
   walkable.
+- world.parcelGenerationMs tells you how often parcels spawn. When it is high
+  (parcels are rare, e.g. >= 5000 ms) and there is nothing good to pick up
+  nearby, do NOT camp the closest spawner — prefer go_to a different, unexplored
+  or parcel-rich region of the map to find parcels faster. When it is low
+  (parcels are frequent), staying near a spawner with explore is fine.
 - Only use wait when nothing else is possible.
 
 Answer ONLY by calling one tool. Do not write prose.`.trim();
@@ -248,6 +253,12 @@ function buildStateSnapshot(me) {
         otherAgents: [...beliefs.agents.values()]
             .filter((a) => !a.stale)
             .map((a) => ({ x: a.x, y: a.y })),
+        world: {
+            // How often new parcels spawn, in ms. Higher = parcels are rare,
+            // so camping a spawner is less worthwhile than relocating.
+            parcelGenerationMs: beliefs.config.PARCEL_GENERATION_INTERVAL,
+            maxCarry: beliefs.config.MAX_PARCELS,
+        },
     };
 }
 
