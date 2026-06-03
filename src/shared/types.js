@@ -8,7 +8,7 @@
 
 /** @typedef {'up'|'down'|'left'|'right'} Direction */
 
-/** @typedef {'go_pick_up'|'go_deliver'|'explore'|'wait'} IntentionType */
+/** @typedef {'go_pick_up'|'go_deliver'|'explore'|'go_to'|'wait'} IntentionType */
 
 /** @typedef {{ type: '0'|'1'|'2'|'3', delivery: boolean }} Tile */
 
@@ -76,6 +76,84 @@
  * @property {'pending'|'active'|'done'|'failed'} status
  * @property {number} createdAt - `Date.now()`.
  * @property {number} score - Utility value
+ */
+
+// Multi-agent message protocol (Phase 2)
+
+/** @typedef {'belief_update'|'intention_update'|'request'|'response'} MsgType */
+
+/** @typedef {'take_parcel'|'avoid_tile'|'status_check'} RequestAction */
+
+/**
+ * Common message envelope used for every BDI ↔ LLM message.
+ *
+ * @template {object} [P=object]
+ * @typedef {Object} Envelope
+ * @property {string|null} from - Sender id (`beliefs.me.id`), or `null` if unknown at send time.
+ * @property {string|'broadcast'} to - Recipient id, or the literal `'broadcast'` for shouts.
+ * @property {MsgType} type
+ * @property {number} ts - `Date.now()` — also used as the message id for request/response correlation.
+ * @property {P} payload
+ */
+
+/**
+ * Slim parcel snapshot sent inside a `belief_update` payload.
+ *
+ * @typedef {Object} ParcelDelta
+ * @property {string} id
+ * @property {number} x
+ * @property {number} y
+ * @property {number} reward
+ * @property {string|null} carriedBy
+ */
+
+/**
+ * Slim agent snapshot sent inside a `belief_update` payload.
+ *
+ * @typedef {Object} AgentDelta
+ * @property {string} id
+ * @property {number} x
+ * @property {number} y
+ * @property {boolean} stale
+ */
+
+/**
+ * Slim self snapshot sent inside a `belief_update` payload.
+ *
+ * @typedef {Object} MeDelta
+ * @property {number|null} x
+ * @property {number|null} y
+ * @property {number} carrying - Number of parcels being carried.
+ */
+
+/**
+ * @typedef {Object} BeliefUpdatePayload
+ * @property {ParcelDelta[]} parcels - Only newly seen / changed parcels.
+ * @property {AgentDelta[]} agents - Only changed agents (new, moved, stale flip).
+ * @property {MeDelta} me - Own current position and carrying count.
+ */
+
+/**
+ * @typedef {Object} IntentionUpdatePayload
+ * @property {Object} intention
+ * @property {IntentionType} intention.type
+ * @property {string|null} intention.parcelId
+ * @property {Position|null} intention.targetPos
+ * @property {'pending'|'active'|'done'|'failed'} intention.status
+ */
+
+/**
+ * @typedef {Object} RequestPayload
+ * @property {RequestAction} action
+ * @property {string} [parcelId] - Required for `take_parcel`.
+ * @property {Position} [tile] - Required for `avoid_tile`.
+ */
+
+/**
+ * @typedef {Object} ResponsePayload
+ * @property {number} requestId - `ts` of the request being answered.
+ * @property {boolean} accepted
+ * @property {'ok'|'already_carrying'|'out_of_range'|'unknown'} reason
  */
 
 export {};

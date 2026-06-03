@@ -8,7 +8,7 @@
 import 'dotenv/config';
 import OpenAI from 'openai';
 import { beliefs } from '../bdi/beliefs.js';
-import { createPlan } from './planner.js';
+import { revise } from '../bdi/intentionRevision.js';
 
 // Config
 
@@ -64,7 +64,8 @@ export function updateContext() {
 
 /**
  * Receives a new objective in natural language from the Deliveroo chat
- * and saves it in the LLM memory.
+ * and saves it in the LLM memory. The objective is then used as extra
+ * context by the LLM intention agent on its next deliberation.
  *
  * Called by index.js when a message arrives through socket.onMsg.
  *
@@ -73,7 +74,7 @@ export function updateContext() {
 export async function setObjective(objectiveText) {
     console.log(`[llmAgent] New objective: "${objectiveText}"`);
 
-    // Save the objective in memory
+    // Save the objective in memory so the intention agent can read it.
     llmMemory.objective = objectiveText;
 
     // Update the environment snapshot
@@ -81,17 +82,17 @@ export async function setObjective(objectiveText) {
 
     console.log('[llmAgent] Updated memory:', JSON.stringify(llmMemory, null, 2));
 
-    // Create a plan
-    const plan = await createPlan(llmMemory.objective, llmMemory.environmentSnapshot);
-    console.log('[llmAgent] Generated plan:', plan);
+    // Force a re-deliberation so the new objective is taken into account.
+    await revise(true);
 }
 
 // Model call
 
 /**
- * Sends a request to the LLM.
+ * Sends a plain chat request to the LLM (no tools).
  *
- * Used by planner.js, replanner.js, and the execution loop.
+ * Kept as a generic helper for free-text prompts. The intention agent uses
+ * the shared `llmClient` directly so it can pass tool definitions.
  *
  * @param {object[]} messages - Messages in OpenAI format.
  * @param {number} temperature - 0 for deterministic output, higher values for more variation.

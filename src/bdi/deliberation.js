@@ -6,6 +6,7 @@
  */
 
 import { beliefs, manhattanDistance } from './beliefs.js';
+import { shouldYieldParcel } from '../multi/coordinator.js';
 
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
@@ -149,6 +150,7 @@ export function findBestPickUp(myPos) {
     for (const parcel of beliefs.parcels.values()) {
         if (parcel.carriedBy) continue; // Skip parcels that have already been picked up by another agent.
         if (parcel.reward <= 0) continue; // Skip parcels with no remaining reward.
+        if (shouldYieldParcel(parcel.id, myPos)) continue; // Peer claimed it and is closer.
 
         const dist = manhattanDistance(myPos, { x: parcel.x, y: parcel.y });
         const score = parcel.reward - dist;
@@ -179,7 +181,7 @@ export function findBestPickUp(myPos) {
  * @param {Position} myPos - Current position.
  * @returns {Position|null}
  */
-function findNearestSpawnerTile(myPos) {
+export function findNearestSpawnerTile(myPos) {
     let nearest = null;
     let nearestDist = Infinity;
 

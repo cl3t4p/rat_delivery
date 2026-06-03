@@ -17,6 +17,7 @@ import {
     notifyIntentionDone,
     notifyActionFailed,
 } from './intentionRevision.js';
+import { broadcastIntention } from '../multi/notifier.js';
 
 // Planner selection:
 //
@@ -88,6 +89,7 @@ export async function startExecutor(socket) {
         if (intention !== lastIntention) {
             lastIntention = intention;
             intention.status = 'active';
+            broadcastIntention(intention);
         }
 
         switch (intention.type) {
@@ -95,6 +97,7 @@ export async function startExecutor(socket) {
                 continue;
 
             case 'explore':
+            case 'go_to':
             case 'go_pick_up':
             case 'go_deliver':
                 await stepTowardsTarget(socket, intention);
@@ -260,6 +263,13 @@ async function finalize(socket, intention) {
         }
 
         console.log(`[executor] Delivery OK: ${(dropped ?? []).length} parcel(s)`);
+        notifyIntentionDone();
+        return;
+    }
+
+    if (intention.type === 'go_to') {
+        // Pure positioning: nothing to pick up or drop, the target was reached.
+        console.log(`[executor] Reached (${intention.targetPos.x},${intention.targetPos.y})`);
         notifyIntentionDone();
         return;
     }
