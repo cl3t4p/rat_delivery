@@ -11,6 +11,7 @@ import { generateBestIntention } from '../llm/intentionAgent.js';
 import { generateBestIntentionFromPolicy } from '../llm/policyAgent.js';
 import { broadcastIntention } from '../multi/notifier.js';
 import { isParcelClaimedByPeer, requestTakeover } from '../multi/coordinator.js';
+import { MSG_TYPE, onMessage } from '../multi/communication.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
@@ -233,4 +234,48 @@ export async function revise(force = false) {
 // Called by index.js on each sensing event
 export function onSensingRevise() {
     revise(false);
+}
+
+/**
+ * Registers the handler for incoming ZONE_ASSIGN messages.
+ *
+ * Converts a zone assignment into a go_to intention toward the zone center.
+ * Accepted only if the assignment score exceeds the current intention score
+ * by at least IMPROVEMENT_THRESHOLD, so the LLM cannot interrupt a
+ * high-value pickup mid-execution.
+ *
+ * Call once from index.js after initCoordinator().
+ */
+export function initZoneAssignHandler() {
+    onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {
+        const { targetId, center, totalReward } = envelope.payload ?? {};
+
+        // Ignore assignments meant for the other agent.
+        if (targetId !== beliefs.me.id) return;
+        if (!center) return;
+
+        const score = totalReward ?? 0;
+
+        if (
+            currentIntention &&
+            currentIntention.status === 'active' &&
+            score - currentIntention.score <= IMPROVEMENT_THRESHOLD
+        ) {
+            console.log(
+                `[intentionRevision] Zone assign ignored: score=${score} not better than current=${currentIntention.score}`
+            );
+            return;
+        }
+
+        const intention = createIntention('go_to', null, center, score);
+        console.log(
+            `[intentionRevision] Zone assign accepted → go_to (${center.x},${center.y}) score=${score}`
+        );
+
+        if (currentIntention) {
+            currentIntention.status = 'failed';
+            broadcastIntention(currentIntention);
+        }
+        commitNewIntention(intention);
+    });
 }
