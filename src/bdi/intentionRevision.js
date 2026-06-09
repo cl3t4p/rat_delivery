@@ -183,6 +183,7 @@ function isIntentionStillValid(intention) {
         }
 
         case 'go_handoff':
+        case 'go_handoff_receive':
             return !!intention.targetPos;
 
         case 'explore':
@@ -304,4 +305,19 @@ export function initZoneAssignHandler() {
         }
         commitNewIntention(intention);
     });
+}
+
+/**
+ * Forces a specific intention immediately, bypassing deliberation.
+ * Used by the coordinator to assign go_handoff_receive to agent B.
+ *
+ * @param {Intention} intention
+ */
+export function forceIntention(intention) {
+    if (currentIntention) {
+        currentIntention.status = 'failed';
+        broadcastIntention(currentIntention);
+    }
+    commitNewIntention(intention);
+    console.log(`[intentionRevision] Forced: ${intention.type}`);
 }

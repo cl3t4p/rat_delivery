@@ -105,6 +105,9 @@ export async function startExecutor(socket) {
             case 'go_handoff':
                 await executeHandoff(socket, intention);
                 continue;
+            case 'go_handoff_receive':
+                await executeHandoffReceive(socket, intention);
+                continue;
         }
     }
 }
@@ -302,4 +305,42 @@ async function executeHandoff(socket, intention) {
 
     console.log(`[executor] Handoff: parcels dropped at (${intention.targetPos.x},${intention.targetPos.y})`);
     notifyIntentionDone();
+}
+
+/**
+ * Executes a handoff-receive intention: B walks to the meetTile,
+ * picks up all parcels dropped there by A, then delivers them.
+ *
+ * After emitPickup the normal BDI loop takes over: the next
+ * revise() call will see carrying > 0 and produce go_deliver.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
+ * @param {Intention} intention
+ */
+async function executeHandoffReceive(socket, intention) {
+    if (!isAtTarget(intention.targetPos)) {
+        await stepTowardsTarget(socket, intention);
+        return;
+    }
+
+    // At meetTile: pick up everything on the ground
+    const picked = await socket.emitPickup();
+
+    if (!picked || picked.length === 0) {
+        // Parcels not here yet or already gone — fail and let BDI re-deliberate
+        console.log('[executor] Handoff receive: nothing to pick up, retrying...');
+        notifyActionFailed('pickup_empty');
+        return;
+    }
+
+    // Update beliefs before the next sensing event
+    for (const p of picked) {
+        const id = p.id;
+        const parcel = beliefs.parcels.get(id);
+        if (parcel) parcel.carriedBy = beliefs.me.id;
+        if (id && !beliefs.me.carrying.includes(id)) beliefs.me.carrying.push(id);
+    }
+
+    console.log(`[executor] Handoff receive OK: picked up ${picked.length} parcel(s)`);
+    notifyIntentionDone(); // triggers revise() → go_deliver
 }

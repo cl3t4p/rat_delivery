@@ -15,8 +15,8 @@
 import { beliefs, manhattanDistance } from '../bdi/beliefs.js';
 import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast } from './communication.js';
 import { callZoneAssignment } from '../llm/llmAgent.js';
-import { getCurrentIntention } from '../bdi/intentionRevision.js';
-import { findNearestDeliveryTile } from '../bdi/deliberation.js';
+import { getCurrentIntention, forceIntention } from '../bdi/intentionRevision.js';
+import { findNearestDeliveryTile, createIntention } from '../bdi/deliberation.js';
 
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
 /** @typedef {import('../shared/types.js').Position} Position */
@@ -518,6 +518,9 @@ function handleHandoffRequest(envelope, senderId) {
 
     replyTo(envelope, true, 'ok');
     console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
+
+    const receiveIntention = createIntention('go_handoff_receive', null, meetTile, 0);
+    forceIntention(receiveIntention);
 }
 
 // Helpers
