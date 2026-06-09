@@ -102,6 +102,9 @@ export async function startExecutor(socket) {
             case 'go_deliver':
                 await stepTowardsTarget(socket, intention);
                 continue;
+            case 'go_handoff':
+                await executeHandoff(socket, intention);
+                continue;
         }
     }
 }
@@ -273,4 +276,30 @@ async function finalize(socket, intention) {
         notifyIntentionDone();
         return;
     }
+}
+
+/**
+ * Executes a handoff intention: walks to the meetTile and puts down all parcels.
+ * The peer will pick them up and deliver them.
+ * After put_down, A resumes normal deliberation.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
+ * @param {Intention} intention
+ */
+async function executeHandoff(socket, intention) {
+    if (!isAtTarget(intention.targetPos)) {
+        await stepTowardsTarget(socket, intention);
+        return;
+    }
+
+    // At meetTile: drop all parcels
+    await socket.emitPutdown();
+    for (const id of beliefs.me.carrying) {
+        const parcel = beliefs.parcels.get(id);
+        if (parcel) parcel.carriedBy = null;
+    }
+    beliefs.me.carrying = [];
+
+    console.log(`[executor] Handoff: parcels dropped at (${intention.targetPos.x},${intention.targetPos.y})`);
+    notifyIntentionDone();
 }

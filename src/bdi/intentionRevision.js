@@ -10,7 +10,8 @@ import { getBestIntention, createIntention } from './deliberation.js';
 import { generateBestIntention } from '../llm/intentionAgent.js';
 import { generateBestIntentionFromPolicy } from '../llm/policyAgent.js';
 import { broadcastIntention } from '../multi/notifier.js';
-import { isParcelClaimedByPeer, requestTakeover } from '../multi/coordinator.js';
+import { isParcelClaimedByPeer, requestTakeover, evaluateHandoff, requestHandoff } from '../multi/coordinator.js';
+import { MSG_TYPE, onMessage } from '../multi/communication.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
@@ -81,6 +82,29 @@ export function notifyIntentionDone() {
         broadcastIntention(currentIntention);
     }
     currentIntention = null;
+
+    // After each pickup, check if a handoff to the peer is beneficial.
+    if (beliefs.me.carrying.length >= 2) {
+        const handoff = evaluateHandoff();
+        if (handoff) {
+            console.log(`[intentionRevision] Proposing handoff to ${handoff.peerId}`);
+            requestHandoff(handoff.meetTile, handoff.peerId)
+                .then((res) => {
+                    if (res.accepted) {
+                        console.log(`[intentionRevision] Handoff accepted → go_handoff`);
+                        const intention = createIntention(
+                            'go_handoff', null, handoff.meetTile, 0
+                        );
+                        commitNewIntention(intention);
+                    } else {
+                        revise(true);
+                    }
+                })
+                .catch(() => revise(true));
+            return;
+        }
+    }
+
     revise(true);
 }
 
@@ -158,6 +182,9 @@ function isIntentionStillValid(intention) {
             return isWalkable(intention.targetPos.x, intention.targetPos.y);
         }
 
+        case 'go_handoff':
+            return !!intention.targetPos;
+
         case 'explore':
         case 'wait':
             return true;
@@ -233,4 +260,48 @@ export async function revise(force = false) {
 // Called by index.js on each sensing event
 export function onSensingRevise() {
     revise(false);
+}
+
+/**
+ * Registers the handler for incoming ZONE_ASSIGN messages.
+ *
+ * Converts a zone assignment into a go_to intention toward the zone center.
+ * Accepted only if the assignment score exceeds the current intention score
+ * by at least IMPROVEMENT_THRESHOLD, so the LLM cannot interrupt a
+ * high-value pickup mid-execution.
+ *
+ * Call once from index.js after initCoordinator().
+ */
+export function initZoneAssignHandler() {
+    onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {
+        const { targetId, center, totalReward } = envelope.payload ?? {};
+
+        // Ignore assignments meant for the other agent.
+        if (targetId !== beliefs.me.id) return;
+        if (!center) return;
+
+        const score = totalReward ?? 0;
+
+        if (
+            currentIntention &&
+            currentIntention.status === 'active' &&
+            score - currentIntention.score <= IMPROVEMENT_THRESHOLD
+        ) {
+            console.log(
+                `[intentionRevision] Zone assign ignored: score=${score} not better than current=${currentIntention.score}`
+            );
+            return;
+        }
+
+        const intention = createIntention('go_to', null, center, score);
+        console.log(
+            `[intentionRevision] Zone assign accepted → go_to (${center.x},${center.y}) score=${score}`
+        );
+
+        if (currentIntention) {
+            currentIntention.status = 'failed';
+            broadcastIntention(currentIntention);
+        }
+        commitNewIntention(intention);
+    });
 }

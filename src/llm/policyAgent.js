@@ -185,15 +185,26 @@ function extractBody(raw) {
  * Asks the LLM to write the policy body, compiles it, smoke-tests it against the
  * current state, and caches it. On any failure leaves cachedFn = null.
  *
+ * The user message is built in three parts, in order of priority:
+ *   1. Constraints (NEVER violate these) — accumulated from past messages.
+ *   2. Current objective — the latest strategy received.
+ *   3. The generation instruction.
+ *
  * @param {Position} me
  * @returns {Promise<void>}
  */
 async function generatePolicy(me) {
     const objective = llmMemory.objective || '∅';
-    const userContent =
-        objective !== '∅'
-            ? `Operator objective to prioritise: "${objective}"\n\nWrite the function body now.`
-            : 'Write the function body now.';
+
+    const constraintBlock = llmMemory.constraints.length > 0
+        ? `Constraints (NEVER violate these):\n${llmMemory.constraints.map((c) => `- ${c}`).join('\n')}\n\n`
+        : '';
+
+    const objectiveBlock = objective !== '∅'
+        ? `Current objective: "${objective}"\n\n`
+        : '';
+
+    const userContent = constraintBlock + objectiveBlock + 'Write the function body now.';
 
     const response = await llmClient.chat.completions.create({
         model: MODEL,
@@ -219,7 +230,8 @@ async function generatePolicy(me) {
     }
 
     cachedFn = fn;
-    cachedKey = objective;
+    // The cache key includes both objective and constraints so the policy is regenerated whenever either changes.
+    cachedKey = objective + '|' + llmMemory.constraints.join('|');
     console.log(
         `[policyAgent] Generated policy for objective "${objective}":\n` +
             '----------------------------------------\n' +
@@ -243,7 +255,9 @@ export async function generateBestIntentionFromPolicy() {
 
     // Regenerate when the objective changed since the cached policy was built.
     const objective = llmMemory.objective || '∅';
-    if (cachedFn && cachedKey !== objective) {
+    // Build the same composite key used in generatePolicy to detect staleness.
+    const currentKey = objective + '|' + llmMemory.constraints.join('|');
+    if (cachedFn && cachedKey !== currentKey) {
         cachedFn = null;
     }
 

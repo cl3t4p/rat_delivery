@@ -7,7 +7,7 @@
 
 import 'dotenv/config';
 import OpenAI from 'openai';
-import { beliefs } from '../bdi/beliefs.js';
+import { beliefs, blacklistCell } from '../bdi/beliefs.js';
 import { revise } from '../bdi/intentionRevision.js';
 
 // Config
@@ -17,7 +17,7 @@ const apiKey = process.env.LITELLM_API_KEY;
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 
 if (!apiKey) {
-    console.error('[llmAgent] LITELLM_API_KEY mancante nel .env');
+    console.error('[llmAgent] LITELLM_API_KEY missing in .env');
     process.exit(1);
 }
 
@@ -29,13 +29,38 @@ export const llmClient = new OpenAI({ baseURL, apiKey });
  * Memory used by the LLM agent.
  *
  * Contains the information needed before planning:
- *   - objective: task received in natural language
- *   - environmentSnapshot: current game state
+ *   - objective: current strategy in natural language; replaced on each new strategic message.
+ *   - constraints: rules that must never be violated; accumulated over time and never reset.
+ *   - environmentSnapshot: latest game state; updated on every sensing tick.
  */
 export const llmMemory = {
-    objective: null, // es. "Pick up the nearest parcel and deliver it"
-    environmentSnapshot: null, // posizione, parcels visibili, delivery tiles
+    objective: null, // e.g. "Focus on the top-left area"
+    constraints: [],
+    environmentSnapshot: null, // position, visible parcels, delivery tiles
 };
+
+/**
+ * Keywords that identify a constraint message.
+ * If any keyword is found in the incoming text, the message is treated as a
+ * constraint rather than a strategy.
+ */
+const CONSTRAINT_KEYWORDS = ['avoid', 'do not enter', 'ignore', 'block', 'stay away'];
+
+/**
+ * Returns true if the message text describes a constraint.
+ */
+function isConstraint(text) {
+    const lower = text.toLowerCase();
+    return CONSTRAINT_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+/**
+ * Extracts (x, y) cell coordinates from a message text.
+ */
+function extractCells(text) {
+    const matches = [...text.matchAll(/(\d+)[,\s]+(\d+)/g)];
+    return matches.map((m) => ({ x: parseInt(m[1]), y: parseInt(m[2]) }));
+}
 
 // Context update
 
@@ -72,17 +97,23 @@ export function updateContext() {
  * @param {string} objectiveText - Example: "Pick up the nearest parcel and deliver it".
  */
 export async function setObjective(objectiveText) {
-    console.log(`[llmAgent] New objective: "${objectiveText}"`);
+    console.log(`[llmAgent] Message received: "${objectiveText}"`);
 
-    // Save the objective in memory so the intention agent can read it.
-    llmMemory.objective = objectiveText;
+    if (isConstraint(objectiveText)) {
+        llmMemory.constraints.push(objectiveText);
+        console.log(`[llmAgent] Constraint added. Total: ${llmMemory.constraints.length}`);
 
-    // Update the environment snapshot
+        const cells = extractCells(objectiveText);
+        for (const cell of cells) {
+            blacklistCell(cell.x, cell.y);
+            console.log(`[llmAgent] Blacklisted cell (${cell.x},${cell.y})`);
+        }
+    } else {
+        llmMemory.objective = objectiveText;
+        console.log(`[llmAgent] New strategy: "${objectiveText}"`);
+    }
+
     updateContext();
-
-    console.log('[llmAgent] Updated memory:', JSON.stringify(llmMemory, null, 2));
-
-    // Force a re-deliberation so the new objective is taken into account.
     await revise(true);
 }
 
@@ -106,3 +137,52 @@ export async function callLLM(messages, { temperature = 0 } = {}) {
     });
     return response.choices?.[0]?.message?.content ?? '';
 }
+
+/**
+ * Calls the LLM with aggregated zone data and returns a zone assignment
+ * for each agent. Used by the coordinator zone-assignment loop.
+ *
+ * Zones: topLeft, topRight, bottomLeft, bottomRight.
+ * Each zone is described by three numbers: totalReward, freeParcels, spawnerCount.
+ *
+ * @param {object} zoneStats - { topLeft, topRight, bottomLeft, bottomRight }
+ *   each with { totalReward: number, freeParcels: number, spawnerCount: number }
+ * @param {{ x: number, y: number }} posA - Current position of agent A.
+ * @param {{ x: number, y: number }} posB - Current position of agent B.
+ * @returns {Promise<{ assignA: string, assignB: string } | null>}
+ *   Zone names for each agent, or null on failure.
+ */
+export async function callZoneAssignment(zoneStats, posA, posB) {
+    const prompt = [
+        'You assign two delivery agents to map zones to maximise total parcel reward.',
+        '',
+        'Zones (totalReward / freeParcels / spawners):',
+        ...Object.entries(zoneStats).map(
+            ([name, s]) => `  ${name}: reward=${s.totalReward} parcels=${s.freeParcels} spawners=${s.spawnerCount}`
+        ),
+        '',
+        `Agent A is at (${posA.x},${posA.y}).`,
+        `Agent B is at (${posB.x},${posB.y}).`,
+        '',
+        'Reply with ONLY a JSON object, no prose, no markdown:',
+        '{"assignA":"<zoneName>","assignB":"<zoneName>"}',
+        'Zone names: topLeft, topRight, bottomLeft, bottomRight.',
+    ].join('\n');
+
+    try {
+        const raw = await callLLM([{ role: 'user', content: prompt }]);
+        const clean = raw.replace(/```[a-z]*|```/gi, '').trim();
+        const parsed = JSON.parse(clean);
+        const valid = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+        if (!valid.includes(parsed.assignA) || !valid.includes(parsed.assignB)) {
+            console.log('[llmAgent] Zone assignment returned invalid zone names:', parsed);
+            return null;
+        }
+        console.log(`[llmAgent] Zone assignment: A→${parsed.assignA} B→${parsed.assignB}`);
+        return parsed;
+    } catch (err) {
+        console.log(`[llmAgent] Zone assignment failed (${err.message})`);
+        return null;
+    }
+}
+
