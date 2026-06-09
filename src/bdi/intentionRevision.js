@@ -1,71 +1,147 @@
 /**
  * intentionRevision.js
  *
- * Gestisce il ciclo di vita delle Intentions.
+ * Manages the lifecycle of Intentions.
  *
- * Responsabilità:
- *   1. Mantiene l'intention corrente
- *   2. Controlla se l'intention è ancora valida ad ogni sensing
- *      (es: il parcel target è sparito? Qualcuno lo ha preso?)
- *   3. Sostituisce l'intention con una migliore se ne appare una con score molto più alto
- *   4. Espone setCurrentIntention() per Persona B
- *   5. Riceve actionFailed() da Persona B per triggerare una revisione forzata
- *
- * INTERFACCIA CON PERSONA B:
- *   Persona B chiama:  getCurrentIntention()  per leggere l'intention attiva
- *   Persona B chiama:  notifyActionFailed(reason)  quando una mossa fallisce
- *   Persona B chiama:  notifyIntentionDone()  quando ha completato l'intention
-*/
+ */
 
-// ── STATO INTERNO E COSTANTI ──────────────────────────────────────────────────
-import { beliefs } from "./beliefs.js";
-import { getBestIntention, createIntention } from "./deliberation.js";
+import { beliefs, isWalkable } from './beliefs.js';
+import { getBestIntention, createIntention } from './deliberation.js';
+import { generateBestIntention } from '../llm/intentionAgent.js';
+import { generateBestIntentionFromPolicy } from '../llm/policyAgent.js';
+import { broadcastIntention } from '../multi/notifier.js';
+import { isParcelClaimedByPeer, requestTakeover } from '../multi/coordinator.js';
 
-// soglia di miglioramento: sostituiamo l'intention corrente solo se quella nuova
+// Improvement threshold: replace the current intention only if the new one
+// is significantly better.
 const IMPROVEMENT_THRESHOLD = 5;
 
-// intention che l'agente sta perseguendo in questo momento
+// When enabled, the next intention is chosen by the standalone LLM agent
+// (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
+const USE_LLM = process.env.USE_LLM === 'true';
+
+// When enabled, the LLM instead *writes* the deliberation code once and we run
+// the compiled policy every tick (see ../llm/policyAgent.js). Takes precedence
+// over USE_LLM.
+const USE_LLM_CODEGEN = process.env.USE_LLM_CODEGEN === 'true';
+
+/** @type {Intention|null} */
 let currentIntention = null;
 
-// ── FUNZIONI PUBBLICHE ────────────────────────────────────────────────────────
+// Guards against launching overlapping LLM deliberations: the model call is
+// async and slow compared to the sensing rate, so at most one runs at a time.
+let deliberationInFlight = false;
 
-// getCurrentIntention() -> restituisce l'intention corrente
+/**
+ * Produces the next intention using the configured deliberation strategy.
+ *
+ * @returns {Promise<Intention>}
+ */
+async function deliberate() {
+    if (USE_LLM_CODEGEN) return generateBestIntentionFromPolicy();
+    if (USE_LLM) return generateBestIntention();
+    return getBestIntention();
+}
+
+// Public functions
+
+/**
+ * Returns the current intention.
+ *
+ * @returns {Intention|null}
+ */
 export function getCurrentIntention() {
     return currentIntention;
 }
 
-// notifyActionFailed(reason) -> chiamata da Persona B quando una mossa fallisce
+/**
+ * Marks the current intention as failed and triggers a forced revision.
+ *
+ * @param {string} reason - Reason why the action failed.
+ * @returns {void}
+ */
 export function notifyActionFailed(reason) {
     console.log(`[intentionRevision] Failed: ${reason} → re-evaluating`);
-    if (currentIntention) currentIntention.status = 'failed';
+    if (currentIntention) {
+        currentIntention.status = 'failed';
+        broadcastIntention(currentIntention);
+    }
     revise(true);
 }
 
-// notifyIntentionDone() ->  chiamata da Persona B quando ha completato l'intention con successo
+/**
+ * Marks the current intention as completed and triggers a forced revision.
+ *
+ * @returns {void}
+ */
 export function notifyIntentionDone() {
     console.log(`[intentionRevision] Completed: ${currentIntention?.type}`);
-    if (currentIntention) currentIntention.status = 'done';
+    if (currentIntention) {
+        currentIntention.status = 'done';
+        broadcastIntention(currentIntention);
+    }
     currentIntention = null;
     revise(true);
 }
 
-// ── FUNZIONE DI VALIDITÀ ────────────────────────────────────────────────────────
+// Helper used internally whenever currentIntention is replaced.
+// Broadcasts the new intention and, if it's a `go_pick_up` for a parcel
+// claimed by a peer, fires a counter-claim request fire-and-forget.
+function commitNewIntention(intention) {
+    currentIntention = intention;
+    if (!intention) return;
+    broadcastIntention(intention);
 
-// isIntentionStillValid(intention) -> controlla se l'intention corrente ha ancora senso
+    if (
+        intention.type === 'go_pick_up' &&
+        intention.parcelId &&
+        isParcelClaimedByPeer(intention.parcelId)
+    ) {
+        const parcelId = intention.parcelId;
+        requestTakeover(parcelId)
+            .then((res) => {
+                if (!res.accepted && currentIntention?.parcelId === parcelId) {
+                    console.log(
+                        `[intentionRevision] Takeover refused for ${parcelId} (${res.reason})`
+                    );
+                    currentIntention.status = 'failed';
+                    broadcastIntention(currentIntention);
+                    revise(true);
+                }
+            })
+            .catch((err) => {
+                console.log(`[intentionRevision] Takeover request error: ${err.message}`);
+            });
+    }
+}
+
+// Validity check.
+
+/**
+ * Checks whether the current intention is still valid.
+ *
+ * @param {Intention} intention
+ * @returns {boolean}
+ */
 function isIntentionStillValid(intention) {
     switch (intention.type) {
-        case 'go_pick_up' : {
+        case 'go_pick_up': {
             if (!intention.parcelId) return false;
             const parcel = beliefs.parcels.get(intention.parcelId);
-            if (!parcel) { // sparito
+            if (!parcel) {
+                // Parcel disappeared.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} disappeared`);
                 return false;
             }
-            if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) { // preso da altri
-                console.log(`[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`);
+            if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) {
+                // Parcel was picked up by another agent.
+                console.log(
+                    `[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`
+                );
                 return false;
             }
-            if (parcel.reward <= 0) { // esaurito
+            if (parcel.reward <= 0) {
+                // Parcel reward has reached zero.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} reward depleted`);
                 return false;
             }
@@ -73,40 +149,73 @@ function isIntentionStillValid(intention) {
         }
 
         case 'go_deliver': {
-            return beliefs.me.carrying.length > 0; // valida solo se sto portando qualcosa
+            return beliefs.me.carrying.length > 0; // Valid only if i am carrying something
+        }
+
+        case 'go_to': {
+            // Still valid while the target is a known, walkable cell.
+            if (!intention.targetPos) return false;
+            return isWalkable(intention.targetPos.x, intention.targetPos.y);
         }
 
         case 'explore':
         case 'wait':
-            return true;  // sempre valide
+            return true;
     }
 }
 
-// ── FUNZIONE PRINCIPALE ────────────────────────────────────────────────────────
+// Main function
 
 /**
- * revise(force = false) -> funzione principale di revisione. Chiamata:
- *   - Ad ogni sensing event (da index.js)
- *   - In modo forzato dopo un fallimento o completamento
-*/
-export function revise(force = false) {
-    // ── 1. VERIFICA VALIDITÀ INTENTION CORRENTE ──────────────────────────────
+ * revise(force = false) - Main revision function.
+ * Called:
+ *   - On each sensing event from index.js
+ *   - In forced mode after a failure or completion
+ */
+export async function revise(force = false) {
+    // Check if the current intention is still valid
     if (currentIntention && currentIntention.status === 'active') {
         if (!isIntentionStillValid(currentIntention)) {
             console.log(`[intentionRevision] No longer valid: ${currentIntention.type}`);
             currentIntention.status = 'failed';
+            broadcastIntention(currentIntention);
             currentIntention = null;
         }
     }
 
-    // ── 2. SE NON HO INTENTION ATTIVA → CALCOLA NUOVA ───────────────────────
-    if (!currentIntention || currentIntention.status === 'failed' || currentIntention.status === 'done') {
-        currentIntention = getBestIntention();
-        console.log(`[intentionRevision] New: ${currentIntention?.type} score=${currentIntention?.score}`);
+    // If there is no active intention, create a new one
+    if (
+        !currentIntention ||
+        currentIntention.status === 'failed' ||
+        currentIntention.status === 'done'
+    ) {
+        // A deliberation may already be running (LLM calls are async). Don't
+        // stack a second one; the in-flight one will commit its result.
+        if (deliberationInFlight) return;
+        deliberationInFlight = true;
+        try {
+            const next = await deliberate();
+            // While we were waiting, an intention may have been committed or
+            // the situation may have changed; only commit if still idle.
+            if (
+                !currentIntention ||
+                currentIntention.status === 'failed' ||
+                currentIntention.status === 'done'
+            ) {
+                commitNewIntention(next);
+                console.log(
+                    `[intentionRevision] New: ${currentIntention?.type} score=${currentIntention?.score}`
+                );
+            }
+        } finally {
+            deliberationInFlight = false;
+        }
         return;
     }
 
-    // ── 3. HO GIÀ UN'INTENTION ATTIVA → CONFRONTA CON LA MIGLIORE ──────────
+    // If there is already an active intention, compare it with the best option.
+    // The comparison uses the cheap synchronous heuristic even in LLM mode, so
+    // we don't fire a model call on every sensing tick.
     if (!force && currentIntention.status === 'active') {
         const candidate = getBestIntention();
         if (!candidate) return;
@@ -115,13 +224,13 @@ export function revise(force = false) {
         if (improvement > IMPROVEMENT_THRESHOLD) {
             console.log(`[intentionRevision] Better option found (+${improvement}): replacing`);
             currentIntention.status = 'failed';
-            currentIntention = candidate;
+            broadcastIntention(currentIntention);
+            commitNewIntention(candidate);
         }
     }
 }
 
-// Chiamata da index.js ad ogni sensing
+// Called by index.js on each sensing event
 export function onSensingRevise() {
     revise(false);
 }
-

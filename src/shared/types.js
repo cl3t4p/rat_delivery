@@ -1,37 +1,32 @@
 /**
- * types.js  —  Definizioni JSDoc condivise tra tutti i moduli.
- *
-*/
+ * types.js — Shared JSDoc type definitions for all project modules.
+ */
 
-// ── GEOMETRIA E MOVIMENTO ──────────────────────────────────────
+// Single Objects
 
 /** @typedef {{ x: number, y: number }} Position */
 
 /** @typedef {'up'|'down'|'left'|'right'} Direction */
 
-/**
- * @typedef {Object} PathResult
- * @property {Position[]}  path   array di tile dal successivo a start fino al goal (incluso)
- * @property {Direction[]} moves  sequenza di mosse da eseguire
- */
-
-// ── TILE / MAPPA ──────────────────────────────────────────────
+/** @typedef {'go_pick_up'|'go_deliver'|'explore'|'go_to'|'wait'} IntentionType */
 
 /** @typedef {{ type: '0'|'1'|'2'|'3', delivery: boolean }} Tile */
 
-// ── PARCEL ────────────────────────────────────────────────────
+/**
+ * @typedef {Object} PathResult
+ * @property {Position[]} path - Array of tiles from the tile immediately after the start position up to and including the goal.
+ * @property {Direction[]} moves - Sequence of moves to execute.
+ */
 
 /**
  * @typedef {Object} Parcel
  * @property {string} id
  * @property {number} x
  * @property {number} y
- * @property {number} reward          aggiornato localmente con decay
- * @property {string|null} carriedBy  null se libero, altrimenti agent.id
- * @property {number} lastSeen        Date.now() dell'ultimo sensing
+ * @property {number} reward - Reward value, updated locally according to decay.
+ * @property {string|null} carriedBy - `null` if the parcel is free, otherwise the `agent.id` of the carrier.
+ * @property {number} lastSeen - `Date.now()` timestamp of the last sensing update.
  */
-
-// ── AGENTE AVVERSARIO ─────────────────────────────────────────
 
 /**
  * @typedef {Object} Agent
@@ -41,10 +36,8 @@
  * @property {number} y
  * @property {number} [score]
  * @property {number} lastSeen
- * @property {boolean} stale          true se non più nel campo visivo
+ * @property {boolean} stale - `true` if no longer in the field of view.
  */
-
-// ── SE STESSO ─────────────────────────────────────────────────
 
 /**
  * @typedef {Object} Me
@@ -53,10 +46,8 @@
  * @property {number|null} x
  * @property {number|null} y
  * @property {number} score
- * @property {string[]} carrying      array di parcel.id che sto trasportando
+ * @property {string[]} carrying - Array of `parcel.id` values currently being carried.
  */
-
-// ── BELIEF STORE ──────────────────────────────────────────────
 
 /**
  * @typedef {Object} GameConfig
@@ -65,26 +56,104 @@
  */
 
 /**
+ * Internal belief store of the agent.
+ *
  * @typedef {Object} BeliefStore
- * @property {Map<string, Tile>}   grid           key = "x,y"
- * @property {Map<string, Parcel>} parcels        key = parcel.id
- * @property {Map<string, Agent>}  agents         key = agent.id
- * @property {Me}                  me             stato dell'agente stesso
- * @property {Position[]}          deliveryTiles  cache tile di consegna
- * @property {GameConfig}          config         costanti del gioco dal server
+ * @property {Map<string, Tile>} grid - Known map tiles, keyed by `"x,y"`.
+ * @property {Map<string, Parcel>} parcels - Known parcels, keyed by `parcel.id`.
+ * @property {Map<string, Agent>} agents - Known agents, keyed by `agent.id`.
+ * @property {Me} me - State of the agent itself.
+ * @property {Position[]} deliveryTiles - Cached delivery tile positions.
+ * @property {GameConfig} config - Game constants received from the server.
  */
-
-// ── INTENTION ─────────────────────────────────────────────────
 
 /**
  * @typedef {Object} Intention
- * @property {'go_pick_up'|'go_deliver'|'explore'|'wait'} type
- * @property {string|null}    parcelId
- * @property {Position|null}  targetPos
- * @property {Direction[]}    plan        sequenza di mosse riempita da Persona B
+ * @property {IntentionType} type
+ * @property {string|null} parcelId
+ * @property {Position|null} targetPos
+ * @property {Direction[]} plan - Sequence of moves
  * @property {'pending'|'active'|'done'|'failed'} status
- * @property {number}         createdAt   Date.now()
- * @property {number}         score       utilità calcolata da Persona A
+ * @property {number} createdAt - `Date.now()`.
+ * @property {number} score - Utility value
+ */
+
+// Multi-agent message protocol (Phase 2)
+
+/** @typedef {'belief_update'|'intention_update'|'request'|'response'} MsgType */
+
+/** @typedef {'take_parcel'|'avoid_tile'|'status_check'} RequestAction */
+
+/**
+ * Common message envelope used for every BDI ↔ LLM message.
+ *
+ * @template {object} [P=object]
+ * @typedef {Object} Envelope
+ * @property {string|null} from - Sender id (`beliefs.me.id`), or `null` if unknown at send time.
+ * @property {string|'broadcast'} to - Recipient id, or the literal `'broadcast'` for shouts.
+ * @property {MsgType} type
+ * @property {number} ts - `Date.now()` — also used as the message id for request/response correlation.
+ * @property {P} payload
+ */
+
+/**
+ * Slim parcel snapshot sent inside a `belief_update` payload.
+ *
+ * @typedef {Object} ParcelDelta
+ * @property {string} id
+ * @property {number} x
+ * @property {number} y
+ * @property {number} reward
+ * @property {string|null} carriedBy
+ */
+
+/**
+ * Slim agent snapshot sent inside a `belief_update` payload.
+ *
+ * @typedef {Object} AgentDelta
+ * @property {string} id
+ * @property {number} x
+ * @property {number} y
+ * @property {boolean} stale
+ */
+
+/**
+ * Slim self snapshot sent inside a `belief_update` payload.
+ *
+ * @typedef {Object} MeDelta
+ * @property {number|null} x
+ * @property {number|null} y
+ * @property {number} carrying - Number of parcels being carried.
+ */
+
+/**
+ * @typedef {Object} BeliefUpdatePayload
+ * @property {ParcelDelta[]} parcels - Only newly seen / changed parcels.
+ * @property {AgentDelta[]} agents - Only changed agents (new, moved, stale flip).
+ * @property {MeDelta} me - Own current position and carrying count.
+ */
+
+/**
+ * @typedef {Object} IntentionUpdatePayload
+ * @property {Object} intention
+ * @property {IntentionType} intention.type
+ * @property {string|null} intention.parcelId
+ * @property {Position|null} intention.targetPos
+ * @property {'pending'|'active'|'done'|'failed'} intention.status
+ */
+
+/**
+ * @typedef {Object} RequestPayload
+ * @property {RequestAction} action
+ * @property {string} [parcelId] - Required for `take_parcel`.
+ * @property {Position} [tile] - Required for `avoid_tile`.
+ */
+
+/**
+ * @typedef {Object} ResponsePayload
+ * @property {number} requestId - `ts` of the request being answered.
+ * @property {boolean} accepted
+ * @property {'ok'|'already_carrying'|'out_of_range'|'unknown'} reason
  */
 
 export {};

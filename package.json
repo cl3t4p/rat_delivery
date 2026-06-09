@@ -4,12 +4,17 @@
   "type": "module",
   "main": "astar_agent.js",
   "scripts": {
-    "start": "USE_PDDL=true node src/index.js",
+    "start": "node src/index.js",
     "astar": "node src/index.js",
+    "pddl": "USE_PDDL=true node src/index.js",
+    "llm": "USE_LLM=true node src/index.js",
+    "llm:codegen": "USE_LLM_CODEGEN=true node src/index.js",
     "planner:build": "cd planning-as-a-service/server && DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t paas:latest .",
     "planner:up": "docker compose -f docker-compose.planner.yml up -d",
     "planner:down": "docker compose -f docker-compose.planner.yml down",
-    "planner:logs": "docker compose -f docker-compose.planner.yml logs -f web worker"
+    "planner:logs": "docker compose -f docker-compose.planner.yml logs -f web worker",
+    "format": "prettier --write \"**/*.js\"",
+    "format:check": "prettier --check \"**/*.js\""
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "^1.3.5",
@@ -28,5 +33,8 @@
   "bugs": {
     "url": "https://github.com/cl3t4p/asa_agent/issues"
   },
-  "homepage": "https://github.com/cl3t4p/asa_agent#readme"
+  "homepage": "https://github.com/cl3t4p/asa_agent#readme",
+  "devDependencies": {
+    "prettier": "^3.8.3"
+  }
 }
