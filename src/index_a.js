@@ -1,9 +1,17 @@
 /**
- * index.js
+ * index_a.js
  *
- * Connects the Deliveroo.js socket to the BDI modules.
- * This file acts as the glue layer: it receives game events
- * and forwards them to the appropriate modules.
+ * Entry point for Agent A.
+ *
+ * Agent A is the BDI agent:
+ * - senses the Deliveroo.js environment
+ * - revises beliefs
+ * - revises intentions
+ * - executes BDI plans
+ * - communicates with Agent B
+ * - may accept zone assignments from Agent B
+ *
+ * Agent A does not call the LLM.
  */
 
 import 'dotenv/config';
@@ -17,30 +25,36 @@ import {
     decayParcelsReward,
     clockEventToMs,
 } from './bdi/beliefs.js';
-import { onSensingRevise, getCurrentIntention, initZoneAssignHandler } from './bdi/intentionRevision.js';
+
+import {
+    onSensingRevise,
+    getCurrentIntention,
+    initZoneAssignHandler,
+} from './bdi/intentionRevision.js';
+
 import { startExecutor } from './bdi/executor.js';
-import { updateContext, setObjective } from './llm/llmAgent.js';
-import { initCommunication, onFallbackMsg } from './multi/communication.js';
-import { initCoordinator, startZoneAssignmentLoop } from './multi/coordinator.js';
+import { initCommunication } from './multi/communication.js';
+import { initCoordinator } from './multi/coordinator.js';
 import { enableNotifier, tickBeliefDelta } from './multi/notifier.js';
 
 const socket = DjsConnect();
 
-// Multi-agent layer (Phase 2)
+// Multi-agent layer.
+// Agent A only communicates and receives coordination messages.
+// It does not start the LLM zone-assignment loop.
 initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
 initCoordinator();
-startZoneAssignmentLoop();
 initZoneAssignHandler();
 enableNotifier();
 
 // Receive map data.
 socket.on('map', (width, height, tiles) => {
-    console.log(`[index] Map received: ${width}x${height}`);
+    console.log(`[index_a] Map received: ${width}x${height}`);
     updateMap(tiles);
 
-    // Debug stuff
     const maxX = Math.max(...tiles.map((t) => t.x));
     const maxY = Math.max(...tiles.map((t) => t.y));
+
     for (let y = maxY; y >= 0; y--) {
         let row = '';
         for (let x = 0; x <= maxX; x++) {
@@ -52,21 +66,20 @@ socket.on('map', (width, height, tiles) => {
     }
 });
 
-// Update agent
+// Update agent.
 socket.on('you', (agent) => {
     updateMe(agent);
 });
 
-// Sensing loop
+// Sensing loop.
 socket.on('sensing', (sensing) => {
     updateBeliefs(sensing.parcels ?? [], sensing.agents ?? [], sensing.crates ?? []);
     tickBeliefDelta();
     onSensingRevise();
-    updateContext();
     logState();
 });
 
-// Load config
+// Load config.
 socket.onConfig((config) => {
     beliefs.config.PARCEL_DECADING_INTERVAL = config?.GAME?.parcels?.decaying_event ?? null;
     beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(
@@ -74,10 +87,11 @@ socket.onConfig((config) => {
     );
     beliefs.config.OBSERVATION_DISTANCE = config?.GAME?.player?.observation_distance ?? null;
     beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
-    console.log('[index] Config:', beliefs.config);
+
+    console.log('[index_a] Config:', beliefs.config);
 });
 
-// Decay local parcels
+// Decay local parcels.
 setInterval(() => {
     decayParcelsReward();
 }, 1000);
@@ -85,25 +99,16 @@ setInterval(() => {
 // Start the executor loop.
 startExecutor(socket);
 
-// Receive plain-text LLM objectives via the Deliveroo chat.
-// Structured envelopes are routed inside communication.js; this fallback
-// covers non-envelope messages only.
-onFallbackMsg((id, name, msg) => {
-    console.log(`[index] Message from ${name}: ${msg}`);
-    if (typeof msg === 'string' && msg.trim() !== '') {
-        setObjective(msg);
-    }
-});
-
 // Debug: log the current state.
 function logState() {
     const intention = getCurrentIntention();
+
     console.log(
-        `[state] pos=(${beliefs.me.x?.toFixed(1)},${beliefs.me.y?.toFixed(1)})`,
+        `[state_a] pos=(${beliefs.me.x?.toFixed(1)},${beliefs.me.y?.toFixed(1)})`,
         `score=${beliefs.me.score}`,
         `carrying=${beliefs.me.carrying.length}`,
         `parcels=${beliefs.parcels.size}`,
         `intention=${intention?.type ?? 'none'}`,
-        intention?.parcelId ? `→ ${intention.parcelId}` : ''
+        intention?.parcelId ? `-> ${intention.parcelId}` : ''
     );
 }

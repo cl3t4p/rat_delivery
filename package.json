@@ -1,18 +1,26 @@
 {
-  "name": "asa_single_agent",
+  "name": "asa_agent",
   "version": "1.0.0",
+  "description": "Autonomous Software Agents project for the Deliveroo.js game.",
   "type": "module",
-  "main": "astar_agent.js",
+  "main": "src/index_a.js",
   "scripts": {
-    "start": "node src/index.js",
-    "astar": "node src/index.js",
-    "pddl": "USE_PDDL=true node src/index.js",
-    "llm": "USE_LLM=true node src/index.js",
-    "llm:codegen": "USE_LLM_CODEGEN=true node src/index.js",
+    "start": "npm run agent:a",
+
+    "agent:a": "node src/index_a.js",
+    "agent:b": "node src/index_b.js",
+
+    "agent:a:pddl": "USE_PDDL=true node src/index_a.js",
+    "agent:b:pddl": "USE_PDDL=true node src/index_b.js",
+
+    "agent:a:pddl:fallback": "USE_PDDL=true PDDL_FALLBACK=true node src/index_a.js",
+    "agent:b:pddl:fallback": "USE_PDDL=true PDDL_FALLBACK=true node src/index_b.js",
+
     "planner:build": "cd planning-as-a-service/server && DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t paas:latest .",
     "planner:up": "docker compose -f docker-compose.planner.yml up -d",
     "planner:down": "docker compose -f docker-compose.planner.yml down",
     "planner:logs": "docker compose -f docker-compose.planner.yml logs -f web worker",
+
     "format": "prettier --write \"**/*.js\"",
     "format:check": "prettier --check \"**/*.js\""
   },
@@ -22,19 +30,24 @@
     "dotenv": "^16.6.1",
     "openai": "^6.39.0"
   },
-  "description": "",
+  "devDependencies": {
+    "prettier": "^3.8.3"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cl3t4p/asa_agent.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "bugs": {
     "url": "https://github.com/cl3t4p/asa_agent/issues"
   },
   "homepage": "https://github.com/cl3t4p/asa_agent#readme",
-  "devDependencies": {
-    "prettier": "^3.8.3"
-  }
+  "keywords": [
+    "autonomous-agents",
+    "bdi",
+    "llm",
+    "pddl",
+    "deliveroo-js"
+  ],
+  "author": "",
+  "license": "ISC"
 }
