@@ -16,6 +16,7 @@ import { beliefs, manhattanDistance } from '../bdi/beliefs.js';
 import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast } from './communication.js';
 import { callZoneAssignment } from '../llm/llmAgent.js';
 import { getCurrentIntention } from '../bdi/intentionRevision.js';
+import { findNearestDeliveryTile } from '../bdi/deliberation.js';
 
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
 /** @typedef {import('../shared/types.js').Position} Position */
@@ -134,6 +135,53 @@ function getZoneCenter(zoneName) {
     return centers[zoneName];
 }
 
+/**
+ * Evaluates whether handing off carried parcels to a peer is worthwhile.
+ *
+ * Uses the nearest delivery tile as the simplified meetTile.
+ * Returns the meetTile if handoff is beneficial, null otherwise.
+ *
+ * Conditions (both must hold):
+ *   1. dist(A→meet) + dist(B→meet) + dist(meet→delivery) < dist(A→delivery)
+ *   2. dist(B→meet) + dist(meet→delivery) < dist(B→currentDelivery or nearestDelivery)
+ *
+ * @returns {{ meetTile: {x,y}, peerId: string } | null}
+ */
+export function evaluateHandoff() {
+    if (beliefs.me.carrying.length < 2) return null;
+
+    const peers = getPeers();
+    const peer = peers[0] ?? null;
+    if (!peer || peer.x === null || peer.y === null) return null;
+
+    const posA = { x: beliefs.me.x, y: beliefs.me.y };
+    const posB = { x: peer.x, y: peer.y };
+
+    // Simplified: meetTile = nearest delivery tile from A
+    const meetTile = findNearestDeliveryTile(posA);
+    if (!meetTile) return null;
+
+    const distADel  = manhattanDistance(posA, meetTile);
+    const distBMeet = manhattanDistance(posB, meetTile);
+
+    // Condition 1: B is closer to the delivery tile than A
+    const condition1 = distBMeet < distADel;
+
+    // Condition 2: B's detour to meetTile costs less than its current path
+    const peerTarget = peer.intention?.targetPos ?? findNearestDeliveryTile(posB);
+    const distBCurrent = peerTarget
+        ? manhattanDistance(posB, peerTarget)
+        : Infinity;
+    const condition2 = distBMeet < distBCurrent;
+
+    if (!condition1 || !condition2) return null;
+
+    console.log(
+        `[coord] Handoff viable: distA=${distADel} distB=${distBMeet} distBCurrent=${distBCurrent}`
+    );
+    return { meetTile, peerId: peer.id };
+}
+
 // Initialization
 
 /**
@@ -147,6 +195,7 @@ export function initCoordinator() {
     onMessage(MSG_TYPE.INTENTION_UPDATE, handleIntentionUpdate);
     onMessage(MSG_TYPE.REQUEST, handleRequest);
     onMessage(MSG_TYPE.RESPONSE, handleResponse);
+    onMessage(MSG_TYPE.HANDOFF_REQUEST, handleHandoffRequest);
     console.log('[coord] init ok');
 }
 
@@ -323,6 +372,39 @@ export function requestTakeover(parcelId) {
     });
 }
 
+/**
+ * Proposes a parcel handoff to the first known peer.
+ *
+ * Sends a handoff_request with the meetTile and waits for acceptance.
+ * Resolves with { accepted, meetTile } or rejects on timeout.
+ *
+ * @param {{ x: number, y: number }} meetTile
+ * @param {string} peerId
+ * @returns {Promise<{ accepted: boolean, meetTile: {x,y} }>}
+ */
+export function requestHandoff(meetTile, peerId) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            reject(new Error('handoff_timeout'));
+        }, REQUEST_TIMEOUT_MS);
+
+        sendDirect(peerId, MSG_TYPE.HANDOFF_REQUEST, { meetTile })
+            .then(() => {
+                const pendingKey = `${peerId}:handoff`;
+                state.pendingRequests.set(pendingKey, {
+                    resolve: (res) => {
+                        clearTimeout(timer);
+                        resolve({ accepted: res.accepted, meetTile });
+                    },
+                    reject,
+                    timer,
+                    peerId,
+                });
+            })
+            .catch(reject);
+    });
+}
+
 /** Read-only access for debugging / tests. */
 export function getPeers() {
     pruneStale();
@@ -412,6 +494,30 @@ function handleResponse(envelope, senderId) {
             return;
         }
     }
+}
+
+function handleHandoffRequest(envelope, senderId) {
+    touchPeer(senderId);
+    const { meetTile } = envelope.payload ?? {};
+    if (!meetTile) {
+        replyTo(envelope, false, 'unknown');
+        return;
+    }
+
+    const myIntention = getCurrentIntention();
+    const isBusy =
+        myIntention &&
+        myIntention.status === 'active' &&
+        (myIntention.type === 'go_pick_up' || myIntention.type === 'go_deliver');
+
+    if (isBusy) {
+        replyTo(envelope, false, 'busy');
+        console.log(`[coord] Handoff request refused: busy (${myIntention.type})`);
+        return;
+    }
+
+    replyTo(envelope, true, 'ok');
+    console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
 }
 
 // Helpers

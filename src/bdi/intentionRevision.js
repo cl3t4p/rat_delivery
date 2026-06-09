@@ -10,7 +10,7 @@ import { getBestIntention, createIntention } from './deliberation.js';
 import { generateBestIntention } from '../llm/intentionAgent.js';
 import { generateBestIntentionFromPolicy } from '../llm/policyAgent.js';
 import { broadcastIntention } from '../multi/notifier.js';
-import { isParcelClaimedByPeer, requestTakeover } from '../multi/coordinator.js';
+import { isParcelClaimedByPeer, requestTakeover, evaluateHandoff, requestHandoff } from '../multi/coordinator.js';
 import { MSG_TYPE, onMessage } from '../multi/communication.js';
 
 // Improvement threshold: replace the current intention only if the new one
@@ -82,6 +82,29 @@ export function notifyIntentionDone() {
         broadcastIntention(currentIntention);
     }
     currentIntention = null;
+
+    // After each pickup, check if a handoff to the peer is beneficial.
+    if (beliefs.me.carrying.length >= 2) {
+        const handoff = evaluateHandoff();
+        if (handoff) {
+            console.log(`[intentionRevision] Proposing handoff to ${handoff.peerId}`);
+            requestHandoff(handoff.meetTile, handoff.peerId)
+                .then((res) => {
+                    if (res.accepted) {
+                        console.log(`[intentionRevision] Handoff accepted → go_handoff`);
+                        const intention = createIntention(
+                            'go_handoff', null, handoff.meetTile, 0
+                        );
+                        commitNewIntention(intention);
+                    } else {
+                        revise(true);
+                    }
+                })
+                .catch(() => revise(true));
+            return;
+        }
+    }
+
     revise(true);
 }
 
@@ -158,6 +181,9 @@ function isIntentionStillValid(intention) {
             if (!intention.targetPos) return false;
             return isWalkable(intention.targetPos.x, intention.targetPos.y);
         }
+
+        case 'go_handoff':
+            return !!intention.targetPos;
 
         case 'explore':
         case 'wait':

@@ -26,6 +26,8 @@ export const MSG_TYPE = Object.freeze({
     REQUEST: 'request',
     RESPONSE: 'response',
     ZONE_ASSIGN: 'zone_assign',
+    HANDOFF_REQUEST: 'handoff_request',
+    HANDOFF_RESPONSE: 'handoff_response',
 });
 
 const KNOWN_TYPES = new Set(Object.values(MSG_TYPE));
