@@ -257,6 +257,7 @@ export function buildStateSnapshot(me) {
             const [x, y] = k.split(',').map(Number);
             return { x, y };
         }),
+        constraints: llmMemory.constraints,
         world: {
             // How often new parcels spawn, in ms. Higher = parcels are rare,
             // so camping a spawner is less worthwhile than relocating.
@@ -284,7 +285,12 @@ export async function generateBestIntention() {
     const me = { x: beliefs.me.x, y: beliefs.me.y };
     const snapshot = buildStateSnapshot(me);
 
+    const constraintBlock = llmMemory.constraints.length > 0
+        ? `Constraints (NEVER violate these):\n${llmMemory.constraints.map((c) => `- ${c}`).join('\n')}\n\n`
+        : '';
+
     const userContent =
+        constraintBlock +
         (llmMemory.objective ? `Operator objective: ${llmMemory.objective}\n\n` : '') +
         `Map (legend in the system prompt):\n${buildGridMap()}\n\n` +
         `State:\n${JSON.stringify(snapshot, null, 2)}`;
