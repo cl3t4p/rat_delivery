@@ -142,6 +142,7 @@ export function broadcastIntention(intention) {
             parcelId: intention.parcelId ?? null,
             targetPos: intention.targetPos ?? null,
             status: intention.status,
+            score: intention.score ?? 0,
         },
     });
 }

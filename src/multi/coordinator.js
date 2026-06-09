@@ -205,6 +205,7 @@ export function initCoordinator() {
 // idle (wait or explore) — spare capacity the LLM can redirect immediately.
 
 const ZONE_ASSIGN_INTERVAL_MS = 30_000;
+const BOTH_BUSY_SCORE_THRESHOLD = 10;
 
 /**
  * Starts the adaptive zone-assignment loop.
@@ -232,9 +233,23 @@ export function startZoneAssignmentLoop() {
             return;
         }
 
-        // Need at least one known peer to do a two-agent assignment.
+        // If both agents are busy with high-score intentions, delay the LLM
+        // call — no point interrupting productive work.
         const peers = getPeers();
         const peer = peers[0] ?? null;
+        const peerBusy = peer?.intention?.status === 'active' &&
+            (peer.intention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
+        const selfBusy = intention &&
+            intention.status === 'active' &&
+            intention.score > BOTH_BUSY_SCORE_THRESHOLD;
+
+        if (selfBusy && peerBusy) {
+            console.log('[coord] Both agents busy with high-score intentions → delaying LLM call');
+            setTimeout(tick, 5_000);
+            return;
+        }
+
+        // Need at least one known peer to do a two-agent assignment
 
         const posA = { x: beliefs.me.x, y: beliefs.me.y };
         const posB = peer && peer.x !== null
@@ -441,6 +456,7 @@ function handleIntentionUpdate(envelope, senderId, senderName) {
         parcelId: intention.parcelId ?? null,
         targetPos: intention.targetPos ?? null,
         status: intention.status,
+        score: intention.score ?? 0,
         ts: envelope.ts,
     };
 
