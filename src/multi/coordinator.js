@@ -14,6 +14,8 @@
 
 import { beliefs, manhattanDistance } from '../bdi/beliefs.js';
 import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast } from './communication.js';
+import { callZoneAssignment } from '../llm/llmAgent.js';
+import { getCurrentIntention } from '../bdi/intentionRevision.js';
 
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
 /** @typedef {import('../shared/types.js').Position} Position */
@@ -41,6 +43,97 @@ const state = {
     pendingRequests: new Map(),
 };
 
+/**
+ * Returns the zone name for a given position based on map midpoint.
+ *
+ * @param {{ x: number, y: number }} pos
+ * @returns {'topLeft'|'topRight'|'bottomLeft'|'bottomRight'}
+ */
+function getZone(pos) {
+    let maxX = 0;
+    let maxY = 0;
+    for (const key of beliefs.grid.keys()) {
+        const [x, y] = key.split(',').map(Number);
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+    }
+    const midX = maxX / 2;
+    const midY = maxY / 2;
+    const top = pos.y >= midY;
+    const right = pos.x >= midX;
+    if (top && !right) return 'topLeft';
+    if (top && right) return 'topRight';
+    if (!top && !right) return 'bottomLeft';
+    return 'bottomRight';
+}
+
+/**
+ * Computes aggregated stats for each of the four map zones.
+ *
+ * @returns {Record<string, { totalReward: number, freeParcels: number, spawnerCount: number }>}
+ */
+function computeZoneStats() {
+    let maxX = 0;
+    let maxY = 0;
+    for (const key of beliefs.grid.keys()) {
+        const [x, y] = key.split(',').map(Number);
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+    }
+    const midX = maxX / 2;
+    const midY = maxY / 2;
+
+    const zones = {
+        topLeft:     { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
+        topRight:    { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
+        bottomLeft:  { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
+        bottomRight: { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
+    };
+
+    for (const p of beliefs.parcels.values()) {
+        if (p.carriedBy) continue;
+        const zone = getZone({ x: p.x, y: p.y });
+        zones[zone].freeParcels++;
+        zones[zone].totalReward += p.reward;
+    }
+
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type !== '1') continue;
+        const [x, y] = key.split(',').map(Number);
+        const zone = getZone({ x, y });
+        zones[zone].spawnerCount++;
+    }
+
+    return zones;
+}
+
+/**
+ * Returns the center tile of a named zone.
+ *
+ * @param {'topLeft'|'topRight'|'bottomLeft'|'bottomRight'} zoneName
+ * @returns {{ x: number, y: number }}
+ */
+function getZoneCenter(zoneName) {
+    let maxX = 0;
+    let maxY = 0;
+    for (const key of beliefs.grid.keys()) {
+        const [x, y] = key.split(',').map(Number);
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+    }
+    const midX = maxX / 2;
+    const midY = maxY / 2;
+
+    const centers = {
+        topLeft:     { x: Math.round(midX / 2),         y: Math.round(midY + midY / 2) },
+        topRight:    { x: Math.round(midX + midX / 2),  y: Math.round(midY + midY / 2) },
+        bottomLeft:  { x: Math.round(midX / 2),         y: Math.round(midY / 2)        },
+        bottomRight: { x: Math.round(midX + midX / 2),  y: Math.round(midY / 2)        },
+    };
+
+    return centers[zoneName];
+}
+
 // Initialization
 
 /**
@@ -55,6 +148,86 @@ export function initCoordinator() {
     onMessage(MSG_TYPE.REQUEST, handleRequest);
     onMessage(MSG_TYPE.RESPONSE, handleResponse);
     console.log('[coord] init ok');
+}
+
+// Zone assignment loop
+
+// Runs every ZONE_ASSIGN_INTERVAL_MS. Fires early when the local agent is
+// idle (wait or explore) — spare capacity the LLM can redirect immediately.
+
+const ZONE_ASSIGN_INTERVAL_MS = 30_000;
+
+/**
+ * Starts the adaptive zone-assignment loop.
+ *
+ * Calls the LLM every 30 seconds (or immediately when the agent is idle)
+ * and sends a go_to assignment to self and, if a peer is known, to the peer.
+ *
+ * Call once from index.js after initCoordinator().
+ */
+export function startZoneAssignmentLoop() {
+    let lastCallTime = 0;
+
+    async function tick() {
+        const now = Date.now();
+        const intention = getCurrentIntention();
+        const isIdle = !intention ||
+            intention.type === 'wait' ||
+            intention.type === 'explore';
+
+        const elapsed = now - lastCallTime;
+        const shouldCall = elapsed >= ZONE_ASSIGN_INTERVAL_MS || (isIdle && elapsed >= 5_000);
+
+        if (!shouldCall || beliefs.me.x === null) {
+            setTimeout(tick, 1_000);
+            return;
+        }
+
+        // Need at least one known peer to do a two-agent assignment.
+        const peers = getPeers();
+        const peer = peers[0] ?? null;
+
+        const posA = { x: beliefs.me.x, y: beliefs.me.y };
+        const posB = peer && peer.x !== null
+            ? { x: peer.x, y: peer.y }
+            : posA; // fallback: treat B as co-located
+
+        const zoneStats = computeZoneStats();
+        lastCallTime = now;
+
+        const assignment = await callZoneAssignment(zoneStats, posA, posB);
+        if (!assignment) {
+            setTimeout(tick, 1_000);
+            return;
+        }
+
+        // Apply own assignment: send a go_to toward the zone center.
+        const myZone = getZoneCenter(assignment.assignA);
+        console.log(`[coord] Zone assignment → self: ${assignment.assignA} (${myZone.x},${myZone.y})`);
+        sendBroadcast(MSG_TYPE.ZONE_ASSIGN, {
+            targetId: beliefs.me.id,
+            zone: assignment.assignA,
+            center: myZone,
+            totalReward: zoneStats[assignment.assignA].totalReward,
+        });
+
+        // Send peer assignment if we have a known peer.
+        if (peer) {
+            const peerZone = getZoneCenter(assignment.assignB);
+            console.log(`[coord] Zone assignment → peer ${peer.id}: ${assignment.assignB}`);
+            sendDirect(peer.id, MSG_TYPE.ZONE_ASSIGN, {
+                targetId: peer.id,
+                zone: assignment.assignB,
+                center: peerZone,
+                totalReward: zoneStats[assignment.assignB].totalReward,
+            });
+        }
+
+        setTimeout(tick, 1_000);
+    }
+
+    setTimeout(tick, 5_000); // short delay on startup
+    console.log('[coord] Zone assignment loop started');
 }
 
 // Public helpers (consumed by deliberation / intentionRevision)

@@ -25,6 +25,7 @@ export const MSG_TYPE = Object.freeze({
     INTENTION_UPDATE: 'intention_update',
     REQUEST: 'request',
     RESPONSE: 'response',
+    ZONE_ASSIGN: 'zone_assign',
 });
 
 const KNOWN_TYPES = new Set(Object.values(MSG_TYPE));

@@ -17,11 +17,11 @@ import {
     decayParcelsReward,
     clockEventToMs,
 } from './bdi/beliefs.js';
-import { onSensingRevise, getCurrentIntention } from './bdi/intentionRevision.js';
+import { onSensingRevise, getCurrentIntention, initZoneAssignHandler } from './bdi/intentionRevision.js';
 import { startExecutor } from './bdi/executor.js';
 import { updateContext, setObjective } from './llm/llmAgent.js';
 import { initCommunication, onFallbackMsg } from './multi/communication.js';
-import { initCoordinator } from './multi/coordinator.js';
+import { initCoordinator, startZoneAssignmentLoop } from './multi/coordinator.js';
 import { enableNotifier, tickBeliefDelta } from './multi/notifier.js';
 
 const socket = DjsConnect();
@@ -29,6 +29,8 @@ const socket = DjsConnect();
 // Multi-agent layer (Phase 2)
 initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
 initCoordinator();
+startZoneAssignmentLoop();
+initZoneAssignHandler();
 enableNotifier();
 
 // Receive map data.
@@ -80,14 +82,14 @@ setInterval(() => {
     decayParcelsReward();
 }, 1000);
 
-// Start of the executor
+// Start the executor loop.
 startExecutor(socket);
 
 // Receive plain-text LLM objectives via the Deliveroo chat.
 // Structured envelopes are routed inside communication.js; this fallback
 // covers non-envelope messages only.
 onFallbackMsg((id, name, msg) => {
-    console.log(`[index] Messaggio da ${name}: ${msg}`);
+    console.log(`[index] Message from ${name}: ${msg}`);
     if (typeof msg === 'string' && msg.trim() !== '') {
         setObjective(msg);
     }

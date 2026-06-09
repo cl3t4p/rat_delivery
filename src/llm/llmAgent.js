@@ -137,3 +137,52 @@ export async function callLLM(messages, { temperature = 0 } = {}) {
     });
     return response.choices?.[0]?.message?.content ?? '';
 }
+
+/**
+ * Calls the LLM with aggregated zone data and returns a zone assignment
+ * for each agent. Used by the coordinator zone-assignment loop.
+ *
+ * Zones: topLeft, topRight, bottomLeft, bottomRight.
+ * Each zone is described by three numbers: totalReward, freeParcels, spawnerCount.
+ *
+ * @param {object} zoneStats - { topLeft, topRight, bottomLeft, bottomRight }
+ *   each with { totalReward: number, freeParcels: number, spawnerCount: number }
+ * @param {{ x: number, y: number }} posA - Current position of agent A.
+ * @param {{ x: number, y: number }} posB - Current position of agent B.
+ * @returns {Promise<{ assignA: string, assignB: string } | null>}
+ *   Zone names for each agent, or null on failure.
+ */
+export async function callZoneAssignment(zoneStats, posA, posB) {
+    const prompt = [
+        'You assign two delivery agents to map zones to maximise total parcel reward.',
+        '',
+        'Zones (totalReward / freeParcels / spawners):',
+        ...Object.entries(zoneStats).map(
+            ([name, s]) => `  ${name}: reward=${s.totalReward} parcels=${s.freeParcels} spawners=${s.spawnerCount}`
+        ),
+        '',
+        `Agent A is at (${posA.x},${posA.y}).`,
+        `Agent B is at (${posB.x},${posB.y}).`,
+        '',
+        'Reply with ONLY a JSON object, no prose, no markdown:',
+        '{"assignA":"<zoneName>","assignB":"<zoneName>"}',
+        'Zone names: topLeft, topRight, bottomLeft, bottomRight.',
+    ].join('\n');
+
+    try {
+        const raw = await callLLM([{ role: 'user', content: prompt }]);
+        const clean = raw.replace(/```[a-z]*|```/gi, '').trim();
+        const parsed = JSON.parse(clean);
+        const valid = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+        if (!valid.includes(parsed.assignA) || !valid.includes(parsed.assignB)) {
+            console.log('[llmAgent] Zone assignment returned invalid zone names:', parsed);
+            return null;
+        }
+        console.log(`[llmAgent] Zone assignment: A→${parsed.assignA} B→${parsed.assignB}`);
+        return parsed;
+    } catch (err) {
+        console.log(`[llmAgent] Zone assignment failed (${err.message})`);
+        return null;
+    }
+}
+
