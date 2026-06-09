@@ -8,7 +8,7 @@
 
 /** @typedef {'up'|'down'|'left'|'right'} Direction */
 
-/** @typedef {'go_pick_up'|'go_deliver'|'explore'|'go_to'|'wait'|'go_handoff_receive'} IntentionType */
+/** @typedef {'go_pick_up'|'go_deliver'|'explore'|'go_to'|'wait'|'go_handoff'|'go_handoff_receive'} IntentionType */
 
 /** @typedef {{ type: '0'|'1'|'2'|'3', delivery: boolean }} Tile */
 
@@ -78,9 +78,9 @@
  * @property {number} score - Utility value
  */
 
-// Multi-agent message protocol (Phase 2)
+// Multi-agent message protocol
 
-/** @typedef {'belief_update'|'intention_update'|'request'|'response'} MsgType */
+/** @typedef {'belief_update'|'intention_update'|'request'|'response'|'zone_assign'|'handoff_request'|'handoff_response'} MsgType */
 
 /** @typedef {'take_parcel'|'avoid_tile'|'status_check'} RequestAction */
 

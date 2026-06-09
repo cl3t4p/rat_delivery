@@ -8,7 +8,6 @@
 import 'dotenv/config';
 import OpenAI from 'openai';
 import { beliefs, blacklistCell } from '../bdi/beliefs.js';
-import { revise } from '../bdi/intentionRevision.js';
 
 // Config
 
@@ -16,12 +15,29 @@ const baseURL = process.env.LITELLM_BASE_URL || 'https://llm.bears.disi.unitn.it
 const apiKey = process.env.LITELLM_API_KEY;
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 
-if (!apiKey) {
-    console.error('[llmAgent] LITELLM_API_KEY missing in .env');
-    process.exit(1);
+let llmClient = null;
+let _onObjectiveChange = null;
+
+/**
+ * Initialises the LLM agent.
+ *
+ * Must be called once from index_b.js before any LLM function is used.
+ * Agent A must NOT call this — it keeps the LLM modules unloaded entirely.
+ *
+ * @param {() => Promise<void>} onObjectiveChange - Called after a new objective
+ *   or constraint is received, so the BDI loop can re-deliberate immediately.
+ */
+export function initLlmAgent(onObjectiveChange) {
+    if (!apiKey) {
+        console.error('[llmAgent] LITELLM_API_KEY missing in .env');
+        process.exit(1);
+    }
+    llmClient = new OpenAI({ baseURL, apiKey });
+    _onObjectiveChange = onObjectiveChange;
+    console.log('[llmAgent] init ok');
 }
 
-export const llmClient = new OpenAI({ baseURL, apiKey });
+export { llmClient };
 
 // LLM memory
 
@@ -67,7 +83,7 @@ function extractCells(text) {
 /**
  * Updates the environment snapshot in the LLM memory.
  *
- * Called by index.js on each sensing event, so the LLM always has
+ * Called by index_b.js on each sensing event, so the LLM always has
  * updated information before planning.
  */
 export function updateContext() {
@@ -92,7 +108,7 @@ export function updateContext() {
  * and saves it in the LLM memory. The objective is then used as extra
  * context by the LLM intention agent on its next deliberation.
  *
- * Called by index.js when a message arrives through socket.onMsg.
+ * Called by index_b.js when a message arrives via onFallbackMsg.
  *
  * @param {string} objectiveText - Example: "Pick up the nearest parcel and deliver it".
  */
@@ -114,7 +130,7 @@ export async function setObjective(objectiveText) {
     }
 
     updateContext();
-    await revise(true);
+    if (_onObjectiveChange) await _onObjectiveChange();
 }
 
 // Model call
@@ -153,9 +169,18 @@ export async function callLLM(messages, { temperature = 0 } = {}) {
  *   Zone names for each agent, or null on failure.
  */
 export async function callZoneAssignment(zoneStats, posA, posB) {
+    const constraintBlock = llmMemory.constraints.length > 0
+        ? [
+            'Constraints (NEVER violate these):',
+            ...llmMemory.constraints.map((c) => `- ${c}`),
+            '',
+        ]
+    : [];
+
     const prompt = [
         'You assign two delivery agents to map zones to maximise total parcel reward.',
         '',
+        ...constraintBlock,
         'Zones (totalReward / freeParcels / spawners):',
         ...Object.entries(zoneStats).map(
             ([name, s]) => `  ${name}: reward=${s.totalReward} parcels=${s.freeParcels} spawners=${s.spawnerCount}`

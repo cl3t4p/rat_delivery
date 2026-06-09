@@ -29,6 +29,7 @@ import {
 import {
     onSensingRevise,
     getCurrentIntention,
+    forceIntention,
     initZoneAssignHandler,
 } from './bdi/intentionRevision.js';
 
@@ -43,7 +44,7 @@ const socket = DjsConnect();
 // Agent A only communicates and receives coordination messages.
 // It does not start the LLM zone-assignment loop.
 initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
-initCoordinator();
+initCoordinator({ getCurrentIntention, forceIntention });
 initZoneAssignHandler();
 enableNotifier();
 

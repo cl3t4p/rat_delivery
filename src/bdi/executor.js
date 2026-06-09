@@ -323,13 +323,24 @@ async function executeHandoffReceive(socket, intention) {
         return;
     }
 
-    // At meetTile: pick up everything on the ground
+    // At meetTile: try to pick up parcels dropped by A.
+    // A may not have arrived yet — retry up to MAX_PICKUP_ATTEMPTS times
+    // before giving up and letting BDI re-deliberate.
+    const MAX_PICKUP_ATTEMPTS = 5;
+    intention._pickupAttempts = (intention._pickupAttempts ?? 0) + 1;
+
     const picked = await socket.emitPickup();
 
     if (!picked || picked.length === 0) {
-        // Parcels not here yet or already gone — fail and let BDI re-deliberate
-        console.log('[executor] Handoff receive: nothing to pick up, retrying...');
-        notifyActionFailed('pickup_empty');
+        if (intention._pickupAttempts >= MAX_PICKUP_ATTEMPTS) {
+            console.log('[executor] Handoff receive: no parcels after max attempts → failing');
+            notifyActionFailed('pickup_empty');
+        } else {
+            console.log(
+                `[executor] Handoff receive: nothing yet, attempt ${intention._pickupAttempts}/${MAX_PICKUP_ATTEMPTS} — waiting`
+            );
+            await new Promise((r) => setTimeout(r, 500));
+        }
         return;
     }
 

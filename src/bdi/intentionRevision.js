@@ -7,8 +7,6 @@
 
 import { beliefs, isWalkable } from './beliefs.js';
 import { getBestIntention, createIntention } from './deliberation.js';
-import { generateBestIntention } from '../llm/intentionAgent.js';
-import { generateBestIntentionFromPolicy } from '../llm/policyAgent.js';
 import { broadcastIntention } from '../multi/notifier.js';
 import { isParcelClaimedByPeer, requestTakeover, evaluateHandoff, requestHandoff } from '../multi/coordinator.js';
 import { MSG_TYPE, onMessage } from '../multi/communication.js';
@@ -39,8 +37,14 @@ let deliberationInFlight = false;
  * @returns {Promise<Intention>}
  */
 async function deliberate() {
-    if (USE_LLM_CODEGEN) return generateBestIntentionFromPolicy();
-    if (USE_LLM) return generateBestIntention();
+    if (USE_LLM_CODEGEN) {
+        const { generateBestIntentionFromPolicy } = await import('../llm/policyAgent.js');
+        return generateBestIntentionFromPolicy();
+    }
+    if (USE_LLM) {
+        const { generateBestIntention } = await import('../llm/intentionAgent.js');
+        return generateBestIntention();
+    }
     return getBestIntention();
 }
 
@@ -197,7 +201,7 @@ function isIntentionStillValid(intention) {
 /**
  * revise(force = false) - Main revision function.
  * Called:
- *   - On each sensing event from index.js
+ *   - On each sensing event from index_a.js / index_b.js
  *   - In forced mode after a failure or completion
  */
 export async function revise(force = false) {
@@ -258,7 +262,7 @@ export async function revise(force = false) {
     }
 }
 
-// Called by index.js on each sensing event
+// Called by index_a.js and index_b.js on each sensing event
 export function onSensingRevise() {
     revise(false);
 }
@@ -271,7 +275,7 @@ export function onSensingRevise() {
  * by at least IMPROVEMENT_THRESHOLD, so the LLM cannot interrupt a
  * high-value pickup mid-execution.
  *
- * Call once from index.js after initCoordinator().
+ * Call once from index_a.js / index_b.js after initCoordinator().
  */
 export function initZoneAssignHandler() {
     onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {

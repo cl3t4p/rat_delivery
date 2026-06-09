@@ -26,11 +26,13 @@ import {
 import {
     onSensingRevise,
     getCurrentIntention,
+    forceIntention,
+    revise,
     initZoneAssignHandler,
 } from './bdi/intentionRevision.js';
 
 import { startExecutor } from './bdi/executor.js';
-import { updateContext, setObjective } from './llm/llmAgent.js';
+import { updateContext, setObjective, initLlmAgent } from './llm/llmAgent.js';
 import { initCommunication, onFallbackMsg } from './multi/communication.js';
 import { initCoordinator, startZoneAssignmentLoop } from './multi/coordinator.js';
 import { enableNotifier, tickBeliefDelta } from './multi/notifier.js';
@@ -45,7 +47,8 @@ const socket = DjsConnect(process.env.HOST, process.env.TOKEN_B);
 // Multi-agent layer.
 // Agent B owns the LLM coordination loop.
 initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
-initCoordinator();
+initCoordinator({ getCurrentIntention, forceIntention });
+initLlmAgent(revise);
 initZoneAssignHandler();
 startZoneAssignmentLoop();
 enableNotifier();

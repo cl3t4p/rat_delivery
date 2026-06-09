@@ -14,8 +14,6 @@
 
 import { beliefs, manhattanDistance } from '../bdi/beliefs.js';
 import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast } from './communication.js';
-import { callZoneAssignment } from '../llm/llmAgent.js';
-import { getCurrentIntention, forceIntention } from '../bdi/intentionRevision.js';
 import { findNearestDeliveryTile, createIntention } from '../bdi/deliberation.js';
 
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
@@ -157,40 +155,53 @@ export function evaluateHandoff() {
     const posA = { x: beliefs.me.x, y: beliefs.me.y };
     const posB = { x: peer.x, y: peer.y };
 
-    // Simplified: meetTile = nearest delivery tile from A
-    const meetTile = findNearestDeliveryTile(posA);
-    if (!meetTile) return null;
+    // meetTile = midpoint between A and B, rounded to nearest integer
+    const meetTile = {
+        x: Math.round((posA.x + posB.x) / 2),
+        y: Math.round((posA.y + posB.y) / 2),
+    };
 
-    const distADel  = manhattanDistance(posA, meetTile);
-    const distBMeet = manhattanDistance(posB, meetTile);
+    const delivery = findNearestDeliveryTile(meetTile);
+    if (!delivery) return null;
 
-    // Condition 1: B is closer to the delivery tile than A
-    const condition1 = distBMeet < distADel;
+    const distADel   = manhattanDistance(posA, delivery);
+    const distAMeet  = manhattanDistance(posA, meetTile);
+    const distBMeet  = manhattanDistance(posB, meetTile);
+    const distMeetDel = manhattanDistance(meetTile, delivery);
+
+    // Condition 1: full handoff route is shorter than A delivering alone
+    const condition1 = distAMeet + distBMeet + distMeetDel < distADel;
 
     // Condition 2: B's detour to meetTile costs less than its current path
     const peerTarget = peer.intention?.targetPos ?? findNearestDeliveryTile(posB);
     const distBCurrent = peerTarget
         ? manhattanDistance(posB, peerTarget)
         : Infinity;
-    const condition2 = distBMeet < distBCurrent;
+    const condition2 = distBMeet + distMeetDel < distBCurrent;
 
     if (!condition1 || !condition2) return null;
 
     console.log(
-        `[coord] Handoff viable: distA=${distADel} distB=${distBMeet} distBCurrent=${distBCurrent}`
+        `[coord] Handoff viable: distADel=${distADel} route=${distAMeet}+${distBMeet}+${distMeetDel}`
     );
     return { meetTile, peerId: peer.id };
 }
 
 // Initialization
 
+/** @type {() => (import('../shared/types.js').Intention|null)} */
+let _getCurrentIntention = () => null;
+/** @type {(intention: import('../shared/types.js').Intention) => void} */
+let _forceIntention = () => {};
+
 /**
- * Subscribes to the four message types so incoming envelopes flow into
- * the peer registry and reservation table.
+ * Initialises the coordinator.
  *
- * Call once, after `initCommunication(...)`.
+ * @param {{ getCurrentIntention: Function, forceIntention: Function }} callbacks
  */
-export function initCoordinator() {
+export function initCoordinator({ getCurrentIntention, forceIntention }) {
+    _getCurrentIntention = getCurrentIntention;
+    _forceIntention = forceIntention;
     onMessage(MSG_TYPE.BELIEF_UPDATE, handleBeliefUpdate);
     onMessage(MSG_TYPE.INTENTION_UPDATE, handleIntentionUpdate);
     onMessage(MSG_TYPE.REQUEST, handleRequest);
@@ -198,7 +209,6 @@ export function initCoordinator() {
     onMessage(MSG_TYPE.HANDOFF_REQUEST, handleHandoffRequest);
     console.log('[coord] init ok');
 }
-
 // Zone assignment loop
 
 // Runs every ZONE_ASSIGN_INTERVAL_MS. Fires early when the local agent is
@@ -213,14 +223,14 @@ const BOTH_BUSY_SCORE_THRESHOLD = 10;
  * Calls the LLM every 30 seconds (or immediately when the agent is idle)
  * and sends a go_to assignment to self and, if a peer is known, to the peer.
  *
- * Call once from index.js after initCoordinator().
+ * Call once from index_b.js after initCoordinator().
  */
 export function startZoneAssignmentLoop() {
     let lastCallTime = 0;
 
     async function tick() {
         const now = Date.now();
-        const intention = getCurrentIntention();
+        const intention = _getCurrentIntention();
         const isIdle = !intention ||
             intention.type === 'wait' ||
             intention.type === 'explore';
@@ -259,6 +269,7 @@ export function startZoneAssignmentLoop() {
         const zoneStats = computeZoneStats();
         lastCallTime = now;
 
+        const { callZoneAssignment } = await import('../llm/llmAgent.js');
         const assignment = await callZoneAssignment(zoneStats, posA, posB);
         if (!assignment) {
             setTimeout(tick, 1_000);
@@ -442,8 +453,7 @@ function handleBeliefUpdate(envelope, senderId, senderName) {
         if (typeof me.carrying === 'number') peer.carrying = me.carrying;
     }
     // Note: peer-reported parcel/agent deltas are not merged into our own
-    // beliefs in Week 3 — doing so safely needs a provenance/trust model.
-    // We use them only to keep peer position fresh.
+    // beliefs — doing so safely needs a provenance/trust model.
 }
 
 function handleIntentionUpdate(envelope, senderId, senderName) {
@@ -494,7 +504,7 @@ function handleRequest(envelope, senderId, senderName, reply) {
         return;
     }
 
-    // avoid_tile / status_check — stubbed for Week 3.
+    // avoid_tile / status_check — not implemented.
     replyTo(envelope, false, 'unknown');
 }
 
@@ -520,7 +530,7 @@ function handleHandoffRequest(envelope, senderId) {
         return;
     }
 
-    const myIntention = getCurrentIntention();
+    const myIntention = _getCurrentIntention();
     const isBusy =
         myIntention &&
         myIntention.status === 'active' &&
@@ -536,7 +546,7 @@ function handleHandoffRequest(envelope, senderId) {
     console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
 
     const receiveIntention = createIntention('go_handoff_receive', null, meetTile, 0);
-    forceIntention(receiveIntention);
+    _forceIntention(receiveIntention);
 }
 
 // Helpers
