@@ -5,15 +5,17 @@
  *
  */
 
-import { beliefs, isWalkable } from './beliefs.js';
+import { beliefs, isWalkable, manhattanDistance } from './beliefs.js';
 import { getBestIntention, createIntention } from './deliberation.js';
 import { broadcastIntention } from '../multi/notifier.js';
 import { isParcelClaimedByPeer, requestTakeover, evaluateHandoff, requestHandoff } from '../multi/coordinator.js';
 import { MSG_TYPE, onMessage } from '../multi/communication.js';
+import { aStar } from './pathfinding.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
 const IMPROVEMENT_THRESHOLD = 5;
+const SAME_ZONE_TARGET_DISTANCE = 2;
 
 // When enabled, the next intention is chosen by the standalone LLM agent
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
@@ -287,15 +289,53 @@ export function initZoneAssignHandler() {
 
         const score = payloadScore ?? totalReward ?? 0;
 
-        if (
+        const currentScore = currentIntention?.score ?? 0;
+        const currentType = currentIntention?.type ?? null;
+
+        const isLowValueIntention =
+            !currentIntention ||
+            currentType === 'wait' ||
+            currentType === 'explore' ||
+            (currentType === 'go_to' && currentScore <= 0);
+
+        const hasImportantIntention =
             currentIntention &&
             currentIntention.status === 'active' &&
-            score - currentIntention.score <= IMPROVEMENT_THRESHOLD
+            !isLowValueIntention;
+
+        if (
+            currentIntention?.targetPos &&
+            manhattanDistance(currentIntention.targetPos, center) <= SAME_ZONE_TARGET_DISTANCE
+        ) {
+            console.log(
+                `[intentionRevision] Zone assign ignored: target already close ` +
+                `current=(${currentIntention.targetPos.x},${currentIntention.targetPos.y}) ` +
+                `assigned=(${center.x},${center.y})`
+            );
+            return;
+        }
+
+        const myPos =
+        beliefs.me.x !== null && beliefs.me.y !== null
+            ? { x: beliefs.me.x, y: beliefs.me.y }
+            : null;
+
+        if (myPos && !aStar(myPos, center, { avoidAgents: false })) {
+            console.log(
+                `[intentionRevision] Zone assign ignored: unreachable center ` +
+                `(${center.x},${center.y})`
+            );
+            return;
+        }
+
+        if (
+            hasImportantIntention &&
+            score - currentScore <= IMPROVEMENT_THRESHOLD
         ) {
             console.log(
                 `[intentionRevision] Zone assign ignored: ` +
                 `assignment=${score.toFixed(1)} ` +
-                `current=${currentIntention.score.toFixed(1)} ` +
+                `current=${currentScore.toFixed(1)} ` +
                 `threshold=${IMPROVEMENT_THRESHOLD}`
             );
             return;

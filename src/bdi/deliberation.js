@@ -155,11 +155,18 @@ export function getBestIntention() {
         const onIdx = spawners.findIndex((s) => s.x === me.x && s.y === me.y);
         let target;
         if (onIdx !== -1) {
-            target = spawners[(onIdx + 1) % spawners.length];
+            const rotated = [
+                ...spawners.slice(onIdx + 1),
+                ...spawners.slice(0, onIdx),
+            ];
+            target = findBestReachableSpawnerTile(me, rotated);
         } else {
-            target = spawners.reduce((best, s) =>
-                manhattanDistance(me, s) < manhattanDistance(me, best) ? s : best
-            );
+            target = findBestReachableSpawnerTile(me, spawners);
+        }
+
+        if (!target) {
+            console.log('[deliberation] No reachable spawner → wait');
+            return createIntention('wait', null, null, 0);
         }
         const reason = spawnsAreRare
             ? `spawns rare (${genMs}ms)`
@@ -171,7 +178,7 @@ export function getBestIntention() {
     }
 
     // Frequent spawns (or a single spawner): camp the nearest one.
-    const spawner = findNearestSpawnerTile(me);
+    const spawner = findBestReachableSpawnerTile(me);
     if (spawner) {
         if (manhattanDistance(me, spawner) === 0) {
             console.log('[deliberation] On a spawner → wait');
@@ -286,6 +293,30 @@ export function findBestPickUp(myPos) {
     }
 
     return bestIntention;
+}
+
+/**
+ * Finds the reachable spawner with the shortest real path.
+ *
+ * @param {Position} myPos
+ * @param {Position[]} [spawners]
+ * @returns {Position|null}
+ */
+export function findBestReachableSpawnerTile(myPos, spawners = findSpawnerTiles()) {
+    let best = null;
+    let bestLen = Infinity;
+
+    for (const spawner of spawners) {
+        const result = aStar(myPos, spawner, { avoidAgents: false });
+        if (!result) continue;
+
+        if (result.moves.length < bestLen) {
+            best = spawner;
+            bestLen = result.moves.length;
+        }
+    }
+
+    return best;
 }
 
 /**

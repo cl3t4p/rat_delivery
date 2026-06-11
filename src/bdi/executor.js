@@ -139,8 +139,15 @@ async function stepTowardsTarget(socket, intention) {
     if (!intention.plan || intention.plan.length === 0) {
         const moves = await computePlan(intention);
         if (moves.length === 0) {
+            console.log(`[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`);
+            blacklistCellTemporary(
+                intention.targetPos.x,
+                intention.targetPos.y,
+                STUCK_BLACKLIST_TTL_MS
+            );
             console.log(
-                `[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`
+                `[executor] Temporary blacklist target ` +
+                `(${intention.targetPos.x},${intention.targetPos.y}) for ${STUCK_BLACKLIST_TTL_MS}ms after no_path`
             );
             notifyActionFailed('no_path');
             return;
