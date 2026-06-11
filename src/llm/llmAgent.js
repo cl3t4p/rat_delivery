@@ -159,7 +159,7 @@ export async function callLLM(messages, { temperature = 0 } = {}) {
  * for each agent. Used by the coordinator zone-assignment loop.
  *
  * Zones: topLeft, topRight, bottomLeft, bottomRight.
- * Each zone is described by three numbers: totalReward, freeParcels, spawnerCount.
+ * Each zone includes totalReward, freeParcels, spawnerCount, and agent-specific best scores computed with delivery-aware scoring.
  *
  * @param {object} zoneStats - { topLeft, topRight, bottomLeft, bottomRight }
  *   each with { totalReward: number, freeParcels: number, spawnerCount: number }
@@ -178,12 +178,16 @@ export async function callZoneAssignment(zoneStats, posA, posB) {
     : [];
 
     const prompt = [
-        'You assign two delivery agents to map zones to maximise total parcel reward.',
+        'You assign two delivery agents to map zones to maximise total delivered value.',
         '',
         ...constraintBlock,
-        'Zones (totalReward / freeParcels / spawners):',
+        'Zone scores already include parcel reward, distance to delivery, distance from the agent, and decay.',
+        'Use bestScoreForA and bestScoreForB as the main decision signal.',
+        'Do not assign zones using totalReward alone: totalReward is only context.',
+        '',
+        'Zones (totalReward / freeParcels / spawners / bestScoreForA / bestScoreForB):',
         ...Object.entries(zoneStats).map(
-            ([name, s]) => `  ${name}: reward=${s.totalReward} parcels=${s.freeParcels} spawners=${s.spawnerCount}`
+            ([name, s]) => `  ${name}: reward=${s.totalReward} parcels=${s.freeParcels} spawners=${s.spawnerCount} scoreA=${(s.bestScoreForA ?? 0).toFixed(1)} scoreB=${(s.bestScoreForB ?? 0).toFixed(1)}`
         ),
         '',
         `Agent A is at (${posA.x},${posA.y}).`,

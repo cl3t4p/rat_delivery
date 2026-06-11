@@ -279,13 +279,13 @@ export function onSensingRevise() {
  */
 export function initZoneAssignHandler() {
     onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {
-        const { targetId, center, totalReward } = envelope.payload ?? {};
+        const { targetId, center, score: payloadScore, totalReward } = envelope.payload ?? {};
 
         // Ignore assignments meant for the other agent.
         if (targetId !== beliefs.me.id) return;
         if (!center) return;
 
-        const score = totalReward ?? 0;
+        const score = payloadScore ?? totalReward ?? 0;
 
         if (
             currentIntention &&

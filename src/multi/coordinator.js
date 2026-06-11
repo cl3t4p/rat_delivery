@@ -68,10 +68,11 @@ function getZone(pos) {
 
 /**
  * Computes aggregated stats for each of the four map zones.
+ * Includes bestScoreForA and bestScoreForB using pickupValue from scoring.js.
  *
- * @returns {Record<string, { totalReward: number, freeParcels: number, spawnerCount: number }>}
+ * @returns {Record<string, { totalReward: number, freeParcels: number, spawnerCount: number, bestScoreForA: number, bestScoreForB: number }>}
  */
-function computeZoneStats() {
+async function computeZoneStats() {
     let maxX = 0;
     let maxY = 0;
     for (const key of beliefs.grid.keys()) {
@@ -79,21 +80,36 @@ function computeZoneStats() {
         if (x > maxX) maxX = x;
         if (y > maxY) maxY = y;
     }
-    const midX = maxX / 2;
-    const midY = maxY / 2;
 
     const zones = {
-        topLeft:     { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
-        topRight:    { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
-        bottomLeft:  { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
-        bottomRight: { totalReward: 0, freeParcels: 0, spawnerCount: 0 },
+        topLeft:     { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForA: 0, bestScoreForB: 0 },
+        topRight:    { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForA: 0, bestScoreForB: 0 },
+        bottomLeft:  { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForA: 0, bestScoreForB: 0 },
+        bottomRight: { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForA: 0, bestScoreForB: 0 },
     };
+
+    // Import scoring functions dynamically to avoid circular dependencies.
+    const { pickupValue } = await import('../bdi/scoring.js');
+    const { findNearestDeliveryTile } = await import('../bdi/deliberation.js');
+
+    const posA = { x: beliefs.me.x, y: beliefs.me.y };
+    const peers = getPeers();
+    const peer = peers[0] ?? null;
+    const posB = peer && peer.x !== null ? { x: peer.x, y: peer.y } : posA;
 
     for (const p of beliefs.parcels.values()) {
         if (p.carriedBy) continue;
         const zone = getZone({ x: p.x, y: p.y });
         zones[zone].freeParcels++;
         zones[zone].totalReward += p.reward;
+
+        const deliveryTile = findNearestDeliveryTile({ x: p.x, y: p.y });
+        if (deliveryTile) {
+            const scoreA = pickupValue(p, posA, deliveryTile);
+            const scoreB = pickupValue(p, posB, deliveryTile);
+            if (scoreA > zones[zone].bestScoreForA) zones[zone].bestScoreForA = scoreA;
+            if (scoreB > zones[zone].bestScoreForB) zones[zone].bestScoreForB = scoreB;
+        }
     }
 
     for (const [key, tile] of beliefs.grid) {
@@ -266,7 +282,7 @@ export function startZoneAssignmentLoop() {
             ? { x: peer.x, y: peer.y }
             : posA; // fallback: treat B as co-located
 
-        const zoneStats = computeZoneStats();
+        const zoneStats = await computeZoneStats();
 
         const { callZoneAssignment } = await import('../llm/llmAgent.js');
         const assignment = await callZoneAssignment(zoneStats, posA, posB);
@@ -283,6 +299,7 @@ export function startZoneAssignmentLoop() {
             targetId: beliefs.me.id,
             zone: assignment.assignA,
             center: myZone,
+            score: zoneStats[assignment.assignA].bestScoreForA,
             totalReward: zoneStats[assignment.assignA].totalReward,
         });
 
@@ -294,6 +311,7 @@ export function startZoneAssignmentLoop() {
                 targetId: peer.id,
                 zone: assignment.assignB,
                 center: peerZone,
+                score: zoneStats[assignment.assignB].bestScoreForB,
                 totalReward: zoneStats[assignment.assignB].totalReward,
             });
         }
