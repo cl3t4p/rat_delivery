@@ -267,10 +267,10 @@ export function startZoneAssignmentLoop() {
             : posA; // fallback: treat B as co-located
 
         const zoneStats = computeZoneStats();
-        lastCallTime = now;
 
         const { callZoneAssignment } = await import('../llm/llmAgent.js');
         const assignment = await callZoneAssignment(zoneStats, posA, posB);
+        lastCallTime = now;
         if (!assignment) {
             setTimeout(tick, 1_000);
             return;
