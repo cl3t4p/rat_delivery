@@ -104,9 +104,13 @@ export function getBestIntention() {
                             const gain = detourValue(parcel, me, beliefs.me.carrying, parcelDelivery);
 
                             if (gain > 0) {
+                                const deliveryScore = deliveryValue(beliefs.me.carrying, me, target);
+                                pickUp.score = deliveryScore + gain;
+
                                 console.log(
                                     `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
-                                    `gain=${gain.toFixed(1)}`
+                                    `gain=${gain.toFixed(1)} ` +
+                                    `score=${pickUp.score.toFixed(1)}`
                                 );
                                 return pickUp;
                             }
