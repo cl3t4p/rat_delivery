@@ -46,6 +46,7 @@ export const beliefs = {
 };
 
 // Functions
+
 /**
  * Updates the known map tiles.
  *
@@ -59,9 +60,6 @@ export function updateMap(tiles) {
 
     for (const tile of tiles) {
         const key = `${tile.x},${tile.y}`;
-        // Built-in maps send tile types as strings ('2'), but file-loaded JSON
-        // maps send them as numbers (2). Normalise to string so every '0'/'1'/'2'
-        // comparison downstream (grid walls, spawners, delivery) works either way.
         const type = String(tile.type);
         beliefs.grid.set(key, {
             type,
@@ -78,16 +76,37 @@ export function updateMap(tiles) {
 }
 
 /**
- * Updates the agent state.
+ * Updates the agent's own state from a sensing event.
+ *
+ * Also measures the real ms-per-step dynamically using a moving average,
+ * so scoring functions can estimate decay accurately.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent} data
  */
 export function updateMe(data) {
+    const prevX = beliefs.me.x;
+    const prevY = beliefs.me.y;
+    const now = Date.now();
+
     beliefs.me.id = data.id;
     beliefs.me.name = data.name;
     beliefs.me.x = data.x;
     beliefs.me.y = data.y;
     beliefs.me.score = data.score;
+
+    // Measure real ms per step dynamically using a moving average.
+    // Only update when the agent moved exactly 1 tile.
+    if (prevX !== null && prevY !== null) {
+        const moved = Math.abs(data.x - prevX) + Math.abs(data.y - prevY);
+        if (Math.round(moved) === 1) {
+            const elapsed = now - (beliefs.config._lastMoveTime ?? now);
+            if (elapsed > 0 && elapsed < 5000) {
+                const prev = beliefs.config.MS_PER_STEP ?? 500;
+                beliefs.config.MS_PER_STEP = prev * 0.8 + elapsed * 0.2;
+            }
+            beliefs.config._lastMoveTime = now;
+        }
+    }
 }
 
 /**
@@ -163,11 +182,25 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 }
 
 export function decayParcelsReward() {
+    // Called every 1000ms. If decay interval > 1000ms, decay happens
+    // less than once per call — track fractional accumulation.
+    const interval = beliefs.config?.PARCEL_DECADING_INTERVAL;
+    if (!interval || interval <= 0) return;
+
+    beliefs.config._decayAccumulatedMs =
+        (beliefs.config._decayAccumulatedMs ?? 0) + 1000;
+
+    const steps = Math.floor(beliefs.config._decayAccumulatedMs / interval);
+    if (steps === 0) return;
+
+    beliefs.config._decayAccumulatedMs -= steps * interval;
+
     for (const [id, p] of beliefs.parcels) {
-        if (p.reward - 1 <= 0) {
+        const newReward = p.reward - steps;
+        if (newReward <= 0) {
             beliefs.parcels.delete(id);
         } else {
-            beliefs.parcels.set(id, { ...p, reward: p.reward - 1 });
+            beliefs.parcels.set(id, { ...p, reward: newReward });
         }
     }
 }

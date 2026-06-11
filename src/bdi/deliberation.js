@@ -7,6 +7,12 @@
 
 import { beliefs, manhattanDistance } from './beliefs.js';
 import { shouldYieldParcel } from '../multi/coordinator.js';
+import {
+    pickupValue,
+    deliveryValue,
+    detourValue,
+} from './scoring.js';
+import { aStar } from './pathfinding.js';
 
 // When parcels spawn at least this rarely, camping one spawner is wasteful, so
 // we roam between spawn points instead. Compared against the already-parsed
@@ -75,32 +81,35 @@ export function getBestIntention() {
 
             // If at full capacity, deliver immediately.
             if (beliefs.me.carrying.length >= capacity) {
-                const target = findNearestDeliveryTile(me);
+                const target = findBestDeliveryTile(me);
                 if (target) {
-                    const dist = manhattanDistance(me, target);
-                    const totalReward = beliefs.me.carrying
-                        .map((id) => beliefs.parcels.get(id)?.reward ?? 0)
-                        .reduce((a, b) => a + b, 0);
+                    const dvScore = deliveryValue(beliefs.me.carrying, me, target);
                     console.log(`[deliberation] go_deliver (full) to (${target.x},${target.y})`);
-                    return createIntention('go_deliver', null, target, totalReward - dist);
+                    return createIntention('go_deliver', null, target, dvScore);
                 }
             }
 
-            // If not at full capacity, check whether a nearby free parcel is worth picking up.
-            const pickUp = findBestPickUp(me);
-            if (pickUp && pickUp.score > 0) {
-                return pickUp;
-            }
-
-            // No convenient parcel found, so deliver the currently carried parcels.
-            const target = findNearestDeliveryTile(me);
+            // If not at full capacity, check whether a detour to pick up an extra parcel is worth more than delivering immediately.
+            const target = findBestDeliveryTile(me);
             if (target) {
-                const dist = manhattanDistance(me, target);
-                const totalReward = beliefs.me.carrying
-                    .map((id) => beliefs.parcels.get(id)?.reward ?? 0)
-                    .reduce((a, b) => a + b, 0);
+                const pickUp = findBestPickUp(me);
+                if (pickUp) {
+                    const parcel = beliefs.parcels.get(pickUp.parcelId);
+                    if (parcel) {
+                        const parcelDelivery = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
+                        if (
+                            parcelDelivery &&
+                            detourValue(parcel, me, beliefs.me.carrying, parcelDelivery) > 0
+                        ) {
+                            console.log(`[deliberation] Detour worth it → go_pick_up ${pickUp.parcelId}`);
+                            return pickUp;
+                        }
+                    }
+                }
+
+                const dvScore = deliveryValue(beliefs.me.carrying, me, target);
                 console.log(`[deliberation] go_deliver to (${target.x},${target.y})`);
-                return createIntention('go_deliver', null, target, totalReward - dist);
+                return createIntention('go_deliver', null, target, dvScore);
             }
         }
     }
@@ -182,6 +191,35 @@ export function findNearestDeliveryTile(myPos) {
 }
 
 /**
+ * Finds the reachable delivery tile with the shortest real path.
+ *
+ * Falls back to Manhattan nearest if A* cannot find any reachable delivery.
+ *
+ * @param {Position} myPos - Current or candidate position.
+ * @returns {Position|null}
+ */
+export function findBestDeliveryTile(myPos) {
+    if (beliefs.deliveryTiles.length === 0) return null;
+
+    let best = null;
+    let bestLen = Infinity;
+
+    for (const tile of beliefs.deliveryTiles) {
+        const result = aStar(myPos, tile, { avoidAgents: false });
+        if (!result) continue;
+
+        if (result.moves.length < bestLen) {
+            bestLen = result.moves.length;
+            best = tile;
+        }
+    }
+
+    if (best) return best;
+
+    return findNearestDeliveryTile(myPos);
+}
+
+/**
  * Finds the free parcel with the highest utility score.
  *
  * @param {Position} myPos - Current position.
@@ -196,8 +234,9 @@ export function findBestPickUp(myPos) {
         if (parcel.reward <= 0) continue; // Skip parcels with no remaining reward.
         if (shouldYieldParcel(parcel.id, myPos)) continue; // Peer claimed it and is closer.
 
-        const dist = manhattanDistance(myPos, { x: parcel.x, y: parcel.y });
-        const score = parcel.reward - dist;
+        const deliveryTile = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
+        if (!deliveryTile) continue;
+        const score = pickupValue(parcel, myPos, deliveryTile);
 
         if (score > bestScore) {
             bestScore = score;
@@ -209,6 +248,8 @@ export function findBestPickUp(myPos) {
             );
         }
     }
+
+    if (bestScore <= 0) return null;
 
     if (bestIntention) {
         console.log(

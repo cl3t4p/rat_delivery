@@ -71,7 +71,7 @@ socket.on('sensing', (sensing) => {
 });
 
 socket.onConfig((config) => {
-    beliefs.config.PARCEL_DECADING_INTERVAL = config?.GAME?.parcels?.decaying_event ?? null;
+    beliefs.config.PARCEL_DECADING_INTERVAL = clockEventToMs(config?.GAME?.parcels?.decaying_event) ?? null;
     beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(
         config?.GAME?.parcels?.generation_event
     );
