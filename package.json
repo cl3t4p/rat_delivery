@@ -22,7 +22,8 @@
     "planner:logs": "docker compose -f docker-compose.planner.yml logs -f web worker",
 
     "format": "prettier --write \"**/*.js\"",
-    "format:check": "prettier --check \"**/*.js\""
+    "format:check": "prettier --check \"**/*.js\"",
+    "test:scoring": "node scripts/test-scoring.mjs"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "^1.3.5",

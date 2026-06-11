@@ -79,6 +79,9 @@ socket.onConfig((config) => {
     beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
 
     console.log('[index_b] Config:', beliefs.config);
+    console.log(
+        `[index_b] Decay interval: ${beliefs.config.PARCEL_DECADING_INTERVAL}ms`
+    );
 });
 
 setInterval(() => {

@@ -84,7 +84,10 @@ export function getBestIntention() {
                 const target = findBestDeliveryTile(me);
                 if (target) {
                     const dvScore = deliveryValue(beliefs.me.carrying, me, target);
-                    console.log(`[deliberation] go_deliver (full) to (${target.x},${target.y})`);
+                    console.log(
+                        `[deliberation] go_deliver (full) to (${target.x},${target.y}) ` +
+                        `estimatedReward=${dvScore.toFixed(1)}`
+                    );
                     return createIntention('go_deliver', null, target, dvScore);
                 }
             }
@@ -97,18 +100,30 @@ export function getBestIntention() {
                     const parcel = beliefs.parcels.get(pickUp.parcelId);
                     if (parcel) {
                         const parcelDelivery = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
-                        if (
-                            parcelDelivery &&
-                            detourValue(parcel, me, beliefs.me.carrying, parcelDelivery) > 0
-                        ) {
-                            console.log(`[deliberation] Detour worth it → go_pick_up ${pickUp.parcelId}`);
-                            return pickUp;
+                        if (parcelDelivery) {
+                            const gain = detourValue(parcel, me, beliefs.me.carrying, parcelDelivery);
+
+                            if (gain > 0) {
+                                console.log(
+                                    `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
+                                    `gain=${gain.toFixed(1)}`
+                                );
+                                return pickUp;
+                            }
+
+                            console.log(
+                                `[deliberation] Detour rejected parcel=${pickUp.parcelId} ` +
+                                `gain=${gain.toFixed(1)}`
+                            );
                         }
                     }
                 }
 
                 const dvScore = deliveryValue(beliefs.me.carrying, me, target);
-                console.log(`[deliberation] go_deliver to (${target.x},${target.y})`);
+                console.log(
+                    `[deliberation] go_deliver to (${target.x},${target.y}) ` +
+                    `estimatedReward=${dvScore.toFixed(1)}`
+                );
                 return createIntention('go_deliver', null, target, dvScore);
             }
         }
@@ -252,8 +267,17 @@ export function findBestPickUp(myPos) {
     if (bestScore <= 0) return null;
 
     if (bestIntention) {
+        const parcel = beliefs.parcels.get(bestIntention.parcelId);
+        const deliveryTile = parcel
+            ? findNearestDeliveryTile({ x: parcel.x, y: parcel.y })
+            : null;
+
         console.log(
-            `[deliberation] go_pick_up parcel=${bestIntention.parcelId} score=${bestIntention.score.toFixed(1)}`
+            `[deliberation] go_pick_up parcel=${bestIntention.parcelId} ` +
+            `score=${bestIntention.score.toFixed(1)} ` +
+            `parcelReward=${parcel?.reward ?? '?'} ` +
+            `target=(${bestIntention.targetPos.x},${bestIntention.targetPos.y})` +
+            (deliveryTile ? ` delivery=(${deliveryTile.x},${deliveryTile.y})` : '')
         );
     }
 

@@ -293,7 +293,10 @@ export function initZoneAssignHandler() {
             score - currentIntention.score <= IMPROVEMENT_THRESHOLD
         ) {
             console.log(
-                `[intentionRevision] Zone assign ignored: score=${score} not better than current=${currentIntention.score}`
+                `[intentionRevision] Zone assign ignored: ` +
+                `assignment=${score.toFixed(1)} ` +
+                `current=${currentIntention.score.toFixed(1)} ` +
+                `threshold=${IMPROVEMENT_THRESHOLD}`
             );
             return;
         }
