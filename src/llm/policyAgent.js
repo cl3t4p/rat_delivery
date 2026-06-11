@@ -34,11 +34,16 @@ import {
 import {
     createIntention,
     findNearestDeliveryTile,
+    findBestDeliveryTile,
     findNearestSpawnerTile,
     getBestIntention,
 } from '../bdi/deliberation.js';
 import { llmClient, llmMemory } from './llmAgent.js';
 import { buildStateSnapshot } from './intentionAgent.js';
+import {
+    pickupValue,
+    deliveryValue,
+} from '../bdi/scoring.js';
 
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 
@@ -70,7 +75,7 @@ calling one of the builders in \`actions\`. Never build intentions yourself.
 state (read-only) shape:
 {
   me: { x, y, carrying /* number held */, carryingIds: string[] },
-  freeParcels: [ { id, x, y, reward, distance /* manhattan from me */ } ],
+  freeParcels: [ { id, x, y, reward, distanceToParcel, distanceToDelivery, estimatedRewardAtDelivery, score } ],
   deliveryTiles: [ { x, y } ],
   otherAgents: [ { x, y } ],
   blacklist: [ { x, y } ]   // cells currently marked impassable (avoided by movement)
@@ -91,8 +96,10 @@ actions API (each returns an intention, or null when not applicable):
   actions.clearBlacklist()                         // clear all blacklisted cells
 
 Decision guidance:
-- Maximise reward minus distance when choosing a parcel (use the given distance).
-- If carrying and no clearly better pickup exists, goDeliver before reward decays.
+- Each parcel in state.freeParcels has a score = estimatedRewardAtDelivery - total route distance.
+- Pick the parcel with the highest score. Never pick a parcel with score <= 0.
+- If carrying, prefer goDeliver unless a detour clearly improves total estimated value.
+- Do not pick parcels that will be worthless (estimatedRewardAtDelivery = 0) at delivery.
 - Never pick up when me.carrying >= world.maxCarry.
 - If world.parcelGenerationMs is large (>= 5000) and nothing good is nearby,
   prefer goTo a far / less-crowded region instead of camping the nearest spawner.
@@ -123,18 +130,18 @@ function buildActions(me) {
             const p = parcelId ? beliefs.parcels.get(parcelId) : null;
             if (!p || p.carriedBy || p.reward <= 0) return null;
             if (beliefs.me.carrying.length >= (beliefs.config?.MAX_PARCELS ?? 1)) return null;
-            const dist = manhattanDistance(me, { x: p.x, y: p.y });
-            return createIntention('go_pick_up', p.id, { x: p.x, y: p.y }, p.reward - dist);
+            const deliveryTile = findNearestDeliveryTile({ x: p.x, y: p.y });
+            if (!deliveryTile) return null;
+            const score = pickupValue(p, me, deliveryTile);
+            if (score <= 0) return null;
+            return createIntention('go_pick_up', p.id, { x: p.x, y: p.y }, score);
         },
         goDeliver() {
             if (beliefs.me.carrying.length === 0) return null;
-            const target = findNearestDeliveryTile(me);
+            const target = findBestDeliveryTile(me);
             if (!target) return null;
-            const dist = manhattanDistance(me, target);
-            const total = beliefs.me.carrying
-                .map((id) => beliefs.parcels.get(id)?.reward ?? 0)
-                .reduce((a, b) => a + b, 0);
-            return createIntention('go_deliver', null, target, total - dist);
+            const score = deliveryValue(beliefs.me.carrying, me, target);
+            return createIntention('go_deliver', null, target, score);
         },
         explore() {
             const spawner = findNearestSpawnerTile(me);
