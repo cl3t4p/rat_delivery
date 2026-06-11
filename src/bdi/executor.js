@@ -9,7 +9,7 @@
  *   5. Notifies intentionRevision with done / failed
  */
 
-import { beliefs, canEnter } from './beliefs.js';
+import { beliefs, canEnter, blacklistCellTemporary } from './beliefs.js';
 import { planTo } from './pathfinding.js';
 import { planWithPDDL } from '../pddl/pddlPlanner.js';
 import {
@@ -31,6 +31,8 @@ import { broadcastIntention } from '../multi/notifier.js';
 // Uses only the A* planner.
 const USE_PDDL = process.env.USE_PDDL === 'true';
 const PDDL_FALLBACK = process.env.PDDL_FALLBACK === 'true';
+const STUCK_FAILURE_THRESHOLD = 3;
+const STUCK_BLACKLIST_TTL_MS = 5000;
 
 // Maps each direction to its delta, used for the canEnter pre-check before emitMove.
 const DIR_DELTA = {
@@ -73,6 +75,8 @@ function meReady() {
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send actions.
  */
+const failedMoves = new Map();
+
 export async function startExecutor(socket) {
     /** @type {Intention | null} */
     let lastIntention = null;
@@ -159,13 +163,29 @@ async function stepTowardsTarget(socket, intention) {
     const moved = await socket.emitMove(dir);
 
     if (!moved) {
-        // Move failed, clear the plan and retry later
-        const targetTile = beliefs.grid.get(
-            `${fxBefore + (DIR_DELTA[dir]?.dx ?? 0)},${fyBefore + (DIR_DELTA[dir]?.dy ?? 0)}`
-        );
+        const tx = fxBefore + (DIR_DELTA[dir]?.dx ?? 0);
+        const ty = fyBefore + (DIR_DELTA[dir]?.dy ?? 0);
+        const targetKey = `${tx},${ty}`;
+        const targetTile = beliefs.grid.get(targetKey);
+
+        const failures = (failedMoves.get(targetKey) ?? 0) + 1;
+        failedMoves.set(targetKey, failures);
+
         console.log(
-            `[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) → tile=${targetTile?.type} moved=${JSON.stringify(moved)}`
+            `[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) ` +
+            `to (${tx},${ty}) tile=${targetTile?.type} failures=${failures} ` +
+            `moved=${JSON.stringify(moved)}`
         );
+
+        if (failures >= STUCK_FAILURE_THRESHOLD) {
+            blacklistCellTemporary(tx, ty, STUCK_BLACKLIST_TTL_MS);
+            failedMoves.delete(targetKey);
+
+            console.log(
+                `[executor] Temporary blacklist (${tx},${ty}) for ${STUCK_BLACKLIST_TTL_MS}ms after repeated move failures`
+            );
+        }
+
         intention.plan = [];
         notifyActionFailed('move_blocked');
         return;
@@ -174,6 +194,7 @@ async function stepTowardsTarget(socket, intention) {
     // Update the position without waiting for the next sensing update
     beliefs.me.x = moved.x;
     beliefs.me.y = moved.y;
+    failedMoves.clear();
 }
 
 /**

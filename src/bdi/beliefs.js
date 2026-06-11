@@ -35,6 +35,7 @@ export const beliefs = {
     deliveryTiles: [],
     crates: new Map(),
     blacklist: new Set(), // cell keys "x,y" the agent must avoid (set by the policy/LLM)
+    temporaryBlacklist: new Map(), // cell key "x,y" -> expiresAt timestamp
     config: {
         PARCEL_DECADING_INTERVAL: null,
         PARCEL_GENERATION_INTERVAL: null, // ms between parcel spawns (see clockEventToMs)
@@ -253,6 +254,18 @@ export function blacklistCell(x, y) {
     beliefs.blacklist.add(`${x},${y}`);
 }
 
+/**
+ * Temporarily blacklists a cell for pathfinding.
+ *
+ * @param {number} x
+ * @param {number} y
+ * @param {number} ttlMs
+ */
+export function blacklistCellTemporary(x, y, ttlMs = 5000) {
+    const key = `${x},${y}`;
+    beliefs.temporaryBlacklist.set(key, Date.now() + ttlMs);
+}
+
 /** @param {number} x @param {number} y */
 export function unblacklistCell(x, y) {
     beliefs.blacklist.delete(`${x},${y}`);
@@ -260,11 +273,24 @@ export function unblacklistCell(x, y) {
 
 /** @param {number} x @param {number} y @returns {boolean} */
 export function isBlacklisted(x, y) {
-    return beliefs.blacklist.has(`${x},${y}`);
+    const key = `${x},${y}`;
+
+    if (beliefs.blacklist.has(key)) return true;
+
+    const expiresAt = beliefs.temporaryBlacklist.get(key);
+    if (!expiresAt) return false;
+
+    if (Date.now() > expiresAt) {
+        beliefs.temporaryBlacklist.delete(key);
+        return false;
+    }
+
+    return true;
 }
 
 export function clearBlacklist() {
     beliefs.blacklist.clear();
+    beliefs.temporaryBlacklist.clear();
 }
 
 export { isWalkable, canEnter } from './grid.js';
