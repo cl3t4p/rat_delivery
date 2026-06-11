@@ -15,12 +15,14 @@
 import { beliefs, manhattanDistance } from '../bdi/beliefs.js';
 import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast } from './communication.js';
 import { findNearestDeliveryTile, createIntention } from '../bdi/deliberation.js';
+import { deliveryValue, estimatedRewardAtDelivery } from '../bdi/scoring.js';
 
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
 /** @typedef {import('../shared/types.js').Position} Position */
 
 const PEER_TIMEOUT_MS = 8000;
 const REQUEST_TIMEOUT_MS = 1500;
+const HANDOFF_GAIN_THRESHOLD = 2;
 
 /**
  * @typedef {Object} PeerRecord
@@ -180,9 +182,9 @@ export function evaluateHandoff() {
     const delivery = findNearestDeliveryTile(meetTile);
     if (!delivery) return null;
 
-    const distADel   = manhattanDistance(posA, delivery);
-    const distAMeet  = manhattanDistance(posA, meetTile);
-    const distBMeet  = manhattanDistance(posB, meetTile);
+    const distADel    = manhattanDistance(posA, delivery);
+    const distAMeet   = manhattanDistance(posA, meetTile);
+    const distBMeet   = manhattanDistance(posB, meetTile);
     const distMeetDel = manhattanDistance(meetTile, delivery);
 
     // Condition 1: full handoff route is shorter than A delivering alone
@@ -195,10 +197,28 @@ export function evaluateHandoff() {
         : Infinity;
     const condition2 = distBMeet + distMeetDel < distBCurrent;
 
-    if (!condition1 || !condition2) return null;
+    // Condition 3: estimated reward with handoff must exceed A delivering alone
+    const valueAAlone = deliveryValue(beliefs.me.carrying, posA, delivery);
+    const handoffSteps = distAMeet + distBMeet + distMeetDel;
+    const valueHandoff = beliefs.me.carrying.reduce((total, id) => {
+        const parcel = beliefs.parcels.get(id);
+        if (!parcel) return total;
+        return total + estimatedRewardAtDelivery(parcel.reward, handoffSteps);
+    }, 0);
+    const conditionValue = valueHandoff > valueAAlone + HANDOFF_GAIN_THRESHOLD;
+
+    if (!condition1 || !condition2 || !conditionValue) {
+        if (condition1 && condition2) {
+            // Route is shorter but reward does not improve — log and skip.
+            console.log(
+                `[coord] Handoff rejected: Aalone=${valueAAlone.toFixed(1)} handoff=${valueHandoff.toFixed(1)}`
+            );
+        }
+        return null;
+    }
 
     console.log(
-        `[coord] Handoff viable: distADel=${distADel} route=${distAMeet}+${distBMeet}+${distMeetDel}`
+        `[coord] Handoff viable: Aalone=${valueAAlone.toFixed(1)} handoff=${valueHandoff.toFixed(1)} route=${distAMeet}+${distBMeet}+${distMeetDel}`
     );
     return { meetTile, peerId: peer.id };
 }
