@@ -154,6 +154,34 @@ export async function callLLM(messages, { temperature = 0 } = {}) {
     return response.choices?.[0]?.message?.content ?? '';
 }
 
+// Zone diagonally opposite to each zone, used as a last-resort fallback.
+const OPPOSITE_ZONE = {
+    topLeft: 'bottomRight',
+    topRight: 'bottomLeft',
+    bottomLeft: 'topRight',
+    bottomRight: 'topLeft',
+};
+
+/**
+ * Picks the best zone for one agent among the zones not yet taken.
+ * Criteria: agent-specific score, then spawner count, then the zone
+ * diagonally opposite to the contested one. Never returns `excluded`.
+ *
+ * @param {object} zoneStats - Stats for all four zones.
+ * @param {'bestScoreForA'|'bestScoreForB'} scoreKey - Which agent's score to use.
+ * @param {string} excluded - The contested zone to avoid.
+ * @returns {string} A zone name different from `excluded`.
+ */
+function pickBestRemainingZone(zoneStats, scoreKey, excluded) {
+    const candidates = Object.entries(zoneStats)
+        .filter(([name]) => name !== excluded)
+        .sort(([, s1], [, s2]) =>
+            (s2[scoreKey] ?? 0) - (s1[scoreKey] ?? 0) ||
+            (s2.spawnerCount ?? 0) - (s1.spawnerCount ?? 0)
+        );
+    return candidates[0]?.[0] ?? OPPOSITE_ZONE[excluded];
+}
+
 /**
  * Calls the LLM with aggregated zone data and returns a zone assignment
  * for each agent. Used by the coordinator zone-assignment loop.
@@ -196,6 +224,7 @@ export async function callZoneAssignment(zoneStats, posA, posB) {
         'Reply with ONLY a JSON object, no prose, no markdown:',
         '{"assignA":"<zoneName>","assignB":"<zoneName>"}',
         'Zone names: topLeft, topRight, bottomLeft, bottomRight.',
+        'assignA and assignB MUST be two DIFFERENT zones.',
     ].join('\n');
 
     try {
@@ -206,6 +235,23 @@ export async function callZoneAssignment(zoneStats, posA, posB) {
         if (!valid.includes(parsed.assignA) || !valid.includes(parsed.assignB)) {
             console.log('[llmAgent] Zone assignment returned invalid zone names:', parsed);
             return null;
+        }
+        // The LLM may assign both agents to the same zone. Enforce distinct
+        // zones deterministically: the agent with the higher score in the
+        // contested zone keeps it, the other moves to its best remaining zone.
+        if (parsed.assignA === parsed.assignB) {
+            const contested = parsed.assignA;
+            const stats = zoneStats[contested] ?? {};
+            const aKeeps = (stats.bestScoreForA ?? 0) >= (stats.bestScoreForB ?? 0);
+            if (aKeeps) {
+                parsed.assignB = pickBestRemainingZone(zoneStats, 'bestScoreForB', contested);
+            } else {
+                parsed.assignA = pickBestRemainingZone(zoneStats, 'bestScoreForA', contested);
+            }
+            console.log(
+                `[llmAgent] Same zone for both (${contested}) → corrected: ` +
+                `A→${parsed.assignA} B→${parsed.assignB}`
+            );
         }
         console.log(`[llmAgent] Zone assignment: A→${parsed.assignA} B→${parsed.assignB}`);
         return parsed;

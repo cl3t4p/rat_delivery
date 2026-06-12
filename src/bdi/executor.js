@@ -33,6 +33,7 @@ const USE_PDDL = process.env.USE_PDDL === 'true';
 const PDDL_FALLBACK = process.env.PDDL_FALLBACK === 'true';
 const STUCK_FAILURE_THRESHOLD = 3;
 const STUCK_BLACKLIST_TTL_MS = 5000;
+const NO_PATH_RETRY_DELAY_MS = 400;
 
 // Maps each direction to its delta, used for the canEnter pre-check before emitMove.
 const DIR_DELTA = {
@@ -63,6 +64,10 @@ function isAtTarget(target) {
  */
 function meReady() {
     return beliefs.me.x !== null && beliefs.me.y !== null;
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Loop
@@ -140,15 +145,9 @@ async function stepTowardsTarget(socket, intention) {
         const moves = await computePlan(intention);
         if (moves.length === 0) {
             console.log(`[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`);
-            blacklistCellTemporary(
-                intention.targetPos.x,
-                intention.targetPos.y,
-                STUCK_BLACKLIST_TTL_MS
-            );
-            console.log(
-                `[executor] Temporary blacklist target ` +
-                `(${intention.targetPos.x},${intention.targetPos.y}) for ${STUCK_BLACKLIST_TTL_MS}ms after no_path`
-            );
+
+            await sleep(NO_PATH_RETRY_DELAY_MS);
+
             notifyActionFailed('no_path');
             return;
         }

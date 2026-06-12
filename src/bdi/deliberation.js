@@ -11,6 +11,7 @@ import {
     pickupValue,
     deliveryValue,
     detourValue,
+    estimatedRewardAtDelivery,
 } from './scoring.js';
 import { aStar } from './pathfinding.js';
 
@@ -24,6 +25,10 @@ const SLOW_SPAWN_THRESHOLD_MS = Number(process.env.SLOW_SPAWN_MS) || 5000;
 // appear far apart, so we patrol them. Below it the spawners are one blob and we
 // just camp it. Tunable via SPAWNER_SPARSE_THRESHOLD.
 const SPARSE_THRESHOLD = Number(process.env.SPAWNER_SPARSE_THRESHOLD) || 0.25;
+
+const DETOUR_NEAR_EXTRA_STEPS = 3;
+const DETOUR_MAX_EXTRA_STEPS = 8;
+const DETOUR_HIGH_EFFECTIVE_GAIN = 10;
 
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
@@ -102,14 +107,17 @@ export function getBestIntention() {
                         const parcelDelivery = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
                         if (parcelDelivery) {
                             const gain = detourValue(parcel, me, beliefs.me.carrying, parcelDelivery);
+                            const detour = evaluateDetour(me, parcel, target, parcelDelivery, gain);
 
-                            if (gain > 0) {
+                            if (detour?.accepted) {
                                 const deliveryScore = deliveryValue(beliefs.me.carrying, me, target);
-                                pickUp.score = deliveryScore + gain;
+                                pickUp.score = deliveryScore + detour.effectiveGain;
 
                                 console.log(
                                     `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
                                     `gain=${gain.toFixed(1)} ` +
+                                    `extraSteps=${detour.extraSteps} ` +
+                                    `effectiveGain=${detour.effectiveGain.toFixed(1)} ` +
                                     `score=${pickUp.score.toFixed(1)}`
                                 );
                                 return pickUp;
@@ -117,7 +125,10 @@ export function getBestIntention() {
 
                             console.log(
                                 `[deliberation] Detour rejected parcel=${pickUp.parcelId} ` +
-                                `gain=${gain.toFixed(1)}`
+                                `gain=${gain.toFixed(1)} ` +
+                                (detour
+                                    ? `extraSteps=${detour.extraSteps} effectiveGain=${detour.effectiveGain.toFixed(1)}`
+                                    : 'unreachable')
                             );
                         }
                     }
@@ -152,14 +163,18 @@ export function getBestIntention() {
         // order); otherwise go to the nearest to start the rotation. go_to is used
         // so arrival completes the intention and the next spawner is picked.
         spawners.sort((a, b) => a.x - b.x || a.y - b.y);
-        const onIdx = spawners.findIndex((s) => s.x === me.x && s.y === me.y);
+
+        const mx = Math.round(me.x);
+        const my = Math.round(me.y);
+        const onIdx = spawners.findIndex((s) => s.x === mx && s.y === my);
+
         let target;
         if (onIdx !== -1) {
             const rotated = [
                 ...spawners.slice(onIdx + 1),
                 ...spawners.slice(0, onIdx),
             ];
-            target = findBestReachableSpawnerTile(me, rotated);
+            target = findFirstReachableSpawnerTile(me, rotated);
         } else {
             target = findBestReachableSpawnerTile(me, spawners);
         }
@@ -245,6 +260,57 @@ export function findBestDeliveryTile(myPos) {
     return findNearestDeliveryTile(myPos);
 }
 
+function pickupValueByPath(parcel, pathToParcel, pathToDelivery) {
+    const totalSteps = pathToParcel.moves.length + pathToDelivery.moves.length;
+    const rewardAtDelivery = estimatedRewardAtDelivery(parcel.reward, totalSteps);
+
+    if (rewardAtDelivery <= 0) return -Infinity;
+
+    return rewardAtDelivery - totalSteps;
+}
+
+function findBestDeliveryPathFrom(pos) {
+    let best = null;
+    let bestLen = Infinity;
+
+    for (const tile of beliefs.deliveryTiles) {
+        const result = aStar(pos, tile, { avoidAgents: false });
+        if (!result) continue;
+
+        if (result.moves.length < bestLen) {
+            bestLen = result.moves.length;
+            best = { tile, path: result };
+        }
+    }
+
+    return best;
+}
+
+function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
+    const direct = aStar(myPos, directDelivery, { avoidAgents: false });
+    const toParcel = aStar(myPos, { x: parcel.x, y: parcel.y }, { avoidAgents: false });
+    const parcelToDelivery = aStar(
+        { x: parcel.x, y: parcel.y },
+        parcelDelivery,
+        { avoidAgents: false }
+    );
+
+    if (!direct || !toParcel || !parcelToDelivery) return null;
+
+    const directSteps = direct.moves.length;
+    const detourSteps = toParcel.moves.length + parcelToDelivery.moves.length;
+    const extraSteps = detourSteps - directSteps;
+    const effectiveGain = gain - extraSteps;
+
+    return {
+        extraSteps,
+        effectiveGain,
+        accepted:
+            (extraSteps <= DETOUR_NEAR_EXTRA_STEPS && effectiveGain > 0) ||
+            (extraSteps <= DETOUR_MAX_EXTRA_STEPS && effectiveGain >= DETOUR_HIGH_EFFECTIVE_GAIN),
+    };
+}
+
 /**
  * Finds the free parcel with the highest utility score.
  *
@@ -260,9 +326,15 @@ export function findBestPickUp(myPos) {
         if (parcel.reward <= 0) continue; // Skip parcels with no remaining reward.
         if (shouldYieldParcel(parcel.id, myPos)) continue; // Peer claimed it and is closer.
 
-        const deliveryTile = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
-        if (!deliveryTile) continue;
-        const score = pickupValue(parcel, myPos, deliveryTile);
+        const parcelPos = { x: parcel.x, y: parcel.y };
+
+        const pathToParcel = aStar(myPos, parcelPos, { avoidAgents: false });
+        if (!pathToParcel) continue;
+
+        const delivery = findBestDeliveryPathFrom(parcelPos);
+        if (!delivery) continue;
+
+        const score = pickupValueByPath(parcel, pathToParcel, delivery.path);
 
         if (score > bestScore) {
             bestScore = score;
@@ -279,9 +351,10 @@ export function findBestPickUp(myPos) {
 
     if (bestIntention) {
         const parcel = beliefs.parcels.get(bestIntention.parcelId);
-        const deliveryTile = parcel
-            ? findNearestDeliveryTile({ x: parcel.x, y: parcel.y })
+        const delivery = parcel
+            ? findBestDeliveryPathFrom({ x: parcel.x, y: parcel.y })
             : null;
+        const deliveryTile = delivery?.tile ?? null;
 
         console.log(
             `[deliberation] go_pick_up parcel=${bestIntention.parcelId} ` +
@@ -317,6 +390,15 @@ export function findBestReachableSpawnerTile(myPos, spawners = findSpawnerTiles(
     }
 
     return best;
+}
+
+function findFirstReachableSpawnerTile(myPos, spawners) {
+    for (const spawner of spawners) {
+        const result = aStar(myPos, spawner, { avoidAgents: false });
+        if (result) return spawner;
+    }
+
+    return null;
 }
 
 /**

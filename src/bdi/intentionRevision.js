@@ -17,6 +17,10 @@ import { aStar } from './pathfinding.js';
 const IMPROVEMENT_THRESHOLD = 5;
 const SAME_ZONE_TARGET_DISTANCE = 2;
 
+// Max lifetime of a 'wait' intention: after this, force a fresh deliberation
+// so the agent can never stay idle indefinitely.
+const WAIT_MAX_AGE_MS = 5000;
+
 // When enabled, the next intention is chosen by the standalone LLM agent
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
 const USE_LLM = process.env.USE_LLM === 'true';
@@ -254,9 +258,34 @@ export async function revise(force = false) {
         const candidate = getBestIntention();
         if (!candidate) return;
 
+        // 'wait' is a last-resort intention with no progress to protect:
+        // replace it with any non-wait candidate, bypassing the threshold.
+        const escapeWait =
+            currentIntention.type === 'wait' && candidate.type !== 'wait';
+
+        // Safety net: a wait older than WAIT_MAX_AGE_MS forces a fresh deliberation.
+        const waitExpired =
+            currentIntention.type === 'wait' &&
+            Date.now() - currentIntention.createdAt > WAIT_MAX_AGE_MS;
+
+        const pickupBeatsLowValueRoaming =
+            candidate.type === 'go_pick_up' &&
+            candidate.score > 0 &&
+            (
+                currentIntention.type === 'explore' ||
+                (currentIntention.type === 'go_to' && currentIntention.score <= 0)
+            );
+
         const improvement = candidate.score - currentIntention.score;
-        if (improvement > IMPROVEMENT_THRESHOLD) {
-            console.log(`[intentionRevision] Better option found (+${improvement}): replacing`);
+        if ( escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD ) {
+            const reason = escapeWait
+                ? 'escaping wait'
+                : waitExpired
+                    ? 'wait expired'
+                    : pickupBeatsLowValueRoaming
+                        ? 'pickup beats roaming'
+                        : `+${improvement}`;
+            console.log(`[intentionRevision] Replacing intention (${reason})`);
             currentIntention.status = 'failed';
             broadcastIntention(currentIntention);
             commitNewIntention(candidate);
