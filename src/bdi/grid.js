@@ -30,6 +30,7 @@ export function isWalkable(x, y) {
     const tile = beliefs.grid.get(key);
     if (!tile) return false;
     if (isCellBlacklisted(key)) return false;
+    if (beliefs.crates.has(key)) return false;
     return !BLOCKING_TYPES.has(tile.type);
 }
 

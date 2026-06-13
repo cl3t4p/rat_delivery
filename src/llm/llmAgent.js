@@ -14,9 +14,16 @@ import { beliefs, blacklistCell } from '../bdi/beliefs.js';
 const baseURL = process.env.LITELLM_BASE_URL || 'https://llm.bears.disi.unitn.it/v1';
 const apiKey = process.env.LITELLM_API_KEY;
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
+const LLM_FAILURE_THRESHOLD = Number(process.env.LLM_FAILURE_THRESHOLD) || 3;
+const LLM_COOLDOWN_MS = Number(process.env.LLM_COOLDOWN_MS) || 120000;
+const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 5000;
+const LLM_MAX_RETRIES = Number(process.env.LLM_MAX_RETRIES) || 1;
 
 let llmClient = null;
 let _onObjectiveChange = null;
+let _llmFailures = 0;
+let _llmDisabledUntil = 0;
+let _lastUnavailableLog = 0;
 
 /**
  * Initialises the LLM agent.
@@ -32,9 +39,14 @@ export function initLlmAgent(onObjectiveChange) {
         console.error('[llmAgent] LITELLM_API_KEY missing in .env');
         process.exit(1);
     }
-    llmClient = new OpenAI({ baseURL, apiKey });
+    llmClient = new OpenAI({
+        baseURL,
+        apiKey,
+        timeout: LLM_TIMEOUT_MS,
+        maxRetries: LLM_MAX_RETRIES,
+    });
     _onObjectiveChange = onObjectiveChange;
-    console.log('[llmAgent] init ok');
+    console.log(`[llmAgent] init ok model=${MODEL} baseURL=${baseURL}`);
 }
 
 export { llmClient };
@@ -74,7 +86,7 @@ function isConstraint(text) {
  * Extracts (x, y) cell coordinates from a message text.
  */
 function extractCells(text) {
-    const matches = [...text.matchAll(/(\d+)[,\s]+(\d+)/g)];
+    const matches = [...text.matchAll(/\b(\d+)\s*,\s*(\d+)\b/g)];
     return matches.map((m) => ({ x: parseInt(m[1]), y: parseInt(m[2]) }));
 }
 
@@ -146,12 +158,59 @@ export async function setObjective(objectiveText) {
  * @returns {Promise<string>} Model response as a string.
  */
 export async function callLLM(messages, { temperature = 0 } = {}) {
+    if (isLlmCircuitOpen()) {
+        throw new Error(`LLM temporarily disabled (${llmCooldownSeconds()}s cooldown remaining)`);
+    }
+
     const response = await llmClient.chat.completions.create({
         model: MODEL,
         messages,
         temperature,
     });
+    recordLlmSuccess();
     return response.choices?.[0]?.message?.content ?? '';
+}
+
+function isLlmCircuitOpen() {
+    if (_llmDisabledUntil === 0) return false;
+    if (Date.now() < _llmDisabledUntil) return true;
+    _llmDisabledUntil = 0;
+    _llmFailures = 0;
+    console.log('[llmAgent] LLM cooldown expired; trying LLM again');
+    return false;
+}
+
+function llmCooldownSeconds() {
+    return Math.max(0, Math.ceil((_llmDisabledUntil - Date.now()) / 1000));
+}
+
+function recordLlmSuccess() {
+    if (_llmFailures > 0) console.log('[llmAgent] LLM connection recovered');
+    _llmFailures = 0;
+    _llmDisabledUntil = 0;
+}
+
+function recordLlmFailure(err, context) {
+    _llmFailures += 1;
+    const msg = err?.message ?? String(err);
+
+    if (_llmFailures >= LLM_FAILURE_THRESHOLD) {
+        _llmDisabledUntil = Date.now() + LLM_COOLDOWN_MS;
+        console.log(
+            `[llmAgent] ${context} failed (${msg}); LLM unavailable, ` +
+            `using heuristic fallback for ${Math.round(LLM_COOLDOWN_MS / 1000)}s`
+        );
+        return;
+    }
+
+    const now = Date.now();
+    if (now - _lastUnavailableLog > 5000) {
+        _lastUnavailableLog = now;
+        console.log(
+            `[llmAgent] ${context} failed (${msg}); ` +
+            `heuristic fallback active (${_llmFailures}/${LLM_FAILURE_THRESHOLD})`
+        );
+    }
 }
 
 // Zone diagonally opposite to each zone, used as a last-resort fallback.
@@ -168,7 +227,7 @@ const OPPOSITE_ZONE = {
  * diagonally opposite to the contested one. Never returns `excluded`.
  *
  * @param {object} zoneStats - Stats for all four zones.
- * @param {'bestScoreForA'|'bestScoreForB'} scoreKey - Which agent's score to use.
+ * @param {'bestScoreForSelf'|'bestScoreForPeer'} scoreKey - Which agent's score to use.
  * @param {string} excluded - The contested zone to avoid.
  * @returns {string} A zone name different from `excluded`.
  */
@@ -187,16 +246,39 @@ function pickBestRemainingZone(zoneStats, scoreKey, excluded) {
  * for each agent. Used by the coordinator zone-assignment loop.
  *
  * Zones: topLeft, topRight, bottomLeft, bottomRight.
- * Each zone includes totalReward, freeParcels, spawnerCount, and agent-specific best scores computed with delivery-aware scoring.
+ * Each zone includes totalReward, freeParcels, spawnerCount, and agent-specific
+ * best scores computed with delivery-aware scoring.
  *
  * @param {object} zoneStats - { topLeft, topRight, bottomLeft, bottomRight }
- *   each with { totalReward: number, freeParcels: number, spawnerCount: number }
- * @param {{ x: number, y: number }} posA - Current position of agent A.
- * @param {{ x: number, y: number }} posB - Current position of agent B.
- * @returns {Promise<{ assignA: string, assignB: string } | null>}
- *   Zone names for each agent, or null on failure.
+ *   each with { totalReward, freeParcels, spawnerCount, bestScoreForSelf, bestScoreForPeer }
+ * @param {string} selfId  - Actual ID of the calling agent (coordinator).
+ * @param {{ x: number, y: number }} selfPos - Position of the calling agent.
+ * @param {string} peerId  - Actual ID of the peer agent.
+ * @param {{ x: number, y: number }} peerPos - Position of the peer agent.
+ * @param {{ selfRate?: number|null, peerRate?: number|null, isImbalanced?: boolean, currentAssignment?: Record<string,string>|null }} [perf]
+ *   Scoring-rate context. selfRate/peerRate are points/s over the last interval;
+ *   isImbalanced flags that consecutive underperformance was detected;
+ *   currentAssignment is the last assignment (change only if there is clear benefit).
+ * @returns {Promise<Record<string, string> | null>}
+ *   Object keyed by actual agent IDs (e.g. { "f0a53a": "bottomRight", "271c9d": "topLeft" }),
+ *   or null on failure.
  */
-export async function callZoneAssignment(zoneStats, posA, posB) {
+export async function callZoneAssignment(
+    zoneStats, selfId, selfPos, peerId, peerPos,
+    { selfRate = null, peerRate = null, isImbalanced = false, currentAssignment = null } = {}
+) {
+    if (isLlmCircuitOpen()) {
+        const now = Date.now();
+        if (now - _lastUnavailableLog > 10000) {
+            _lastUnavailableLog = now;
+            console.log(
+                `[llmAgent] LLM cooldown active (${llmCooldownSeconds()}s left); ` +
+                'using heuristic zone assignment'
+            );
+        }
+        return null;
+    }
+
     const constraintBlock = llmMemory.constraints.length > 0
         ? [
             'Constraints (NEVER violate these):',
@@ -205,26 +287,76 @@ export async function callZoneAssignment(zoneStats, posA, posB) {
         ]
     : [];
 
+    const rateBlock = selfRate !== null && peerRate !== null
+        ? [
+            'Scoring rates over the last interval (points/s):',
+            `  ${selfId}: ${selfRate.toFixed(2)} pts/s`,
+            `  ${peerId}: ${peerRate.toFixed(2)} pts/s`,
+            '',
+        ]
+        : [];
+
+    const currentBlock = currentAssignment
+        ? [
+            'Current zone assignment — KEEP IT unless the benefit of changing is clear (> 10 pts difference in agent-specific scores):',
+            `  ${selfId}: ${currentAssignment[selfId] ?? 'unassigned'}`,
+            `  ${peerId}: ${currentAssignment[peerId] ?? 'unassigned'}`,
+            'Frequent zone changes waste movement: only reassign when it clearly improves total throughput.',
+            '',
+        ]
+        : [];
+
+    const rebalanceBlock = isImbalanced
+        ? [
+            'REBALANCE REQUIRED: scoring rates are significantly unequal across multiple consecutive intervals.',
+            'The underperforming agent needs access to spawner-rich tiles.',
+            'Consider asymmetric zone boundaries — do not default to symmetric quadrants.',
+            'Assign the zone with more spawners (or higher agent-specific score) to the slower agent.',
+            '',
+        ]
+        : [];
+
+    // Build a concise description of where delivery tiles cluster so the LLM
+    // can prefer zones with shorter return paths to delivery.
+    const deliveryTiles = beliefs.deliveryTiles;
+    const deliveryBlock = deliveryTiles.length > 0
+        ? (() => {
+            const cx = Math.round(deliveryTiles.reduce((s, t) => s + t.x, 0) / deliveryTiles.length);
+            const cy = Math.round(deliveryTiles.reduce((s, t) => s + t.y, 0) / deliveryTiles.length);
+            return [
+                `DELIVERY TILES: all ${deliveryTiles.length} delivery tiles are clustered near (${cx},${cy}).`,
+                'Both agents must travel to this cluster to score. Zones closer to the delivery cluster',
+                'allow shorter return trips, which means less decay and more deliveries per minute.',
+                'Factor delivery-tile proximity into zone selection, especially for agents that are currently carrying.',
+                '',
+            ];
+        })()
+        : [];
+
     const prompt = [
         'You assign two delivery agents to map zones to maximise total delivered value.',
         '',
         ...constraintBlock,
+        ...currentBlock,
+        ...deliveryBlock,
+        ...rateBlock,
+        ...rebalanceBlock,
         'Zone scores already include parcel reward, distance to delivery, distance from the agent, and decay.',
-        'Use bestScoreForA and bestScoreForB as the main decision signal.',
+        'Use bestScoreForSelf and bestScoreForPeer as the main decision signal.',
         'Do not assign zones using totalReward alone: totalReward is only context.',
         '',
-        'Zones (totalReward / freeParcels / spawners / bestScoreForA / bestScoreForB):',
+        'Zones (totalReward / freeParcels / spawners / bestScoreForSelf / bestScoreForPeer):',
         ...Object.entries(zoneStats).map(
-            ([name, s]) => `  ${name}: reward=${s.totalReward} parcels=${s.freeParcels} spawners=${s.spawnerCount} scoreA=${(s.bestScoreForA ?? 0).toFixed(1)} scoreB=${(s.bestScoreForB ?? 0).toFixed(1)}`
+            ([name, s]) => `  ${name}: reward=${s.totalReward} parcels=${s.freeParcels} spawners=${s.spawnerCount} scoreSelf=${(s.bestScoreForSelf ?? 0).toFixed(1)} scorePeer=${(s.bestScoreForPeer ?? 0).toFixed(1)}`
         ),
         '',
-        `Agent A is at (${posA.x},${posA.y}).`,
-        `Agent B is at (${posB.x},${posB.y}).`,
+        `Agent ${selfId} is at (${selfPos.x},${selfPos.y}).`,
+        `Agent ${peerId} is at (${peerPos.x},${peerPos.y}).`,
         '',
         'Reply with ONLY a JSON object, no prose, no markdown:',
-        '{"assignA":"<zoneName>","assignB":"<zoneName>"}',
+        `{"${selfId}":"<zoneName>","${peerId}":"<zoneName>"}`,
         'Zone names: topLeft, topRight, bottomLeft, bottomRight.',
-        'assignA and assignB MUST be two DIFFERENT zones.',
+        `The two values for "${selfId}" and "${peerId}" MUST be two DIFFERENT zones.`,
     ].join('\n');
 
     try {
@@ -232,32 +364,33 @@ export async function callZoneAssignment(zoneStats, posA, posB) {
         const clean = raw.replace(/```[a-z]*|```/gi, '').trim();
         const parsed = JSON.parse(clean);
         const valid = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
-        if (!valid.includes(parsed.assignA) || !valid.includes(parsed.assignB)) {
+
+        if (!valid.includes(parsed[selfId]) || !valid.includes(parsed[peerId])) {
             console.log('[llmAgent] Zone assignment returned invalid zone names:', parsed);
             return null;
         }
-        // The LLM may assign both agents to the same zone. Enforce distinct
-        // zones deterministically: the agent with the higher score in the
-        // contested zone keeps it, the other moves to its best remaining zone.
-        if (parsed.assignA === parsed.assignB) {
-            const contested = parsed.assignA;
+
+        // Enforce distinct zones: agent with higher score in the contested zone
+        // keeps it; the other moves to its best remaining zone.
+        if (parsed[selfId] === parsed[peerId]) {
+            const contested = parsed[selfId];
             const stats = zoneStats[contested] ?? {};
-            const aKeeps = (stats.bestScoreForA ?? 0) >= (stats.bestScoreForB ?? 0);
-            if (aKeeps) {
-                parsed.assignB = pickBestRemainingZone(zoneStats, 'bestScoreForB', contested);
+            const selfKeeps = (stats.bestScoreForSelf ?? 0) >= (stats.bestScoreForPeer ?? 0);
+            if (selfKeeps) {
+                parsed[peerId] = pickBestRemainingZone(zoneStats, 'bestScoreForPeer', contested);
             } else {
-                parsed.assignA = pickBestRemainingZone(zoneStats, 'bestScoreForA', contested);
+                parsed[selfId] = pickBestRemainingZone(zoneStats, 'bestScoreForSelf', contested);
             }
             console.log(
                 `[llmAgent] Same zone for both (${contested}) → corrected: ` +
-                `A→${parsed.assignA} B→${parsed.assignB}`
+                `${selfId}→${parsed[selfId]} ${peerId}→${parsed[peerId]}`
             );
         }
-        console.log(`[llmAgent] Zone assignment: A→${parsed.assignA} B→${parsed.assignB}`);
+
+        console.log(`[llmAgent] Zone assignment: ${selfId}→${parsed[selfId]} ${peerId}→${parsed[peerId]}`);
         return parsed;
     } catch (err) {
-        console.log(`[llmAgent] Zone assignment failed (${err.message})`);
+        recordLlmFailure(err, 'Zone assignment');
         return null;
     }
 }
-

@@ -28,6 +28,8 @@ export const MSG_TYPE = Object.freeze({
     ZONE_ASSIGN: 'zone_assign',
     HANDOFF_REQUEST: 'handoff_request',
     HANDOFF_RESPONSE: 'handoff_response',
+    BLOCKED_AT: 'blocked_at',
+    PARCEL_CLAIMED: 'parcel_claimed',
 });
 
 const KNOWN_TYPES = new Set(Object.values(MSG_TYPE));
@@ -42,6 +44,8 @@ const state = {
     /** @type {Set<Function>} */
     fallbackListeners: new Set(),
 };
+
+let _lastSendErrorLog = 0;
 
 // Initialization
 
@@ -94,7 +98,12 @@ export async function sendBroadcast(type, payload) {
         return null;
     }
     logSend(envelope);
-    return state.socket.emitShout(envelope);
+    try {
+        return await state.socket.emitShout(envelope);
+    } catch (err) {
+        logSendError(type, err);
+        return null;
+    }
 }
 
 /**
@@ -112,7 +121,13 @@ export async function sendDirect(toId, type, payload) {
         return null;
     }
     logSend(envelope);
-    return state.socket.emitSay(toId, envelope);
+    try {
+        await state.socket.emitSay(toId, envelope);
+        return envelope.ts;
+    } catch (err) {
+        logSendError(type, err);
+        return null;
+    }
 }
 
 /**
@@ -199,11 +214,26 @@ function isEnvelope(msg) {
     );
 }
 
+// belief_update and intention_update fire on every sensing tick and create
+// thousands of log lines that bury the interesting events.
+// Set LOG_COMM=true in the environment to restore full verbosity for debugging.
+const LOG_COMM_VERBOSE = process.env.LOG_COMM === 'true';
+const QUIET_TYPES = new Set([MSG_TYPE.BELIEF_UPDATE, MSG_TYPE.INTENTION_UPDATE]);
+
 function logSend(envelope) {
+    if (!LOG_COMM_VERBOSE && QUIET_TYPES.has(envelope.type)) return;
     const dst = envelope.to === 'broadcast' ? '*' : envelope.to;
     console.log(`[comm] → ${envelope.type} to=${dst}`);
 }
 
 function logRecv(envelope, senderId) {
+    if (!LOG_COMM_VERBOSE && QUIET_TYPES.has(envelope.type)) return;
     console.log(`[comm] ← ${envelope.type} from=${senderId}`);
+}
+
+function logSendError(type, err) {
+    const now = Date.now();
+    if (now - _lastSendErrorLog < 2000) return;
+    _lastSendErrorLog = now;
+    console.log(`[comm] send ${type} failed: ${err?.message ?? err}`);
 }

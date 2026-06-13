@@ -12,6 +12,8 @@
  *   deliveryTiles - Cached delivery tiles.
  */
 
+import { invalidateBounds } from '../shared/zones.js';
+
 /** @typedef {import('../shared/types.js').Tile}        Tile */
 /** @typedef {import('../shared/types.js').Parcel}      Parcel */
 /** @typedef {import('../shared/types.js').Agent}       Agent */
@@ -43,8 +45,11 @@ export const beliefs = {
         MAX_PARCELS: 5,
         PARCEL_FORGET_MS: 5000,
         AGENT_STALE_MS: 3000,
+        CLAIMED_PARCEL_SUPPRESS_MS: 8000,
     },
 };
+
+const claimedParcelSuppressions = new Map(); // parcelId -> expiresAt
 
 // Functions
 
@@ -70,6 +75,8 @@ export function updateMap(tiles) {
             beliefs.deliveryTiles.push({ x: tile.x, y: tile.y });
         }
     }
+
+    invalidateBounds();
 
     console.log(
         `[beliefs] Map: ${beliefs.grid.size} tiles, ${beliefs.deliveryTiles.length} delivery`
@@ -124,9 +131,18 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     const now = Date.now();
 
     // 1. Update parcels
-    const seenParcelIds = new Set(sensedParcels.map((p) => p.id));
+    pruneClaimedParcelSuppressions(now);
+    const seenParcelIds = new Set();
 
     for (const p of sensedParcels) {
+        if (isParcelSuppressed(p.id, now)) continue;
+        if (p.carriedBy && p.carriedBy !== beliefs.me.id) {
+            suppressClaimedParcel(p.id);
+            beliefs.parcels.delete(p.id);
+            continue;
+        }
+
+        seenParcelIds.add(p.id);
         const existing = beliefs.parcels.get(p.id);
         beliefs.parcels.set(p.id, {
             id: p.id,
@@ -166,9 +182,14 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
         beliefs.agents.set(a.id, { ...a, lastSeen: now, stale: false });
     }
 
+    const AGENT_FORGET_MS = 60_000;
     for (const [id, agent] of beliefs.agents) {
         if (!seenAgentIds.has(id) && id !== beliefs.me.id) {
-            if (Date.now() - agent.lastSeen > beliefs.config.AGENT_STALE_MS) {
+            const age = Date.now() - agent.lastSeen;
+            if (age > AGENT_FORGET_MS) {
+                beliefs.agents.delete(id);
+                console.log(`[beliefs] Agent purged: ${id}`);
+            } else if (age > beliefs.config.AGENT_STALE_MS) {
                 beliefs.agents.set(id, { ...agent, stale: true });
             }
         }
@@ -179,6 +200,28 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     for (const c of sensedCrates) {
         const key = `${Math.round(c.x)},${Math.round(c.y)}`;
         beliefs.crates.set(key, { id: c.id, x: c.x, y: c.y, lastSeen: now });
+    }
+}
+
+export function suppressClaimedParcel(parcelId, ttlMs = beliefs.config.CLAIMED_PARCEL_SUPPRESS_MS) {
+    if (!parcelId) return;
+    claimedParcelSuppressions.set(parcelId, Date.now() + ttlMs);
+    beliefs.parcels.delete(parcelId);
+}
+
+function isParcelSuppressed(parcelId, now = Date.now()) {
+    const expiresAt = claimedParcelSuppressions.get(parcelId);
+    if (!expiresAt) return false;
+    if (expiresAt <= now) {
+        claimedParcelSuppressions.delete(parcelId);
+        return false;
+    }
+    return true;
+}
+
+function pruneClaimedParcelSuppressions(now = Date.now()) {
+    for (const [id, expiresAt] of claimedParcelSuppressions) {
+        if (expiresAt <= now) claimedParcelSuppressions.delete(id);
     }
 }
 
@@ -197,6 +240,7 @@ export function decayParcelsReward() {
     beliefs.config._decayAccumulatedMs -= steps * interval;
 
     for (const [id, p] of beliefs.parcels) {
+        if (p.carriedBy !== null) continue; // carried parcels aren't decayed locally
         const newReward = p.reward - steps;
         if (newReward <= 0) {
             beliefs.parcels.delete(id);

@@ -6,20 +6,25 @@
  */
 
 import { beliefs, isWalkable, manhattanDistance } from './beliefs.js';
-import { getBestIntention, createIntention } from './deliberation.js';
+import { getBestIntention, createIntention, setZoneConstraint, resetRoamTarget, findBestLocalPickUp } from './deliberation.js';
 import { broadcastIntention } from '../multi/notifier.js';
-import { isParcelClaimedByPeer, requestTakeover, evaluateHandoff, requestHandoff } from '../multi/coordinator.js';
+import { isParcelClaimedByPeer, shouldYieldParcel, requestTakeover, evaluateHandoff, requestHandoff, getNearestReachableZoneTarget } from '../multi/coordinator.js';
 import { MSG_TYPE, onMessage } from '../multi/communication.js';
 import { aStar } from './pathfinding.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
 const IMPROVEMENT_THRESHOLD = 5;
-const SAME_ZONE_TARGET_DISTANCE = 2;
+const SAME_ZONE_TARGET_DISTANCE = 0;
 
 // Max lifetime of a 'wait' intention: after this, force a fresh deliberation
 // so the agent can never stay idle indefinitely.
 const WAIT_MAX_AGE_MS = 5000;
+
+// Stuck watchdog: if the agent hasn't made progress toward its target for
+// this long, force a fresh deliberation — escapes tight failure loops where
+// the executor keeps retrying an unreachable or blocked destination.
+const STUCK_TIMEOUT_MS = 4000;
 
 // When enabled, the next intention is chosen by the standalone LLM agent
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
@@ -36,6 +41,9 @@ let currentIntention = null;
 // Guards against launching overlapping LLM deliberations: the model call is
 // async and slow compared to the sensing rate, so at most one runs at a time.
 let deliberationInFlight = false;
+
+// Tracks last seen position + intention target; resets whenever progress is made.
+let _stuckWatchdog = { x: null, y: null, targetX: null, targetY: null, since: 0 };
 
 /**
  * Produces the next intention using the configured deliberation strategy.
@@ -124,6 +132,11 @@ export function notifyIntentionDone() {
 function commitNewIntention(intention) {
     currentIntention = intention;
     if (!intention) return;
+
+    if (intention.type !== 'go_to' && intention.type !== 'explore' && intention.type !== 'wait') {
+        resetRoamTarget();
+    }
+
     broadcastIntention(intention);
 
     if (
@@ -177,6 +190,11 @@ function isIntentionStillValid(intention) {
             if (parcel.reward <= 0) {
                 // Parcel reward has reached zero.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} reward depleted`);
+                return false;
+            }
+            const myPos = { x: beliefs.me.x, y: beliefs.me.y };
+            if (shouldYieldParcel(intention.parcelId, myPos)) {
+                console.log(`[intentionRevision] Parcel ${intention.parcelId} yielded to closer peer`);
                 return false;
             }
             return true;
@@ -255,7 +273,18 @@ export async function revise(force = false) {
     // The comparison uses the cheap synchronous heuristic even in LLM mode, so
     // we don't fire a model call on every sensing tick.
     if (!force && currentIntention.status === 'active') {
-        const candidate = getBestIntention();
+        let candidate = getBestIntention();
+        if (
+            currentIntention.type === 'go_to' &&
+            !currentIntention.parcelId &&
+            beliefs.me.x !== null &&
+            beliefs.me.y !== null
+        ) {
+            const localPickUp = findBestLocalPickUp({ x: beliefs.me.x, y: beliefs.me.y });
+            if (localPickUp && (!candidate || localPickUp.score > candidate.score || candidate.type === 'go_to')) {
+                candidate = localPickUp;
+            }
+        }
         if (!candidate) return;
 
         // 'wait' is a last-resort intention with no progress to protect:
@@ -270,14 +299,24 @@ export async function revise(force = false) {
 
         const pickupBeatsLowValueRoaming =
             candidate.type === 'go_pick_up' &&
-            candidate.score > 0 &&
             (
                 currentIntention.type === 'explore' ||
-                (currentIntention.type === 'go_to' && currentIntention.score <= 0)
-            );
+                (currentIntention.type === 'go_to' && !currentIntention.parcelId)
+            ) &&
+            candidate.score > 0;
+
+        // Don't let a zero-score explore/roam interrupt an active pickup, even if
+        // the pickup has a negative score. Explore targets are often the spawner the
+        // agent just stepped off, so replacing causes an infinite oscillation loop:
+        // go_pick_up → explore (completes instantly) → go_pick_up → ...
+        const exploringBeatsPickup =
+            currentIntention.type === 'go_pick_up' &&
+            (candidate.type === 'explore' ||
+             (candidate.type === 'go_to' && !candidate.parcelId)) &&
+            candidate.score <= 0;
 
         const improvement = candidate.score - currentIntention.score;
-        if ( escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD ) {
+        if ( !exploringBeatsPickup && (escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD) ) {
             const reason = escapeWait
                 ? 'escaping wait'
                 : waitExpired
@@ -293,8 +332,58 @@ export async function revise(force = false) {
     }
 }
 
+/**
+ * Detects when the agent has not moved toward its current target for
+ * STUCK_TIMEOUT_MS and forces a fresh re-deliberation.
+ * Escapes tight executor failure loops (no-path / move-blocked cycling)
+ * that keep re-picking the same unreachable tile.
+ */
+function checkStuck() {
+    if (!currentIntention || currentIntention.status !== 'active') {
+        _stuckWatchdog.since = 0;
+        return;
+    }
+    if (currentIntention.type === 'wait') return;
+    if (!currentIntention.targetPos) return;
+
+    const x  = Math.round(beliefs.me.x ?? -1);
+    const y  = Math.round(beliefs.me.y ?? -1);
+    const tx = currentIntention.targetPos.x;
+    const ty = currentIntention.targetPos.y;
+
+    // Already at target — executor will finalise; not stuck.
+    if (x === tx && y === ty) {
+        _stuckWatchdog.since = 0;
+        return;
+    }
+
+    const samePos  = x  === _stuckWatchdog.x      && y  === _stuckWatchdog.y;
+    const sameGoal = tx === _stuckWatchdog.targetX && ty === _stuckWatchdog.targetY;
+
+    if (samePos && sameGoal) {
+        if (_stuckWatchdog.since === 0) _stuckWatchdog.since = Date.now();
+        const stuckMs = Date.now() - _stuckWatchdog.since;
+        if (stuckMs >= STUCK_TIMEOUT_MS) {
+            console.log(
+                `[intentionRevision] Stuck at (${x},${y})→(${tx},${ty}) ` +
+                `for ${stuckMs}ms → forcing re-deliberation`
+            );
+            _stuckWatchdog.since = 0;
+            if (currentIntention) {
+                currentIntention.status = 'failed';
+                broadcastIntention(currentIntention);
+            }
+            currentIntention = null;
+            revise(true);
+        }
+    } else {
+        _stuckWatchdog = { x, y, targetX: tx, targetY: ty, since: Date.now() };
+    }
+}
+
 // Called by index_a.js and index_b.js on each sensing event
 export function onSensingRevise() {
+    checkStuck();
     revise(false);
 }
 
@@ -349,12 +438,28 @@ export function initZoneAssignHandler() {
             ? { x: beliefs.me.x, y: beliefs.me.y }
             : null;
 
-        if (myPos && !aStar(myPos, center, { avoidAgents: false })) {
-            console.log(
-                `[intentionRevision] Zone assign ignored: unreachable center ` +
-                `(${center.x},${center.y})`
-            );
-            return;
+        // Resolve the navigation target: use the assigned centre if reachable,
+        // otherwise find the nearest reachable tile in the zone (spawner first,
+        // then the closest walkable tile to the geometric centre).
+        let target = center;
+        if (myPos && !aStar(myPos, target, { avoidAgents: false })) {
+            const zoneName = envelope.payload?.zone ?? null;
+            const alternative = zoneName
+                ? getNearestReachableZoneTarget(zoneName, myPos)
+                : null;
+            if (alternative && aStar(myPos, alternative, { avoidAgents: false })) {
+                console.log(
+                    `[intentionRevision] Zone centre unreachable (${center.x},${center.y})` +
+                    ` → nearest reachable (${alternative.x},${alternative.y})`
+                );
+                target = alternative;
+            } else {
+                console.log(
+                    `[intentionRevision] Zone assign ignored: no reachable target in zone` +
+                    ` (centre=(${center.x},${center.y}))`
+                );
+                return;
+            }
         }
 
         if (
@@ -370,9 +475,20 @@ export function initZoneAssignHandler() {
             return;
         }
 
-        const intention = createIntention('go_to', null, center, score);
+        // Persist the zone so every future deliberation cycle stays within it,
+        // not just the one-shot go_to waypoint.
+        if (envelope.payload?.zone) setZoneConstraint(envelope.payload.zone);
+
+        if (envelope.payload?.forceNavigation === false) {
+            console.log(
+                `[intentionRevision] Zone assign refreshed constraint only: ${envelope.payload.zone}`
+            );
+            return;
+        }
+
+        const intention = createIntention('go_to', null, target, score);
         console.log(
-            `[intentionRevision] Zone assign accepted → go_to (${center.x},${center.y}) score=${score}`
+            `[intentionRevision] Zone assign accepted → go_to (${target.x},${target.y}) score=${score}`
         );
 
         if (currentIntention) {

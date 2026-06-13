@@ -24,6 +24,7 @@ const snapshot = {
         x: null,
         y: null,
         carrying: 0,
+        score: 0,
     },
     intentionKey: null,
 };
@@ -99,9 +100,13 @@ export function tickBeliefDelta() {
         x: beliefs.me.x,
         y: beliefs.me.y,
         carrying: beliefs.me.carrying.length,
+        score: beliefs.me.score,
     };
     const meChanged =
-        snapshot.me.x !== me.x || snapshot.me.y !== me.y || snapshot.me.carrying !== me.carrying;
+        snapshot.me.x !== me.x ||
+        snapshot.me.y !== me.y ||
+        snapshot.me.carrying !== me.carrying ||
+        snapshot.me.score !== me.score;
     if (meChanged) {
         snapshot.me = { ...me };
     }

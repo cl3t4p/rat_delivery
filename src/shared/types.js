@@ -80,7 +80,7 @@
 
 // Multi-agent message protocol
 
-/** @typedef {'belief_update'|'intention_update'|'request'|'response'|'zone_assign'|'handoff_request'|'handoff_response'} MsgType */
+/** @typedef {'belief_update'|'intention_update'|'request'|'response'|'zone_assign'|'handoff_request'|'handoff_response'|'blocked_at'} MsgType */
 
 /** @typedef {'take_parcel'|'avoid_tile'|'status_check'} RequestAction */
 
@@ -124,6 +124,7 @@
  * @property {number|null} x
  * @property {number|null} y
  * @property {number} carrying - Number of parcels being carried.
+ * @property {number} score - Current total score.
  */
 
 /**
