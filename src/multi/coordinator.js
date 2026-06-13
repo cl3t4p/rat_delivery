@@ -74,15 +74,6 @@ function getZone(pos) {
  * @returns {Record<string, { totalReward: number, freeParcels: number, spawnerCount: number }>}
  */
 function computeZoneStats() {
-    let maxX = 0;
-    let maxY = 0;
-    for (const key of beliefs.grid.keys()) {
-        const [x, y] = key.split(',').map(Number);
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-    }
-    const midX = maxX / 2;
-    const midY = maxY / 2;
 
     const zones = {
         topLeft:     { totalReward: 0, freeParcels: 0, spawnerCount: 0 },

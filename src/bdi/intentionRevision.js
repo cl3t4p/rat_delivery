@@ -21,7 +21,7 @@ const IMPROVEMENT_THRESHOLD = 5;
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
 const USE_LLM = process.env.USE_LLM === 'true';
 
-// When enabled, the LLM instead *writes* the deliberation code once and we run
+// When enabled, the LLM instead *writes* the deliberation code once, and we run
 // the compiled policy every tick (see ../llm/policyAgent.js). Takes precedence
 // over USE_LLM.
 const USE_LLM_CODEGEN = process.env.USE_LLM_CODEGEN === 'true';
