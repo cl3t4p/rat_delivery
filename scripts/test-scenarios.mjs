@@ -16,7 +16,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { beliefs } from '../src/bdi/beliefs.js';
+import { beliefs, suppressClaimedParcel, updateBeliefs } from '../src/bdi/beliefs.js';
 import { invalidateBounds } from '../src/shared/zones.js';
 import { getBestIntention, resetRoamTarget } from '../src/bdi/deliberation.js';
 import { aStar } from '../src/bdi/pathfinding.js';
@@ -360,6 +360,64 @@ test('carrying + useful nearby parcel → evaluate detour without crashing', () 
     assert.equal(i.parcelId, 'near-extra');
 });
 
+test('handoff drop suppression → do not re-pick dropped parcel immediately', () => {
+    reset();
+    buildGrid(['D..S']);
+    beliefs.me.x = 2; beliefs.me.y = 0;
+    beliefs.me.id = 'me';
+    beliefs.config.PARCEL_DECADING_INTERVAL = null;
+
+    suppressClaimedParcel('handoff-dropped-test');
+    updateBeliefs([
+        {
+            id: 'handoff-dropped-test',
+            x: 2,
+            y: 0,
+            reward: 50,
+            carriedBy: null,
+        },
+    ], [], []);
+
+    const i = getBestIntention();
+
+    assert.notEqual(i.parcelId, 'handoff-dropped-test');
+    assert.equal(
+        beliefs.parcels.has('handoff-dropped-test'),
+        false,
+        'suppressed dropped parcel must not be re-added from sensing immediately'
+    );
+});
+
+test('suppressed parcel carried by me → keep carrying and deliver', () => {
+    reset();
+    buildGrid(['D..S']);
+    beliefs.me.x = 2; beliefs.me.y = 0;
+    beliefs.me.id = 'me';
+    beliefs.config.PARCEL_DECADING_INTERVAL = null;
+
+    suppressClaimedParcel('handoff-received-test');
+    updateBeliefs([
+        {
+            id: 'handoff-received-test',
+            x: 2,
+            y: 0,
+            reward: 50,
+            carriedBy: 'me',
+        },
+    ], [], []);
+
+    assert.equal(
+        beliefs.parcels.has('handoff-received-test'),
+        true,
+        'parcel carried by me must override local suppression'
+    );
+    assert.deepEqual(beliefs.me.carrying, ['handoff-received-test']);
+
+    const i = getBestIntention();
+
+    assert.equal(i.type, 'go_deliver');
+});
+
 test('carrying + NO delivery tiles → wait, not go_pick_up [bug fix]', () => {
     reset();
     // no delivery tile (type '2') anywhere on the map
@@ -410,19 +468,21 @@ suite('Deliberation — scoring and decay');
 
 test('fast decay: far parcel worth less than near parcel', () => {
     reset();
-    buildGrid(['....D', '.....', '.....']);
+    // Delivery at (1,0). Agent at (0,0).
+    // 'near' at (2,0): path 2 steps + delivery 1 step = 3 total, decay=3, reward@del=12, score=9
+    // 'far'  at (8,0): path 8 steps + delivery 7 steps = 15 total, decay=15, reward@del=10, score=-5
+    // Near wins because its shorter journey loses less to decay.
+    buildGrid(['.D........']);
     beliefs.me.x = 0; beliefs.me.y = 0;
     beliefs.config.PARCEL_DECADING_INTERVAL = 500; // decays every 500ms
     beliefs.config.MS_PER_STEP = 500; // 1 step = 1 decay tick
 
-    parcel('near', 1, 0, 20); // 1 step to parcel + ~3 steps to delivery = 4 decay = 16 reward
-    parcel('far',  4, 2, 30); // far but higher reward — but decay eats it
+    parcel('near', 2, 0, 15);
+    parcel('far',  8, 0, 25);
 
     const i = getBestIntention();
     assert.equal(i.type, 'go_pick_up');
-    // the near parcel should win even though far has higher raw reward
-    // (exact result depends on path lengths, just verify a parcel was chosen)
-    assert.ok(i.parcelId === 'near' || i.parcelId === 'far');
+    assert.equal(i.parcelId, 'near', 'fast decay must make the near parcel beat the far one');
 });
 
 test('no decay config: picks highest raw reward', () => {
@@ -438,6 +498,20 @@ test('no decay config: picks highest raw reward', () => {
     assert.equal(i.type, 'go_pick_up');
     // With no decay, score = reward - steps. expensive: 50-5=45; cheap: 10-3=7
     assert.equal(i.parcelId, 'expensive', 'should pick the higher-value parcel');
+});
+
+test('deliverable low-value parcel → pick up instead of idling', () => {
+    reset();
+    buildGrid(['D.........']);
+    beliefs.me.x = 9; beliefs.me.y = 0;
+    beliefs.config.PARCEL_DECADING_INTERVAL = null;
+
+    parcel('low-but-deliverable', 1, 0, 5);
+
+    const i = getBestIntention();
+    assert.equal(i.type, 'go_pick_up');
+    assert.equal(i.parcelId, 'low-but-deliverable');
+    assert.ok(i.score < 0);
 });
 
 suite('Deliberation — map topology edge cases');

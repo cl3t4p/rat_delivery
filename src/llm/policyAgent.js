@@ -1,25 +1,12 @@
 /**
  * policyAgent.js
  *
- * "LLM writes the deliberation code" strategy.
+ * Deprecated policy-codegen strategy.
  *
- * Instead of the LLM picking one tool per tick (see intentionAgent.js), here
- * the LLM *writes the body* of a `chooseIntention(state, actions)` function.
- * We compile that body once, cache the compiled function, and call it on every
- * deliberation tick — so the slow model call happens once, not every step.
- *
- * The generated code may freely compose ALL of the action builders (branch,
- * loop, score, etc.); it just has to `return` exactly one intention produced by
- * an `actions.*` call. That keeps the output always-valid even though the body
- * is arbitrary LLM-written JavaScript.
- *
- * SECURITY NOTE: the body is run via `new Function`, i.e. arbitrary code
- * execution in this process. This is acceptable for a sandboxed university
- * project but should NOT be exposed to untrusted input. The prompt forbids
- * I/O / imports and "use strict" is applied, but this is not a real sandbox.
- *
- * The function is regenerated when the operator objective changes, and on any
- * compile/runtime failure we fall back to the deterministic heuristic.
+ * Earlier versions asked the LLM to write JavaScript policy code at runtime.
+ * That path is intentionally disabled: generated code is not executed in this
+ * process. The exported entry point remains for compatibility and always falls
+ * back to the deterministic heuristic.
  */
 
 import {
@@ -38,29 +25,19 @@ import {
     findNearestSpawnerTile,
     getBestIntention,
 } from '../bdi/deliberation.js';
-import { llmClient, llmMemory } from './llmAgent.js';
+import { llmMemory } from './llmAgent.js';
 import { buildStateSnapshot } from './intentionAgent.js';
 import {
     pickupValue,
     deliveryValue,
 } from '../bdi/scoring.js';
 
-const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
-
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
 
 const VALID_TYPES = new Set(['go_pick_up', 'go_deliver', 'explore', 'go_to', 'wait']);
 
-// Compiled-policy cache.
-/** @type {((state: object, actions: object) => Intention) | null} */
-let cachedFn = null;
-// The objective the cached function was generated for ('∅' when none), used to
-// detect when we must regenerate.
-let cachedKey = null;
-// In-flight generation promise, so concurrent callers (pre-generation on
-// connect + the first deliberation) share one LLM round-trip.
-let generating = null;
+let warnedDisabled = false;
 
 const SYSTEM_PROMPT = `
 You write the decision logic for a Deliveroo.js BDI agent.
@@ -189,114 +166,32 @@ function extractBody(raw) {
 }
 
 /**
- * Asks the LLM to write the policy body, compiles it, smoke-tests it against the
- * current state, and caches it. On any failure leaves cachedFn = null.
- *
- * The user message is built in three parts, in order of priority:
- *   1. Constraints (NEVER violate these) — accumulated from past messages.
- *   2. Current objective — the latest strategy received.
- *   3. The generation instruction.
+ * Code generation is disabled. This function exists only to keep old imports
+ * from failing loudly with a clear reason.
  *
  * @param {Position} me
  * @returns {Promise<void>}
  */
-async function generatePolicy(me) {
-    const objective = llmMemory.objective || '∅';
-
-    const constraintBlock = llmMemory.constraints.length > 0
-        ? `Constraints (NEVER violate these):\n${llmMemory.constraints.map((c) => `- ${c}`).join('\n')}\n\n`
-        : '';
-
-    const objectiveBlock = objective !== '∅'
-        ? `Current objective: "${objective}"\n\n`
-        : '';
-
-    const userContent = constraintBlock + objectiveBlock + 'Write the function body now.';
-
-    const response = await llmClient.chat.completions.create({
-        model: MODEL,
-        messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userContent },
-        ],
-        temperature: 0,
-    });
-
-    const body = extractBody(response.choices?.[0]?.message?.content ?? '');
-    if (!body || !/return/.test(body)) {
-        throw new Error('empty or return-less body');
-    }
-
-    // eslint-disable-next-line no-new-func -- intentional: run LLM-written policy
-    const fn = new Function('state', 'actions', `"use strict";\n${body}`);
-
-    // Smoke-test against the live state so a broken policy fails now, not mid-game.
-    const probe = fn(buildStateSnapshot(me), buildActions(me));
-    if (!isValidIntention(probe)) {
-        throw new Error(`policy returned invalid intention: ${JSON.stringify(probe)}`);
-    }
-
-    cachedFn = fn;
-    // The cache key includes both objective and constraints so the policy is regenerated whenever either changes.
-    cachedKey = objective + '|' + llmMemory.constraints.join('|');
-    console.log(
-        `[policyAgent] Generated policy for objective "${objective}":\n` +
-            '----------------------------------------\n' +
-            body +
-            '\n----------------------------------------'
-    );
+async function generatePolicy(_me) {
+    throw new Error('LLM code generation is disabled');
 }
 
 /**
- * Deliberation entry point: returns the best intention by running the cached
- * LLM-generated policy, generating it first if needed. Falls back to the
- * deterministic heuristic on any failure.
+ * Compatibility entry point for the disabled codegen mode.
  *
  * @returns {Promise<Intention>}
  */
 export async function generateBestIntentionFromPolicy() {
-    if (beliefs.me.x === null || beliefs.me.y === null) {
-        return createIntention('wait', null, null, 0);
+    if (!warnedDisabled) {
+        warnedDisabled = true;
+        console.log('[policyAgent] LLM codegen disabled; using heuristic fallback');
     }
-    const me = { x: beliefs.me.x, y: beliefs.me.y };
-
-    // Regenerate when the objective changed since the cached policy was built.
-    const objective = llmMemory.objective || '∅';
-    // Build the same composite key used in generatePolicy to detect staleness.
-    const currentKey = objective + '|' + llmMemory.constraints.join('|');
-    if (cachedFn && cachedKey !== currentKey) {
-        cachedFn = null;
-    }
-
-    if (!cachedFn) {
-        try {
-            await generatePolicy(me);
-        } catch (err) {
-            console.log(`[policyAgent] Generation failed (${err.message}) → heuristic fallback`);
-            return getBestIntention();
-        }
-    }
-
-    try {
-        const intention = cachedFn(buildStateSnapshot(me), buildActions(me));
-        if (!isValidIntention(intention)) {
-            console.log('[policyAgent] Policy returned invalid intention → heuristic fallback');
-            return getBestIntention();
-        }
-        console.log(
-            `[policyAgent] Policy chose ${intention.type}` +
-                (intention.parcelId ? ` (${intention.parcelId})` : '') +
-                ` score=${intention.score.toFixed(1)}`
-        );
-        return intention;
-    } catch (err) {
-        console.log(`[policyAgent] Policy threw (${err.message}) → heuristic fallback`);
-        return getBestIntention();
-    }
+    void generatePolicy;
+    void llmMemory;
+    return getBestIntention();
 }
 
 /** Forces the policy to be regenerated on the next deliberation. */
 export function invalidatePolicy() {
-    cachedFn = null;
-    cachedKey = null;
+    // Code generation is disabled; nothing to invalidate.
 }

@@ -54,5 +54,5 @@ export function canEnter(fromX, fromY, toX, toY) {
     if (!v) return true;
     const dx = toX - fromX;
     const dy = toY - fromY;
-    return dx === v[0] && dy === v[1]
+    return dx === v[0] && dy === v[1];
 }

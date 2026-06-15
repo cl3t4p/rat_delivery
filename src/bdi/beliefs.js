@@ -135,10 +135,12 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     const seenParcelIds = new Set();
 
     for (const p of sensedParcels) {
-        if (isParcelSuppressed(p.id, now)) continue;
+        if (isParcelSuppressed(p.id, now)) {
+            if (p.carriedBy !== beliefs.me.id) continue;
+            claimedParcelSuppressions.delete(p.id);
+        }
         if (p.carriedBy && p.carriedBy !== beliefs.me.id) {
             suppressClaimedParcel(p.id);
-            beliefs.parcels.delete(p.id);
             continue;
         }
 
@@ -161,6 +163,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
 
     for (const [id, p] of beliefs.parcels) {
         if (seenParcelIds.has(id)) continue;
+        if (p.carriedBy === beliefs.me.id) continue; // never age out parcels we are carrying
         const age = now - p.lastSeen;
         if (age > beliefs.config.PARCEL_FORGET_MS || p.reward <= 0) {
             beliefs.parcels.delete(id);
@@ -207,6 +210,10 @@ export function suppressClaimedParcel(parcelId, ttlMs = beliefs.config.CLAIMED_P
     if (!parcelId) return;
     claimedParcelSuppressions.set(parcelId, Date.now() + ttlMs);
     beliefs.parcels.delete(parcelId);
+}
+
+export function clearParcelSuppressions() {
+    claimedParcelSuppressions.clear();
 }
 
 function isParcelSuppressed(parcelId, now = Date.now()) {
@@ -275,14 +282,14 @@ export function manhattanDistance(a, b) {
  */
 export function clockEventToMs(event) {
     if (event == null) return null;
-    if (typeof event === 'number') return Number.isFinite(event) ? event : null;
+    if (typeof event === 'number') return Number.isFinite(event) ? event : null; // server sends numbers already in ms
     if (event === 'frame') return 40; // one clock tick (~25 fps)
 
     const match = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m)?\s*$/.exec(event);
     if (!match) return null;
 
     const value = parseFloat(match[1]);
-    const unit = match[2] ?? 's'; // bare number defaults to seconds
+    const unit = match[2] ?? 's'; // string without unit defaults to seconds (e.g. "5" → 5000ms)
     const factor = unit === 'ms' ? 1 : unit === 'm' ? 60_000 : 1000;
     return value * factor;
 }

@@ -13,7 +13,11 @@ import {
     estimatedRewardAtDelivery,
 } from './scoring.js';
 import { aStar } from './pathfinding.js';
-import { getZone as _sharedGetZone, getMapBounds as _getMapBounds } from '../shared/zones.js';
+import { getZone as _sharedGetZone, getMapBounds as _getMapBounds, onBoundsInvalidated } from '../shared/zones.js';
+
+/** @type {Map<string, boolean>} Cache for spawner→delivery reachability (static per map load). */
+const _spawnerDeliveryCache = new Map();
+onBoundsInvalidated(() => _spawnerDeliveryCache.clear());
 
 // When parcels spawn at least this rarely, camping one spawner is wasteful, so
 // we roam between spawn points instead. Compared against the already-parsed
@@ -69,7 +73,10 @@ function _matchesZoneOpportunity(parcelPos, deliveryTile) {
 const DETOUR_NEAR_EXTRA_STEPS = 3;
 const DETOUR_MAX_EXTRA_STEPS = 8;
 const DETOUR_HIGH_EFFECTIVE_GAIN = 10;
-const MIN_PICKUP_SCORE = Number(process.env.MIN_PICKUP_SCORE ?? 0);
+const MIN_PICKUP_SCORE =
+    process.env.MIN_PICKUP_SCORE === undefined
+        ? -Infinity
+        : Number(process.env.MIN_PICKUP_SCORE);
 const LOCAL_PICKUP_MAX_DISTANCE = Number(process.env.LOCAL_PICKUP_MAX_DISTANCE ?? 3);
 const LOCAL_PICKUP_MIN_REWARD = Number(process.env.LOCAL_PICKUP_MIN_REWARD ?? 15);
 const LOCAL_PICKUP_MIN_SCORE = Number(process.env.LOCAL_PICKUP_MIN_SCORE ?? -25);
@@ -89,7 +96,7 @@ let _roamTargetZone = null;
 let _roamArrivalTs = 0;
 
 function sameTile(a, b) {
-    return !!a && !!b && Math.round(a.x) === b.x && Math.round(a.y) === b.y;
+    return !!a && !!b && Math.round(a.x) === Math.round(b.x) && Math.round(a.y) === Math.round(b.y);
 }
 
 export function resetRoamTarget() {
@@ -178,7 +185,7 @@ export function getBestIntention() {
                     if (parcel) {
                         const parcelDelivery = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
                         if (parcelDelivery) {
-                            const gain = detourValue(parcel, me, beliefs.me.carrying, target);
+                            const gain = detourValue(parcel, me, beliefs.me.carrying, parcelDelivery);
                             const detour = evaluateDetour(me, parcel, target, parcelDelivery, gain);
 
                             if (detour?.accepted) {
@@ -218,7 +225,22 @@ export function getBestIntention() {
     }
 
     // Case 2: free parcels are available, so pick one up.
-    const pickUp = findBestPickUp(me);
+    let pickUp = findBestPickUp(me);
+    if (!pickUp && _zoneConstraint) {
+        // Zone is empty — fall back to unclaimed parcels outside the zone rather
+        // than waiting indefinitely at a spawner that isn't producing anything.
+        // shouldYieldParcel still filters parcels already claimed by the peer.
+        pickUp = findBestPickUp(me, { allowOutOfZone: true });
+        if (pickUp) {
+            const key = `pickup_ooz:${pickUp.parcelId}`;
+            if (_lastDelibLog !== key) {
+                _lastDelibLog = key;
+                console.log(
+                    `[deliberation] Zone empty — out-of-zone fallback: go_pick_up ${pickUp.parcelId}`
+                );
+            }
+        }
+    }
     if (pickUp) return pickUp;
 
     // Case 3: nothing else to do, so head for the spawners.
@@ -493,7 +515,7 @@ function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
     const directSteps = direct.moves.length;
     const detourSteps = toParcel.moves.length + parcelToDelivery.moves.length;
     const extraSteps = detourSteps - directSteps;
-    const effectiveGain = Math.min(gain, gain - extraSteps);
+    const effectiveGain = gain - extraSteps;
     const accepted =
         (extraSteps <= DETOUR_NEAR_EXTRA_STEPS && effectiveGain > 0) ||
         (extraSteps <= DETOUR_MAX_EXTRA_STEPS && effectiveGain >= DETOUR_HIGH_EFFECTIVE_GAIN);
@@ -652,9 +674,13 @@ function spawnerCanReachDelivery(spawner) {
     // A spawner that cannot reach any delivery tile creates parcels the agent
     // cannot score. Do not camp or patrol these pockets.
     if (beliefs.deliveryTiles.length === 0) return false;
-    return beliefs.deliveryTiles.some((delivery) =>
+    const key = `${spawner.x},${spawner.y}`;
+    if (_spawnerDeliveryCache.has(key)) return _spawnerDeliveryCache.get(key);
+    const result = beliefs.deliveryTiles.some((delivery) =>
         aStar(spawner, delivery, { avoidAgents: false })
     );
+    _spawnerDeliveryCache.set(key, result);
+    return result;
 }
 
 /**

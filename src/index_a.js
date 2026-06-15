@@ -45,6 +45,7 @@ import {
     onSensingRevise,
     getCurrentIntention,
     forceIntention,
+    requestRevision,
     initZoneAssignHandler,
 } from './bdi/intentionRevision.js';
 
@@ -59,7 +60,7 @@ const socket = DjsConnect();
 // Agent A only communicates and receives coordination messages.
 // It does not start the LLM zone-assignment loop.
 initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
-initCoordinator({ getCurrentIntention, forceIntention });
+initCoordinator({ getCurrentIntention, forceIntention, requestRevision });
 initZoneAssignHandler();
 enableNotifier();
 
@@ -74,7 +75,7 @@ socket.on('map', (width, height, tiles) => {
     for (let y = maxY; y >= 0; y--) {
         let row = '';
         for (let x = 0; x <= maxX; x++) {
-            const t = tiles.find((t) => t.x === x && t.y === y);
+            const t = beliefs.grid.get(`${x},${y}`);
             row += t ? t.type : '.';
             row += ' ';
         }

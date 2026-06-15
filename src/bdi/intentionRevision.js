@@ -30,11 +30,6 @@ const STUCK_TIMEOUT_MS = 4000;
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
 const USE_LLM = process.env.USE_LLM === 'true';
 
-// When enabled, the LLM instead *writes* the deliberation code once and we run
-// the compiled policy every tick (see ../llm/policyAgent.js). Takes precedence
-// over USE_LLM.
-const USE_LLM_CODEGEN = process.env.USE_LLM_CODEGEN === 'true';
-
 /** @type {Intention|null} */
 let currentIntention = null;
 
@@ -42,8 +37,15 @@ let currentIntention = null;
 // async and slow compared to the sensing rate, so at most one runs at a time.
 let deliberationInFlight = false;
 
-// Tracks last seen position + intention target; resets whenever progress is made.
-let _stuckWatchdog = { x: null, y: null, targetX: null, targetY: null, since: 0 };
+// Tracks the best (minimum) Manhattan distance achieved toward the current target
+// and when it last improved. Resets on goal change or arrival.
+let _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
+
+export function requestRevision(force = false) {
+    revise(force).catch((err) => {
+        console.error(`[intentionRevision] revise failed: ${err?.message ?? err}`);
+    });
+}
 
 /**
  * Produces the next intention using the configured deliberation strategy.
@@ -51,10 +53,6 @@ let _stuckWatchdog = { x: null, y: null, targetX: null, targetY: null, since: 0 
  * @returns {Promise<Intention>}
  */
 async function deliberate() {
-    if (USE_LLM_CODEGEN) {
-        const { generateBestIntentionFromPolicy } = await import('../llm/policyAgent.js');
-        return generateBestIntentionFromPolicy();
-    }
     if (USE_LLM) {
         const { generateBestIntention } = await import('../llm/intentionAgent.js');
         return generateBestIntention();
@@ -85,7 +83,7 @@ export function notifyActionFailed(reason) {
         currentIntention.status = 'failed';
         broadcastIntention(currentIntention);
     }
-    revise(true);
+    requestRevision(true);
 }
 
 /**
@@ -102,7 +100,7 @@ export function notifyIntentionDone() {
     currentIntention = null;
 
     // After each pickup, check if a handoff to the peer is beneficial.
-    if (beliefs.me.carrying.length >= 2) {
+    if (beliefs.me.carrying.length >= 1) {
         const handoff = evaluateHandoff();
         if (handoff) {
             console.log(`[intentionRevision] Proposing handoff to ${handoff.peerId}`);
@@ -115,15 +113,15 @@ export function notifyIntentionDone() {
                         );
                         commitNewIntention(intention);
                     } else {
-                        revise(true);
+                        requestRevision(true);
                     }
                 })
-                .catch(() => revise(true));
+                .catch(() => requestRevision(true));
             return;
         }
     }
 
-    revise(true);
+    requestRevision(true);
 }
 
 // Helper used internally whenever currentIntention is replaced.
@@ -153,7 +151,7 @@ function commitNewIntention(intention) {
                     );
                     currentIntention.status = 'failed';
                     broadcastIntention(currentIntention);
-                    revise(true);
+                    requestRevision(true);
                 }
             })
             .catch((err) => {
@@ -192,10 +190,12 @@ function isIntentionStillValid(intention) {
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} reward depleted`);
                 return false;
             }
-            const myPos = { x: beliefs.me.x, y: beliefs.me.y };
-            if (shouldYieldParcel(intention.parcelId, myPos)) {
-                console.log(`[intentionRevision] Parcel ${intention.parcelId} yielded to closer peer`);
-                return false;
+            if (beliefs.me.x !== null && beliefs.me.y !== null) {
+                const myPos = { x: beliefs.me.x, y: beliefs.me.y };
+                if (shouldYieldParcel(intention.parcelId, myPos)) {
+                    console.log(`[intentionRevision] Parcel ${intention.parcelId} yielded to closer peer`);
+                    return false;
+                }
             }
             return true;
         }
@@ -216,6 +216,10 @@ function isIntentionStillValid(intention) {
 
         case 'explore':
         case 'wait':
+            return true;
+
+        default:
+            console.warn(`[intentionRevision] Unknown intention type: ${intention.type} — keeping active`);
             return true;
     }
 }
@@ -315,8 +319,15 @@ export async function revise(force = false) {
              (candidate.type === 'go_to' && !candidate.parcelId)) &&
             candidate.score <= 0;
 
+        // Handoff intentions represent a bilateral commitment: A has already
+        // accepted and may have dropped parcels at the meetTile. Never preempt
+        // them with an opportunistic pickup — let the handoff complete first.
+        const handoffProtected =
+            currentIntention.type === 'go_handoff' ||
+            currentIntention.type === 'go_handoff_receive';
+
         const improvement = candidate.score - currentIntention.score;
-        if ( !exploringBeatsPickup && (escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD) ) {
+        if ( !exploringBeatsPickup && !handoffProtected && (escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD) ) {
             const reason = escapeWait
                 ? 'escaping wait'
                 : waitExpired
@@ -339,52 +350,60 @@ export async function revise(force = false) {
  * that keep re-picking the same unreachable tile.
  */
 function checkStuck() {
-    if (!currentIntention || currentIntention.status !== 'active') {
-        _stuckWatchdog.since = 0;
+    if (!currentIntention) {
+        _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
     }
+    // Mid-cycle (failed/done awaiting revise): preserve watchdog state so stale-time accumulates.
+    if (currentIntention.status !== 'active') return;
     if (currentIntention.type === 'wait') return;
     if (!currentIntention.targetPos) return;
 
-    const x  = Math.round(beliefs.me.x ?? -1);
-    const y  = Math.round(beliefs.me.y ?? -1);
+    const x  = Number.isFinite(beliefs.me.x) ? Math.round(beliefs.me.x) : -1;
+    const y  = Number.isFinite(beliefs.me.y) ? Math.round(beliefs.me.y) : -1;
     const tx = currentIntention.targetPos.x;
     const ty = currentIntention.targetPos.y;
 
     // Already at target — executor will finalise; not stuck.
     if (x === tx && y === ty) {
-        _stuckWatchdog.since = 0;
+        _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
     }
 
-    const samePos  = x  === _stuckWatchdog.x      && y  === _stuckWatchdog.y;
     const sameGoal = tx === _stuckWatchdog.targetX && ty === _stuckWatchdog.targetY;
+    const dist = Math.abs(x - tx) + Math.abs(y - ty);
 
-    if (samePos && sameGoal) {
-        if (_stuckWatchdog.since === 0) _stuckWatchdog.since = Date.now();
-        const stuckMs = Date.now() - _stuckWatchdog.since;
-        if (stuckMs >= STUCK_TIMEOUT_MS) {
-            console.log(
-                `[intentionRevision] Stuck at (${x},${y})→(${tx},${ty}) ` +
-                `for ${stuckMs}ms → forcing re-deliberation`
-            );
-            _stuckWatchdog.since = 0;
-            if (currentIntention) {
-                currentIntention.status = 'failed';
-                broadcastIntention(currentIntention);
-            }
-            currentIntention = null;
-            revise(true);
+    if (!sameGoal) {
+        _stuckWatchdog = { bestDist: dist, lastImprovement: Date.now(), targetX: tx, targetY: ty };
+        return;
+    }
+
+    if (dist < _stuckWatchdog.bestDist) {
+        _stuckWatchdog.bestDist = dist;
+        _stuckWatchdog.lastImprovement = Date.now();
+        return;
+    }
+
+    const staleMs = Date.now() - _stuckWatchdog.lastImprovement;
+    if (staleMs >= STUCK_TIMEOUT_MS) {
+        console.log(
+            `[intentionRevision] Stuck: no progress toward (${tx},${ty}) ` +
+            `for ${staleMs}ms (bestDist=${_stuckWatchdog.bestDist}) → forcing re-deliberation`
+        );
+        _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
+        if (currentIntention) {
+            currentIntention.status = 'failed';
+            broadcastIntention(currentIntention);
         }
-    } else {
-        _stuckWatchdog = { x, y, targetX: tx, targetY: ty, since: Date.now() };
+        currentIntention = null;
+        requestRevision(true);
     }
 }
 
 // Called by index_a.js and index_b.js on each sensing event
 export function onSensingRevise() {
     checkStuck();
-    revise(false);
+    requestRevision(false);
 }
 
 /**
@@ -512,4 +531,8 @@ export function forceIntention(intention) {
     }
     commitNewIntention(intention);
     console.log(`[intentionRevision] Forced: ${intention.type}`);
+}
+
+export function resetIntentionForTests() {
+    currentIntention = null;
 }

@@ -36,8 +36,9 @@ let _lastUnavailableLog = 0;
  */
 export function initLlmAgent(onObjectiveChange) {
     if (!apiKey) {
-        console.error('[llmAgent] LITELLM_API_KEY missing in .env');
-        process.exit(1);
+        console.warn('[llmAgent] LITELLM_API_KEY missing in .env — LLM disabled, using heuristic fallback');
+        _onObjectiveChange = onObjectiveChange;
+        return;
     }
     llmClient = new OpenAI({
         baseURL,
@@ -124,8 +125,22 @@ export function updateContext() {
  *
  * @param {string} objectiveText - Example: "Pick up the nearest parcel and deliver it".
  */
+const MAX_OBJECTIVE_LENGTH = 500;
+
 export async function setObjective(objectiveText) {
-    console.log(`[llmAgent] Message received: "${objectiveText}"`);
+    // Sanitize: cap length and strip control characters that could escape the prompt context.
+    const sanitized = String(objectiveText ?? '')
+        .slice(0, MAX_OBJECTIVE_LENGTH)
+        .replace(/[\x00-\x1F\x7F]/g, ' ')
+        .trim();
+
+    if (!sanitized) {
+        console.log('[llmAgent] Empty or invalid objective; ignoring');
+        return;
+    }
+
+    console.log(`[llmAgent] Message received: "${sanitized}"`);
+    objectiveText = sanitized;
 
     if (isConstraint(objectiveText)) {
         llmMemory.constraints.push(objectiveText);
@@ -158,6 +173,7 @@ export async function setObjective(objectiveText) {
  * @returns {Promise<string>} Model response as a string.
  */
 export async function callLLM(messages, { temperature = 0 } = {}) {
+    if (!llmClient) throw new Error('LLM client not initialised (missing API key)');
     if (isLlmCircuitOpen()) {
         throw new Error(`LLM temporarily disabled (${llmCooldownSeconds()}s cooldown remaining)`);
     }
@@ -267,6 +283,7 @@ export async function callZoneAssignment(
     zoneStats, selfId, selfPos, peerId, peerPos,
     { selfRate = null, peerRate = null, isImbalanced = false, currentAssignment = null } = {}
 ) {
+    if (!llmClient) return null;
     if (isLlmCircuitOpen()) {
         const now = Date.now();
         if (now - _lastUnavailableLog > 10000) {

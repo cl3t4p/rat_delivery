@@ -40,6 +40,7 @@ import {
     onSensingRevise,
     getCurrentIntention,
     forceIntention,
+    requestRevision,
     revise,
     initZoneAssignHandler,
 } from './bdi/intentionRevision.js';
@@ -60,7 +61,7 @@ const socket = DjsConnect(process.env.HOST, process.env.TOKEN_B);
 // Multi-agent layer.
 // Agent B owns the LLM coordination loop.
 initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
-initCoordinator({ getCurrentIntention, forceIntention });
+initCoordinator({ getCurrentIntention, forceIntention, requestRevision });
 setCoordinatorRole();
 initLlmAgent(revise);
 initZoneAssignHandler();

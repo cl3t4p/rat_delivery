@@ -137,7 +137,10 @@ export function broadcastIntention(intention) {
     if (!commsReady) return;
     if (!intention) return;
 
-    const key = `${intention.type}|${intention.parcelId ?? ''}|${intention.status}`;
+    const tp = intention.targetPos
+        ? `${Math.round(intention.targetPos.x)},${Math.round(intention.targetPos.y)}`
+        : '';
+    const key = `${intention.type}|${intention.parcelId ?? ''}|${intention.status}|${tp}`;
     if (key === snapshot.intentionKey) return;
     snapshot.intentionKey = key;
 

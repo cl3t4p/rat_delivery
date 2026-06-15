@@ -5,8 +5,22 @@
  * map bounds so callers pay the O(|grid|) scan at most once per map load.
  */
 
-/** @type {{ maxX: number, maxY: number } | null} */
+/** @type {{ minX: number, maxX: number, minY: number, maxY: number } | null} */
 let _cachedBounds = null;
+
+/** @type {Array<() => void>} */
+const _boundsInvalidationListeners = [];
+
+/**
+ * Registers a callback invoked whenever bounds are invalidated (i.e. on map reload).
+ * Used by deliberation.js to clear its spawner-reachability cache without creating
+ * a circular import (deliberation → beliefs → zones → deliberation).
+ *
+ * @param {() => void} fn
+ */
+export function onBoundsInvalidated(fn) {
+    _boundsInvalidationListeners.push(fn);
+}
 
 /**
  * Invalidates the cached map bounds.
@@ -14,6 +28,7 @@ let _cachedBounds = null;
  */
 export function invalidateBounds() {
     _cachedBounds = null;
+    for (const fn of _boundsInvalidationListeners) fn();
 }
 
 /**
@@ -24,14 +39,16 @@ export function invalidateBounds() {
  */
 export function getMapBounds(grid) {
     if (_cachedBounds) return _cachedBounds;
-    let maxX = 0;
-    let maxY = 0;
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
     for (const key of grid.keys()) {
         const [x, y] = key.split(',').map(Number);
+        if (x < minX) minX = x;
         if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
         if (y > maxY) maxY = y;
     }
-    _cachedBounds = { maxX, maxY };
+    _cachedBounds = { minX, maxX, minY, maxY };
     return _cachedBounds;
 }
 
@@ -43,9 +60,10 @@ export function getMapBounds(grid) {
  * @returns {'topLeft'|'topRight'|'bottomLeft'|'bottomRight'}
  */
 export function getZone(pos, grid) {
-    const { maxX, maxY } = getMapBounds(grid);
-    const midX = maxX / 2;
-    const midY = maxY / 2;
+    if (grid.size === 0) return 'bottomLeft';
+    const { minX, maxX, minY, maxY } = getMapBounds(grid);
+    const midX = (minX + maxX) / 2;
+    const midY = (minY + maxY) / 2;
     const top   = pos.y >= midY;
     const right = pos.x >= midX;
     if (top && !right)  return 'topLeft';

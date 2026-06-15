@@ -9,7 +9,7 @@
  *   5. Notifies intentionRevision with done / failed
  */
 
-import { beliefs, canEnter, blacklistCellTemporary } from './beliefs.js';
+import { beliefs, canEnter, blacklistCellTemporary, suppressClaimedParcel } from './beliefs.js';
 import { planTo } from './pathfinding.js';
 import { planWithPDDL } from '../pddl/pddlPlanner.js';
 import {
@@ -75,9 +75,11 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-let _lastSocketErrorLog = 0;
+let _lastSocketActionErrorLog = 0;
+let _lastSocketConnectErrorLog = 0;
 let _transportAvailable = true;
 let _socketHooksInstalled = false;
+let _everDisconnected = false;
 
 async function safeSocketAction(label, action) {
     if (!_transportAvailable) {
@@ -89,8 +91,8 @@ async function safeSocketAction(label, action) {
         return await action();
     } catch (err) {
         const now = Date.now();
-        if (now - _lastSocketErrorLog > 2000) {
-            _lastSocketErrorLog = now;
+        if (now - _lastSocketActionErrorLog > 2000) {
+            _lastSocketActionErrorLog = now;
             console.log(`[executor] Socket action failed (${label}): ${err.message ?? err}`);
         }
         await sleep(SOCKET_RETRY_DELAY_MS);
@@ -107,17 +109,20 @@ function setupSocketLifecycle(socket) {
     if (typeof socket.on === 'function') {
         socket.on('connect', () => {
             _transportAvailable = true;
-            console.log('[executor] Socket reconnected; resuming actions');
+            if (_everDisconnected) {
+                console.log('[executor] Socket reconnected; resuming actions');
+            }
         });
         socket.on('disconnect', (reason) => {
             _transportAvailable = false;
+            _everDisconnected = true;
             console.log(`[executor] Socket disconnected; pausing actions (${reason ?? 'unknown'})`);
         });
         socket.on('connect_error', (err) => {
             _transportAvailable = false;
             const now = Date.now();
-            if (now - _lastSocketErrorLog > 2000) {
-                _lastSocketErrorLog = now;
+            if (now - _lastSocketConnectErrorLog > 2000) {
+                _lastSocketConnectErrorLog = now;
                 console.log(`[executor] Socket connect error; actions paused (${err?.message ?? err})`);
             }
         });
@@ -180,6 +185,10 @@ export async function startExecutor(socket) {
             lastIntention = intention;
             intention.status = 'active';
             broadcastIntention(intention);
+            // Stale failure counts from the previous intention could cause tiles that
+            // were only transiently blocked to be prematurely blacklisted if the agent
+            // navigates through them again under a different intention.
+            failedMoves.clear();
         }
 
         switch (intention.type) {
@@ -307,11 +316,18 @@ async function stepTowardsTarget(socket, intention) {
                     `goal=${isGoal} tile=${targetTile?.type ?? '?'}`
                 );
             }
+
+            await sleep(Math.min(MOVE_BLOCK_BACKOFF_MAX_MS, failures * 150));
+            intention.plan = [];
+            notifyActionFailed('move_blocked');
+            return;
         }
 
+        // Below threshold: replan within the same intention without triggering
+        // a full intention replacement. This lets failedMoves accumulate so the
+        // threshold is reached if the blocker persists.
         await sleep(Math.min(MOVE_BLOCK_BACKOFF_MAX_MS, failures * 150));
         intention.plan = [];
-        notifyActionFailed('move_blocked');
         return;
     }
 
@@ -403,10 +419,12 @@ async function finalize(socket, intention) {
             if (parcel) parcel.carriedBy = beliefs.me.id;
             if (id && !beliefs.me.carrying.includes(id)) beliefs.me.carrying.push(id);
             if (id) {
-                sendBroadcast(MSG_TYPE.PARCEL_CLAIMED, {
+                await sendBroadcast(MSG_TYPE.PARCEL_CLAIMED, {
                     parcelId: id,
                     x: p.x ?? parcel?.x ?? intention.targetPos?.x ?? null,
                     y: p.y ?? parcel?.y ?? intention.targetPos?.y ?? null,
+                }).catch((err) => {
+                    console.log(`[executor] PARCEL_CLAIMED broadcast failed: ${err?.message ?? err}`);
                 });
             }
         }
@@ -473,11 +491,9 @@ async function executeHandoff(socket, intention) {
     // At meetTile: drop all parcels
     const dropped = await safeSocketAction('handoff putdown', () => socket.emitPutdown());
     if (dropped === null) return;
-    for (const id of beliefs.me.carrying) {
-        const parcel = beliefs.parcels.get(id);
-        if (parcel) parcel.carriedBy = null;
-    }
+    const droppedIds = [...beliefs.me.carrying];
     beliefs.me.carrying = [];
+    for (const id of droppedIds) suppressClaimedParcel(id);
 
     console.log(`[executor] Handoff: parcels dropped at (${intention.targetPos.x},${intention.targetPos.y})`);
     notifyIntentionDone();
@@ -494,8 +510,34 @@ async function executeHandoff(socket, intention) {
  * @param {Intention} intention
  */
 async function executeHandoffReceive(socket, intention) {
+    const meetTile = intention._meetTile ?? intention.targetPos;
+
     if (!isAtTarget(intention.targetPos)) {
         await stepTowardsTarget(socket, intention);
+        return;
+    }
+
+    // With a staged handoff, B waits next to the meet tile so A can enter,
+    // put down the parcels, and leave. Once the dropped parcels are visible,
+    // B switches target to the meet tile and picks them up.
+    if (intention._meetTile && !isAtTarget(meetTile)) {
+        const parcelReady = [...beliefs.parcels.values()].some((parcel) =>
+            !parcel.carriedBy &&
+            Math.round(parcel.x) === meetTile.x &&
+            Math.round(parcel.y) === meetTile.y
+        );
+
+        if (!parcelReady) {
+            console.log(
+                `[executor] Handoff receive: waiting near meet tile ` +
+                `(${meetTile.x},${meetTile.y})`
+            );
+            await sleep(500);
+            return;
+        }
+
+        intention.targetPos = meetTile;
+        intention._pickupAttempts = 0;
         return;
     }
 
@@ -516,7 +558,7 @@ async function executeHandoffReceive(socket, intention) {
             console.log(
                 `[executor] Handoff receive: nothing yet, attempt ${intention._pickupAttempts}/${MAX_PICKUP_ATTEMPTS} — waiting`
             );
-            await new Promise((r) => setTimeout(r, 500));
+            await sleep(500);
         }
         return;
     }

@@ -15,7 +15,7 @@ const patterns = [
     ['blacklists', /Temporary blacklist/g],
     ['rightOfWay', /Right-of-way/g],
     ['socketFailures', /Socket action failed/g],
-    ['disconnects', /Disconnected from|Socket disconnected/g],
+    ['disconnects', /Socket disconnected/g],
     ['llmFailures', /Zone assignment failed|LLM unavailable|LLM cooldown active/g],
     ['parcelTaken', /Parcel .* taken by/g],
     ['pickupEmpty', /Empty pickup/g],

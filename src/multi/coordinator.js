@@ -12,7 +12,7 @@
  * Plus a parcel reservation table keyed by `parcelId`.
  */
 
-import { beliefs, manhattanDistance, canEnter, isWalkable, suppressClaimedParcel } from '../bdi/beliefs.js';
+import { beliefs, manhattanDistance, canEnter, isWalkable, suppressClaimedParcel, clearParcelSuppressions } from '../bdi/beliefs.js';
 import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast } from './communication.js';
 import { findNearestDeliveryTile, createIntention, setZoneConstraint, findSpawnerTiles } from '../bdi/deliberation.js';
 import { deliveryValue, estimatedRewardAtDelivery } from '../bdi/scoring.js';
@@ -25,6 +25,7 @@ import { getZone, getMapBounds } from '../shared/zones.js';
 const PEER_TIMEOUT_MS = 8000;
 const REQUEST_TIMEOUT_MS = 1500;
 const HANDOFF_GAIN_THRESHOLD = 2;
+const HANDOFF_MAX_REWARD_LOSS = 2;
 const YIELDED_PARCEL_TTL_MS = Number(process.env.YIELDED_PARCEL_TTL_MS) || 2000;
 
 const DIR_DELTA_COORD = {
@@ -33,6 +34,10 @@ const DIR_DELTA_COORD = {
     left:  { dx: -1, dy: 0  },
     right: { dx: 1,  dy: 0  },
 };
+
+function hasKnownPosition(pos) {
+    return Number.isFinite(pos?.x) && Number.isFinite(pos?.y);
+}
 
 const PERP_DIRS = {
     left:  ['up', 'down'],
@@ -87,9 +92,11 @@ async function computeZoneStats() {
     const { findNearestDeliveryTile } = await import('../bdi/deliberation.js');
 
     const selfPos = { x: beliefs.me.x, y: beliefs.me.y };
+    const selfKnown = hasKnownPosition(selfPos);
     const peers = getPeers();
     const peer = peers[0] ?? null;
-    const peerPos = peer && peer.x !== null ? { x: peer.x, y: peer.y } : selfPos;
+    const peerPos = peer && hasKnownPosition(peer) ? { x: peer.x, y: peer.y } : selfPos;
+    const peerKnown = hasKnownPosition(peerPos);
 
     for (const p of beliefs.parcels.values()) {
         if (p.carriedBy) continue;
@@ -98,10 +105,12 @@ async function computeZoneStats() {
         zones[zone].totalReward += p.reward;
 
         const deliveryTile = findNearestDeliveryTile({ x: p.x, y: p.y });
-        if (deliveryTile) {
+        if (deliveryTile && selfKnown) {
             const scoreSelf = pickupValue(p, selfPos, deliveryTile);
-            const scorePeer = pickupValue(p, peerPos, deliveryTile);
             if (scoreSelf > zones[zone].bestScoreForSelf) zones[zone].bestScoreForSelf = scoreSelf;
+        }
+        if (deliveryTile && peerKnown) {
+            const scorePeer = pickupValue(p, peerPos, deliveryTile);
             if (scorePeer > zones[zone].bestScoreForPeer) zones[zone].bestScoreForPeer = scorePeer;
         }
     }
@@ -215,7 +224,7 @@ function findNearestWalkableTile(target) {
  * @returns {{ meetTile: {x,y}, peerId: string } | null}
  */
 export function evaluateHandoff() {
-    if (beliefs.me.carrying.length < 2) return null;
+    if (beliefs.me.carrying.length < 1) return null;
 
     const peers = getPeers();
     const peer = peers[0] ?? null;
@@ -240,40 +249,71 @@ export function evaluateHandoff() {
     const distBMeet   = manhattanDistance(posB, meetTile);
     const distMeetDel = manhattanDistance(meetTile, delivery);
 
-    // Condition 1: full handoff route is shorter than A delivering alone
-    const condition1 = distAMeet + distBMeet + distMeetDel < distADel;
+    // Condition 1: A should save enough travel before direct delivery. The
+    // handoff may not deliver the parcel earlier, but it can free A to keep
+    // collecting while B completes delivery.
+    const parallelTime = Math.max(distAMeet, distBMeet);
+    const savedASteps = distADel - distAMeet;
+    const condition1 = savedASteps > HANDOFF_GAIN_THRESHOLD;
 
-    // Condition 2: B's detour to meetTile costs less than its current path
-    const peerTarget = peer.intention?.targetPos ?? findNearestDeliveryTile(posB);
+    // Condition 2: B's detour to meetTile costs less than its current active path.
+    // If B is idle/roaming, treat it as available for the handoff.
+    const peerTarget =
+        peer.intention?.status === 'active' &&
+        (peer.intention.type === 'go_pick_up' || peer.intention.type === 'go_deliver') &&
+        peer.intention.targetPos
+            ? peer.intention.targetPos
+            : null;
     const distBCurrent = peerTarget
         ? manhattanDistance(posB, peerTarget)
         : Infinity;
     const condition2 = distBMeet + distMeetDel < distBCurrent;
 
-    // Condition 3: estimated reward with handoff must exceed A delivering alone
+    // Condition 3: handoff should free A significantly before direct delivery,
+    // without losing more than a tiny amount of parcel value. Handoff usually
+    // cannot improve parcel reward by itself (A→meet→delivery is not shorter
+    // than A→delivery), but it can improve team throughput by letting A resume
+    // pickup work while B finishes delivery.
     const valueAAlone = deliveryValue(beliefs.me.carrying, posA, delivery);
-    const handoffSteps = distAMeet + distBMeet + distMeetDel;
+    const handoffSteps = distAMeet + distMeetDel;
     const valueHandoff = beliefs.me.carrying.reduce((total, id) => {
         const parcel = beliefs.parcels.get(id);
         if (!parcel) return total;
         return total + estimatedRewardAtDelivery(parcel.reward, handoffSteps);
     }, 0);
-    const conditionValue = valueHandoff > valueAAlone + HANDOFF_GAIN_THRESHOLD;
+    const conditionValue =
+        savedASteps > HANDOFF_GAIN_THRESHOLD &&
+        valueHandoff + HANDOFF_MAX_REWARD_LOSS >= valueAAlone;
 
     if (!condition1 || !condition2 || !conditionValue) {
         if (condition1 && condition2) {
             // Route is shorter but reward does not improve — log and skip.
             console.log(
-                `[coord] Handoff rejected: Aalone=${valueAAlone.toFixed(1)} handoff=${valueHandoff.toFixed(1)}`
+                `[coord] Handoff rejected: Aalone=${valueAAlone.toFixed(1)} ` +
+                `handoff=${valueHandoff.toFixed(1)} savedA=${savedASteps}`
             );
         }
         return null;
     }
 
     console.log(
-        `[coord] Handoff viable: Aalone=${valueAAlone.toFixed(1)} handoff=${valueHandoff.toFixed(1)} route=${distAMeet}+${distBMeet}+${distMeetDel}`
+        `[coord] Handoff viable: Aalone=${valueAAlone.toFixed(1)} ` +
+        `handoff=${valueHandoff.toFixed(1)} savedA=${savedASteps} ` +
+        `route=max(${distAMeet},${distBMeet})+${distMeetDel} ` +
+        `parcelDecay=${distAMeet}+${distMeetDel}`
     );
     return { meetTile, peerId: peer.id };
+}
+
+export function resetCoordinatorForTests() {
+    for (const pending of state.pendingRequests.values()) {
+        if (pending.timer) clearTimeout(pending.timer);
+    }
+    state.peers.clear();
+    state.reservations.clear();
+    state.yieldedParcels.clear();
+    state.pendingRequests.clear();
+    _pendingYield = null;
 }
 
 /**
@@ -294,15 +334,18 @@ export function consumeYieldRequest() {
 let _getCurrentIntention = () => null;
 /** @type {(intention: import('../shared/types.js').Intention) => void} */
 let _forceIntention = () => {};
+/** @type {(force?: boolean) => void} */
+let _requestRevision = () => {};
 
 /**
  * Initialises the coordinator.
  *
- * @param {{ getCurrentIntention: Function, forceIntention: Function }} callbacks
+ * @param {{ getCurrentIntention: Function, forceIntention: Function, requestRevision?: Function }} callbacks
  */
-export function initCoordinator({ getCurrentIntention, forceIntention }) {
+export function initCoordinator({ getCurrentIntention, forceIntention, requestRevision }) {
     _getCurrentIntention = getCurrentIntention;
     _forceIntention = forceIntention;
+    if (requestRevision) _requestRevision = requestRevision;
     onMessage(MSG_TYPE.BELIEF_UPDATE, handleBeliefUpdate);
     onMessage(MSG_TYPE.INTENTION_UPDATE, handleIntentionUpdate);
     onMessage(MSG_TYPE.REQUEST, handleRequest);
@@ -771,8 +814,12 @@ async function runZoneAssignment() {
 
     const selfId  = beliefs.me.id;
     const selfPos = { x: beliefs.me.x, y: beliefs.me.y };
+    if (!selfId || !hasKnownPosition(selfPos)) {
+        console.log('[coord] Zone assignment skipped: own position unknown');
+        return;
+    }
     const peerId  = peer.id;
-    const peerPos = peer.x !== null
+    const peerPos = hasKnownPosition(peer)
         ? { x: peer.x, y: peer.y }
         : selfPos; // fallback: treat peer as co-located until position arrives
 
@@ -883,6 +930,8 @@ export function peerDistanceToParcel(parcelId) {
 const CLAIM_MARGIN = 2;
 
 export function shouldYieldParcel(parcelId, myPos) {
+    if (!hasKnownPosition(myPos)) return false;
+
     const held = state.yieldedParcels.get(parcelId);
     if (held) {
         if (held.expiresAt > Date.now()) return true;
@@ -1002,6 +1051,7 @@ export function getReservations() {
 function handleBeliefUpdate(envelope, senderId, senderName) {
     const wasPositionUnknown = (state.peers.get(senderId)?.x ?? null) === null;
     const peer = touchPeer(senderId, senderName);
+    if (!peer) return;
     const me = envelope.payload?.me;
     if (me) {
         if (typeof me.x === 'number') peer.x = me.x;
@@ -1019,6 +1069,7 @@ function handleBeliefUpdate(envelope, senderId, senderName) {
 
 function handleIntentionUpdate(envelope, senderId, senderName) {
     const peer = touchPeer(senderId, senderName);
+    if (!peer) return;
     const intention = envelope.payload?.intention;
     if (!intention) return;
 
@@ -1051,7 +1102,7 @@ function handleIntentionUpdate(envelope, senderId, senderName) {
 }
 
 function handleRequest(envelope, senderId, senderName, reply) {
-    touchPeer(senderId, senderName);
+    if (!touchPeer(senderId, senderName)) return;
     const { action, parcelId } = envelope.payload ?? {};
 
     if (action === 'take_parcel') {
@@ -1080,27 +1131,26 @@ function handleResponse(envelope, senderId) {
 }
 
 function handleParcelClaimed(envelope, senderId, senderName) {
-    touchPeer(senderId, senderName);
+    if (!touchPeer(senderId, senderName)) return;
     const parcelId = envelope.payload?.parcelId;
     if (!parcelId) return;
 
     state.reservations.delete(parcelId);
     state.yieldedParcels.delete(parcelId);
 
-    const parcel = beliefs.parcels.get(parcelId);
-    if (parcel) {
-        parcel.carriedBy = senderId;
-    }
     suppressClaimedParcel(parcelId);
 
     const current = _getCurrentIntention();
     if (current?.type === 'go_pick_up' && current.parcelId === parcelId) {
         current.status = 'failed';
         console.log(`[coord] Parcel ${parcelId} claimed by ${senderId}; abandoning local pickup`);
+        _requestRevision(true);
     }
 }
 
 function handleBlockedAt(envelope) {
+    if (isSelfMessage(envelope, null)) return;
+
     const { x: bx, y: by, direction: blockedDir } = envelope.payload ?? {};
     if (bx === undefined || by === undefined || !blockedDir) return;
 
@@ -1124,7 +1174,7 @@ function handleBlockedAt(envelope) {
 }
 
 function handleHandoffRequest(envelope, senderId) {
-    touchPeer(senderId);
+    if (!touchPeer(senderId)) return;
     const { meetTile } = envelope.payload ?? {};
     if (!meetTile) {
         replyTo(envelope, false, 'unknown');
@@ -1132,10 +1182,17 @@ function handleHandoffRequest(envelope, senderId) {
     }
 
     const myIntention = _getCurrentIntention();
-    const isBusy =
+    // Handoff intentions are a bilateral commitment even in pending state;
+    // go_pick_up / go_deliver only block when actively executing.
+    const isHandoffCommitted =
         myIntention &&
-        myIntention.status === 'active' &&
-        (myIntention.type === 'go_pick_up' || myIntention.type === 'go_deliver');
+        (myIntention.status === 'active' || myIntention.status === 'pending') &&
+        (myIntention.type === 'go_handoff' || myIntention.type === 'go_handoff_receive');
+    const isBusy =
+        isHandoffCommitted ||
+        (myIntention &&
+            myIntention.status === 'active' &&
+            (myIntention.type === 'go_pick_up' || myIntention.type === 'go_deliver'));
 
     if (isBusy) {
         replyTo(envelope, false, 'busy');
@@ -1145,14 +1202,35 @@ function handleHandoffRequest(envelope, senderId) {
 
     replyTo(envelope, true, 'ok');
     console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
+    // Clear any local suppression so the dropped parcel is visible when B delivers it.
+    clearParcelSuppressions();
 
-    const receiveIntention = createIntention('go_handoff_receive', null, meetTile, 0);
+    const stagingTile = findHandoffStagingTile(meetTile, {
+        x: beliefs.me.x,
+        y: beliefs.me.y,
+    }) ?? meetTile;
+    const receiveIntention = createIntention('go_handoff_receive', null, stagingTile, 0);
+    receiveIntention._meetTile = meetTile;
     _forceIntention(receiveIntention);
+}
+
+function findHandoffStagingTile(meetTile, myPos) {
+    const candidates = Object.values(DIR_DELTA_COORD)
+        .map(({ dx, dy }) => ({ x: meetTile.x + dx, y: meetTile.y + dy }))
+        .filter((tile) => isWalkable(tile.x, tile.y));
+
+    candidates.sort((a, b) =>
+        manhattanDistance(myPos, a) - manhattanDistance(myPos, b)
+    );
+
+    return candidates[0] ?? null;
 }
 
 // Helpers
 
 function touchPeer(id, name) {
+    if (isSelfMessage(null, id)) return null;
+
     let peer = state.peers.get(id);
     if (!peer) {
         peer = {
@@ -1176,6 +1254,12 @@ function touchPeer(id, name) {
         if (name && !peer.name) peer.name = name;
     }
     return peer;
+}
+
+function isSelfMessage(envelope, senderId) {
+    const selfId = beliefs.me.id;
+    if (!selfId) return false;
+    return senderId === selfId || envelope?.from === selfId;
 }
 
 function pruneStale() {

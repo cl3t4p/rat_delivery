@@ -80,7 +80,7 @@
 
 // Multi-agent message protocol
 
-/** @typedef {'belief_update'|'intention_update'|'request'|'response'|'zone_assign'|'handoff_request'|'handoff_response'|'blocked_at'} MsgType */
+/** @typedef {'belief_update'|'intention_update'|'request'|'response'|'zone_assign'|'handoff_request'|'handoff_response'|'blocked_at'|'parcel_claimed'} MsgType */
 
 /** @typedef {'take_parcel'|'avoid_tile'|'status_check'} RequestAction */
 

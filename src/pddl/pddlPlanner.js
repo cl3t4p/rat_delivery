@@ -49,7 +49,7 @@ export async function planWithPDDL(intention) {
 
     try {
         console.log(
-            `[pddl] calling solver for ${intention.type} → (${intention.targetPos.x},${intention.targetPos.y})`
+            `[pddl] calling solver for ${intention.type} → (${intention.targetPos?.x},${intention.targetPos?.y})`
         );
         const plan = await withTimeout(onlineSolver(domainFile, problem), PDDL_TIMEOUT_MS);
         if (!plan || plan.length === 0) {
@@ -201,6 +201,13 @@ function goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames
         if (!tiles.has(`${tx},${ty}`)) return null;
         return `(at ${agentName} t_${tx}_${ty})`;
     }
+    if (intention.type === 'go_handoff' || intention.type === 'go_handoff_receive') {
+        const t = intention.targetPos;
+        if (!t) return null;
+        const tx = Math.round(t.x), ty = Math.round(t.y);
+        if (!tiles.has(`${tx},${ty}`)) return null;
+        return `(at ${agentName} t_${tx}_${ty})`;
+    }
     return null;
 }
 
@@ -222,7 +229,7 @@ function nearestSpawnerGoal(agentName, mx, my, tiles) {
         const tile = beliefs.grid.get(key);
         if (!tile || tile.type !== '1') continue;
         const [x, y] = key.split(',').map(Number);
-        if (x === mx && y === my) continue; // già qui, sarebbe goal banale
+        if (x === mx && y === my) continue; // Already here; this would be a trivial goal.
         const d = Math.abs(x - mx) + Math.abs(y - my);
         if (d < bestDist) {
             bestDist = d;
@@ -297,7 +304,7 @@ function parsePlan(plan) {
             case 'move-down':
                 moves.push('down');
                 break;
-            // pick-up / put-down: ignorate (gestite dall'executor)
+            // pick-up / put-down are handled by the executor.
         }
     }
     return moves;
