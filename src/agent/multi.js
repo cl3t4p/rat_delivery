@@ -43,25 +43,23 @@ import {
 /**
  * Connects and wires a multi-agent BDI agent for the given role.
  *
- * @param {{ role: 'a' | 'b' }} options
+ * The token is supplied by the entrypoint (multiagent_a.js / multiagent_b.js),
+ * each passing its own TOKEN_A / TOKEN_B.
+ *
+ * @param {{ role: 'a' | 'b', token: string }} options
  * @returns {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket}
  */
-export function startMultiAgent({ role }) {
+export function startMultiAgent({ role, token }) {
     const isB = role === 'b';
     const tag = `multiagent_${role}`;
 
     installTimestampedConsole();
 
-    let socket;
-    if (isB) {
-        if (!process.env.TOKEN_B) {
-            console.error(`[${tag}] TOKEN_B missing in .env`);
-            process.exit(1);
-        }
-        socket = DjsConnect(process.env.HOST, process.env.TOKEN_B);
-    } else {
-        socket = DjsConnect();
+    if (!token) {
+        console.error(`[${tag}] token missing — set TOKEN_${role.toUpperCase()} in .env`);
+        process.exit(1);
     }
+    const socket = DjsConnect(process.env.HOST, token);
 
     // Multi-agent layer. installMultiAgent() injects the real coordination hooks
     // into the BDI core, which otherwise runs solo (see bdi/coordination.js).

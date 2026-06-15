@@ -32,13 +32,20 @@ import {
 /**
  * Connects to the environment and wires the single-agent BDI loop.
  *
- * @param {{ tag?: string }} [options] - tag prefixed to this agent's log lines.
+ * The token is supplied by the entrypoint (single.js / pddl.js), which passes the
+ * shared TOKEN.
+ *
+ * @param {{ tag?: string, token?: string }} [options] - log tag and connection token.
  * @returns {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket}
  */
-export function startSingleAgent({ tag = 'single' } = {}) {
+export function startSingleAgent({ tag = 'single', token } = {}) {
     installTimestampedConsole();
 
-    const socket = DjsConnect();
+    if (!token) {
+        console.error(`[${tag}] token missing — set TOKEN in .env`);
+        process.exit(1);
+    }
+    const socket = DjsConnect(process.env.HOST, token);
 
     // No multi-agent layer: a solo agent does not communicate, coordinate, or
     // accept zone assignments. The BDI modules' notifier/coordinator calls silently

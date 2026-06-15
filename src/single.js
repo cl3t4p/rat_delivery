@@ -16,4 +16,4 @@ import 'dotenv/config';
 process.env.USE_PDDL = 'false';
 
 const { startSingleAgent } = await import('./agent/runtime.js');
-startSingleAgent({ tag: 'single' });
+startSingleAgent({ tag: 'single', token: process.env.TOKEN });
