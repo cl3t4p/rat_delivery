@@ -20,17 +20,10 @@ import { beliefs } from '../bdi/beliefs.js';
 /** @typedef {import('../shared/types.js').MsgType} MsgType */
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
 
-export const MSG_TYPE = Object.freeze({
-    BELIEF_UPDATE: 'belief_update',
-    INTENTION_UPDATE: 'intention_update',
-    REQUEST: 'request',
-    RESPONSE: 'response',
-    ZONE_ASSIGN: 'zone_assign',
-    HANDOFF_REQUEST: 'handoff_request',
-    HANDOFF_RESPONSE: 'handoff_response',
-    BLOCKED_AT: 'blocked_at',
-    PARCEL_CLAIMED: 'parcel_claimed',
-});
+// Defined in the BDI seam so the BDI core can reference message types without
+// importing the multi layer; re-exported here for the rest of multi/.
+export { MSG_TYPE } from '../bdi/coordination.js';
+import { MSG_TYPE } from '../bdi/coordination.js';
 
 const KNOWN_TYPES = new Set(Object.values(MSG_TYPE));
 

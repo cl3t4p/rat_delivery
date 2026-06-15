@@ -6,7 +6,7 @@
  */
 
 import { beliefs, manhattanDistance } from './beliefs.js';
-import { shouldYieldParcel } from '../multi/coordinator.js';
+import { shouldYieldParcel } from './coordination.js';
 import {
     deliveryValue,
     detourValue,
@@ -14,6 +14,32 @@ import {
 } from './scoring.js';
 import { aStar } from './pathfinding.js';
 import { getZone as _sharedGetZone, getMapBounds as _getMapBounds, onBoundsInvalidated } from '../shared/zones.js';
+
+const USE_PDDL = process.env.USE_PDDL === 'true';
+
+/**
+ * Reachability/distance used for deliberation only (not for movement).
+ *
+ * Normally this is A*. In PDDL mode it is NOT: the PDDL planner can push crates,
+ * so it — not A* — is the authority on what is reachable. A* treats crates as walls
+ * and would wrongly reject crate-blocked parcels/deliveries, leaving the agent idle
+ * on `wait`. So in PDDL mode we mirror the old single-agent PDDL branch: estimate
+ * distance with Manhattan and never report a target as unreachable, letting the PDDL
+ * planner decide (and fail gracefully) at execution time.
+ *
+ * The return shape matches aStar's ({ path, moves }) so callers can keep reading
+ * `.moves.length` as the distance; `path` is unused by those callers.
+ *
+ * @param {Position} from
+ * @param {Position} to
+ * @param {{avoidAgents?: boolean}} [options]
+ * @returns {{path: Position[], moves: any[]} | null}
+ */
+function reachPath(from, to, options = { avoidAgents: false }) {
+    if (!USE_PDDL) return aStar(from, to, options);
+    const len = manhattanDistance(from, to);
+    return { path: [], moves: new Array(len).fill('step') };
+}
 
 /** @type {Map<string, boolean>} Cache for spawner→delivery reachability (static per map load). */
 const _spawnerDeliveryCache = new Map();
@@ -289,7 +315,7 @@ export function getBestIntention() {
         }
 
         if (_roamTarget && onIdx === -1 && !sameTile(me, _roamTarget)) {
-            const result = aStar(me, _roamTarget, { avoidAgents: false });
+            const result = reachPath(me, _roamTarget, { avoidAgents: false });
             if (result) {
                 const reason = spawnsAreRare
                     ? `spawns rare (${genMs}ms)`
@@ -430,7 +456,7 @@ function findBestDeliveryTileMatching(myPos, predicate) {
 
     for (const tile of beliefs.deliveryTiles) {
         if (!predicate(tile)) continue;
-        const result = aStar(myPos, tile, { avoidAgents: false });
+        const result = reachPath(myPos, tile, { avoidAgents: false });
         if (!result) continue;
 
         if (result.moves.length < bestLen) {
@@ -473,7 +499,7 @@ function findBestDeliveryPathMatching(pos, predicate) {
 
     for (const tile of beliefs.deliveryTiles) {
         if (!predicate(tile)) continue;
-        const result = aStar(pos, tile, { avoidAgents: false });
+        const result = reachPath(pos, tile, { avoidAgents: false });
         if (!result) continue;
 
         if (result.moves.length < bestLen) {
@@ -499,9 +525,9 @@ function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
         return _detourCache.get(parcel.id);
     }
 
-    const direct = aStar(myPos, directDelivery, { avoidAgents: false });
-    const toParcel = aStar(myPos, { x: parcel.x, y: parcel.y }, { avoidAgents: false });
-    const parcelToDelivery = aStar(
+    const direct = reachPath(myPos, directDelivery, { avoidAgents: false });
+    const toParcel = reachPath(myPos, { x: parcel.x, y: parcel.y }, { avoidAgents: false });
+    const parcelToDelivery = reachPath(
         { x: parcel.x, y: parcel.y },
         parcelDelivery,
         { avoidAgents: false }
@@ -565,15 +591,23 @@ export function findBestPickUp(myPos, options = {}) {
         const parcelPos = { x: parcel.x, y: parcel.y };
         if (manhattanDistance(myPos, parcelPos) > maxDistanceToParcel) continue;
 
-        const pathToParcel = aStar(myPos, parcelPos, { avoidAgents: false });
-        if (!pathToParcel) continue;
+        let adjustedScore;
+        if (USE_PDDL) {
+            // Old single-agent PDDL model: the planner owns pathing (incl. crate
+            // pushing), so don't gate on A* delivery reachability or decay-to-zero
+            // estimates (which would idle the agent on `wait`). Score by reward minus
+            // straight-line distance and let the planner deliver.
+            adjustedScore = parcel.reward - manhattanDistance(myPos, parcelPos);
+        } else {
+            const pathToParcel = reachPath(myPos, parcelPos, { avoidAgents: false });
+            if (!pathToParcel) continue;
 
-        const delivery = findBestDeliveryPathFrom(parcelPos);
-        if (!delivery) continue;
-        if (!allowOutOfZone && !_matchesZoneOpportunity(parcelPos, delivery.tile)) continue;
+            const delivery = findBestDeliveryPathFrom(parcelPos);
+            if (!delivery) continue;
+            if (!allowOutOfZone && !_matchesZoneOpportunity(parcelPos, delivery.tile)) continue;
 
-        const score = pickupValueByPath(parcel, pathToParcel, delivery.path);
-        const adjustedScore = score;
+            adjustedScore = pickupValueByPath(parcel, pathToParcel, delivery.path);
+        }
 
         if (adjustedScore > bestScore) {
             bestScore = adjustedScore;
@@ -634,7 +668,7 @@ export function findBestReachableSpawnerTile(myPos, spawners = findSpawnerTiles(
     let bestLen = Infinity;
 
     for (const spawner of spawners) {
-        const result = aStar(myPos, spawner, { avoidAgents: false });
+        const result = reachPath(myPos, spawner, { avoidAgents: false });
         if (!result) continue;
 
         if (result.moves.length < bestLen) {
@@ -648,7 +682,7 @@ export function findBestReachableSpawnerTile(myPos, spawners = findSpawnerTiles(
 
 function findFirstReachableSpawnerTile(myPos, spawners) {
     for (const spawner of spawners) {
-        const result = aStar(myPos, spawner, { avoidAgents: false });
+        const result = reachPath(myPos, spawner, { avoidAgents: false });
         if (result) return spawner;
     }
 
@@ -677,7 +711,7 @@ function spawnerCanReachDelivery(spawner) {
     const key = `${spawner.x},${spawner.y}`;
     if (_spawnerDeliveryCache.has(key)) return _spawnerDeliveryCache.get(key);
     const result = beliefs.deliveryTiles.some((delivery) =>
-        aStar(spawner, delivery, { avoidAgents: false })
+        reachPath(spawner, delivery, { avoidAgents: false })
     );
     _spawnerDeliveryCache.set(key, result);
     return result;

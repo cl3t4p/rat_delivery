@@ -43,7 +43,7 @@ export function enableNotifier() {
 
 /**
  * Computes the delta vs. the last snapshot of own beliefs and, if any,
- * broadcasts a `belief_update`. Called from `index_a.js` / `index_b.js` after every
+ * broadcasts a `belief_update`. Called from `multiagent_a.js` / `multiagent_b.js` after every
  * `updateBeliefs(...)`.
  */
 export function tickBeliefDelta() {

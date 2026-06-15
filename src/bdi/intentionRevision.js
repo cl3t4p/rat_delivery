@@ -7,9 +7,17 @@
 
 import { beliefs, isWalkable, manhattanDistance } from './beliefs.js';
 import { getBestIntention, createIntention, setZoneConstraint, resetRoamTarget, findBestLocalPickUp } from './deliberation.js';
-import { broadcastIntention } from '../multi/notifier.js';
-import { isParcelClaimedByPeer, shouldYieldParcel, requestTakeover, evaluateHandoff, requestHandoff, getNearestReachableZoneTarget } from '../multi/coordinator.js';
-import { MSG_TYPE, onMessage } from '../multi/communication.js';
+import {
+    broadcastIntention,
+    isParcelClaimedByPeer,
+    shouldYieldParcel,
+    requestTakeover,
+    evaluateHandoff,
+    requestHandoff,
+    getNearestReachableZoneTarget,
+    MSG_TYPE,
+    onMessage,
+} from './coordination.js';
 import { aStar } from './pathfinding.js';
 
 // Improvement threshold: replace the current intention only if the new one
@@ -29,6 +37,12 @@ const STUCK_TIMEOUT_MS = 4000;
 // When enabled, the next intention is chosen by the standalone LLM agent
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
 const USE_LLM = process.env.USE_LLM === 'true';
+
+// In PDDL mode the planner produces multi-step plans that legitimately detour
+// away from the target (e.g. circling a crate to push it from the right side),
+// which the distance-based stuck watchdog would mistake for being stuck and abort.
+// The pddl branch has no watchdog and works, so we simply disable it here.
+const USE_PDDL = process.env.USE_PDDL === 'true';
 
 /** @type {Intention|null} */
 let currentIntention = null;
@@ -229,7 +243,7 @@ function isIntentionStillValid(intention) {
 /**
  * revise(force = false) - Main revision function.
  * Called:
- *   - On each sensing event from index_a.js / index_b.js
+ *   - On each sensing event from multiagent_a.js / multiagent_b.js
  *   - In forced mode after a failure or completion
  */
 export async function revise(force = false) {
@@ -350,6 +364,7 @@ export async function revise(force = false) {
  * that keep re-picking the same unreachable tile.
  */
 function checkStuck() {
+    if (USE_PDDL) return; // PDDL plans take legitimate detours; watchdog disabled (see USE_PDDL).
     if (!currentIntention) {
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
@@ -400,7 +415,7 @@ function checkStuck() {
     }
 }
 
-// Called by index_a.js and index_b.js on each sensing event
+// Called by multiagent_a.js and multiagent_b.js on each sensing event
 export function onSensingRevise() {
     checkStuck();
     requestRevision(false);
@@ -414,7 +429,7 @@ export function onSensingRevise() {
  * by at least IMPROVEMENT_THRESHOLD, so the LLM cannot interrupt a
  * high-value pickup mid-execution.
  *
- * Call once from index_a.js / index_b.js after initCoordinator().
+ * Call once from multiagent_a.js / multiagent_b.js after initCoordinator().
  */
 export function initZoneAssignHandler() {
     onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {

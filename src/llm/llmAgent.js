@@ -28,7 +28,7 @@ let _lastUnavailableLog = 0;
 /**
  * Initialises the LLM agent.
  *
- * Must be called once from index_b.js before any LLM function is used.
+ * Must be called once from multiagent_b.js before any LLM function is used.
  * Agent A must NOT call this — it keeps the LLM modules unloaded entirely.
  *
  * @param {() => Promise<void>} onObjectiveChange - Called after a new objective
@@ -96,7 +96,7 @@ function extractCells(text) {
 /**
  * Updates the environment snapshot in the LLM memory.
  *
- * Called by index_b.js on each sensing event, so the LLM always has
+ * Called by multiagent_b.js on each sensing event, so the LLM always has
  * updated information before planning.
  */
 export function updateContext() {
@@ -121,7 +121,7 @@ export function updateContext() {
  * and saves it in the LLM memory. The objective is then used as extra
  * context by the LLM intention agent on its next deliberation.
  *
- * Called by index_b.js when a message arrives via onFallbackMsg.
+ * Called by multiagent_b.js when a message arrives via onFallbackMsg.
  *
  * @param {string} objectiveText - Example: "Pick up the nearest parcel and deliver it".
  */

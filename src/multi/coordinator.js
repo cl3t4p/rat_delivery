@@ -402,7 +402,7 @@ let _lastRebalanceTs = 0;
 
 /**
  * Marks this agent as the LLM coordinator.
- * Must be called once from index_b.js after initCoordinator().
+ * Must be called once from multiagent_b.js after initCoordinator().
  */
 export function setCoordinatorRole() {
     _isCoordinator = true;
@@ -874,7 +874,7 @@ async function runZoneAssignment() {
  * so this loop only handles periodic re-assignments to adapt to game-state
  * changes over time. It fires every ZONE_ASSIGN_INTERVAL_MS.
  *
- * Call once from index_b.js after initCoordinator().
+ * Call once from multiagent_b.js after initCoordinator().
  */
 export function startZoneAssignmentLoop() {
     if (!_isCoordinator) return;

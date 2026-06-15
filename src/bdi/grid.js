@@ -21,16 +21,24 @@ function isCellBlacklisted(key) {
 /**
  * Checks whether a tile can be walked on.
  *
+ * By default a tile occupied by a crate is not walkable, which is what A* and the
+ * intention logic want. The PDDL planner, however, models crates as pushable
+ * Sokoban objects and must keep their tiles in the problem; it passes
+ * `awareOfCrates = false` so crate tiles stay walkable and can be emitted as
+ * pushable `(occupied)` objects.
+ *
  * @param {number} x
  * @param {number} y
+ * @param {boolean} [awareOfCrates=true] - when false, a crate on the tile does not
+ *   make it unwalkable.
  * @returns {boolean}
  */
-export function isWalkable(x, y) {
+export function isWalkable(x, y, awareOfCrates = true) {
     const key = `${x},${y}`;
     const tile = beliefs.grid.get(key);
     if (!tile) return false;
     if (isCellBlacklisted(key)) return false;
-    if (beliefs.crates.has(key)) return false;
+    if (awareOfCrates && beliefs.crates.has(key)) return false;
     return !BLOCKING_TYPES.has(tile.type);
 }
 
