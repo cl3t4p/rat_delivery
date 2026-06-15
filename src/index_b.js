@@ -1,26 +1,31 @@
 /**
  * index_b.js
  *
- * Entry point for agent B (BDI + LLM coordinator).
+ * Entry point for Agent B.
  *
- * Shares all BDI modules with agent A (beliefs, deliberation, executor,
- * intentionRevision) but connects with TOKEN_B and runs the zone-assignment
- * LLM loop, which calls the LLM every 30 seconds and sends zone assignments
- * to both agents.
- *
- * Run in a second terminal alongside index.js:
- *   node src/index_b.js
- *
- * Required .env variables:
- *   TOKEN_B              — Deliveroo token for agent B
- *   HOST                 — game server host (shared with agent A)
- *   LITELLM_API_KEY      — LLM server API key (shared with agent A)
- *   LITELLM_BASE_URL     — LLM server base URL (optional, shared with agent A)
- *   LOCAL_MODEL          — LLM model name (optional, shared with agent A)
+ * Agent B is the BDI + LLM coordinator:
+ * - runs the same BDI loop as Agent A
+ * - maintains LLM memory/context
+ * - receives natural-language objectives
+ * - starts the LLM zone-assignment loop
+ * - sends coordination messages to Agent A
  */
 
 import 'dotenv/config';
 import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk/client';
+
+{
+    const _log = console.log.bind(console);
+    const _warn = console.warn.bind(console);
+    const _error = console.error.bind(console);
+    const ts = () => {
+        const d = new Date();
+        return `[${d.toISOString().slice(11, 23)}]`;
+    };
+    console.log   = (...a) => _log(ts(),   ...a);
+    console.warn  = (...a) => _warn(ts(),  ...a);
+    console.error = (...a) => _error(ts(), ...a);
+}
 
 import {
     beliefs,
@@ -30,11 +35,20 @@ import {
     decayParcelsReward,
     clockEventToMs,
 } from './bdi/beliefs.js';
-import { onSensingRevise, getCurrentIntention } from './bdi/intentionRevision.js';
+
+import {
+    onSensingRevise,
+    getCurrentIntention,
+    forceIntention,
+    requestRevision,
+    revise,
+    initZoneAssignHandler,
+} from './bdi/intentionRevision.js';
+
 import { startExecutor } from './bdi/executor.js';
-import { updateContext, setObjective } from './llm/llmAgent.js';
+import { updateContext, setObjective, initLlmAgent } from './llm/llmAgent.js';
 import { initCommunication, onFallbackMsg } from './multi/communication.js';
-import { initCoordinator, startZoneAssignmentLoop } from './multi/coordinator.js';
+import { initCoordinator, startZoneAssignmentLoop, setCoordinatorRole } from './multi/coordinator.js';
 import { enableNotifier, tickBeliefDelta } from './multi/notifier.js';
 
 if (!process.env.TOKEN_B) {
@@ -42,29 +56,27 @@ if (!process.env.TOKEN_B) {
     process.exit(1);
 }
 
-// Connect with agent B token.
 const socket = DjsConnect(process.env.HOST, process.env.TOKEN_B);
 
 // Multi-agent layer.
-// Agent B owns the zone-assignment LLM loop: it calls the LLM and sends
-// assignments to both itself and agent A via broadcast/direct messages.
+// Agent B owns the LLM coordination loop.
 initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
-initCoordinator();
+initCoordinator({ getCurrentIntention, forceIntention, requestRevision });
+setCoordinatorRole();
+initLlmAgent(revise);
+initZoneAssignHandler();
 startZoneAssignmentLoop();
 enableNotifier();
 
-// Receive map data.
 socket.on('map', (width, height, tiles) => {
     console.log(`[index_b] Map received: ${width}x${height}`);
     updateMap(tiles);
 });
 
-// Update agent.
 socket.on('you', (agent) => {
     updateMe(agent);
 });
 
-// Sensing loop.
 socket.on('sensing', (sensing) => {
     updateBeliefs(sensing.parcels ?? [], sensing.agents ?? [], sensing.crates ?? []);
     tickBeliefDelta();
@@ -73,42 +85,68 @@ socket.on('sensing', (sensing) => {
     logState();
 });
 
-// Load config.
 socket.onConfig((config) => {
-    beliefs.config.PARCEL_DECADING_INTERVAL = config?.GAME?.parcels?.decaying_event ?? null;
+    beliefs.config.PARCEL_DECADING_INTERVAL = clockEventToMs(config?.GAME?.parcels?.decaying_event) ?? null;
     beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(
         config?.GAME?.parcels?.generation_event
     );
     beliefs.config.OBSERVATION_DISTANCE = config?.GAME?.player?.observation_distance ?? null;
     beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
+
     console.log('[index_b] Config:', beliefs.config);
+    console.log(
+        `[index_b] Decay interval: ${beliefs.config.PARCEL_DECADING_INTERVAL}ms`
+    );
 });
 
-// Decay local parcels.
 setInterval(() => {
     decayParcelsReward();
 }, 1000);
 
-// Start the executor loop.
 startExecutor(socket);
 
-// Receive plain-text LLM objectives via the Deliveroo chat.
+// Agent B receives natural-language objectives.
 onFallbackMsg((id, name, msg) => {
     console.log(`[index_b] Message from ${name}: ${msg}`);
+
     if (typeof msg === 'string' && msg.trim() !== '') {
         setObjective(msg);
     }
 });
 
-// Debug: log the current state.
+const _lastState_b = { x: null, y: null, score: -1, carrying: -1, type: null, parcelId: null };
+
 function logState() {
     const intention = getCurrentIntention();
+    const x        = beliefs.me.x !== null ? Math.round(beliefs.me.x) : null;
+    const y        = beliefs.me.y !== null ? Math.round(beliefs.me.y) : null;
+    const score    = beliefs.me.score ?? 0;
+    const carrying = beliefs.me.carrying.length;
+    const type     = intention?.type ?? 'none';
+    const parcelId = intention?.parcelId ?? null;
+
+    if (
+        x        === _lastState_b.x        &&
+        y        === _lastState_b.y        &&
+        score    === _lastState_b.score    &&
+        carrying === _lastState_b.carrying &&
+        type     === _lastState_b.type     &&
+        parcelId === _lastState_b.parcelId
+    ) return;
+
+    _lastState_b.x        = x;
+    _lastState_b.y        = y;
+    _lastState_b.score    = score;
+    _lastState_b.carrying = carrying;
+    _lastState_b.type     = type;
+    _lastState_b.parcelId = parcelId;
+
     console.log(
         `[state_b] pos=(${beliefs.me.x?.toFixed(1)},${beliefs.me.y?.toFixed(1)})`,
-        `score=${beliefs.me.score}`,
-        `carrying=${beliefs.me.carrying.length}`,
+        `score=${score}`,
+        `carrying=${carrying}`,
         `parcels=${beliefs.parcels.size}`,
-        `intention=${intention?.type ?? 'none'}`,
-        intention?.parcelId ? `→ ${intention.parcelId}` : ''
+        `intention=${type}`,
+        parcelId ? `-> ${parcelId}` : ''
     );
 }

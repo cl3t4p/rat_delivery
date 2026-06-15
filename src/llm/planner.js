@@ -53,14 +53,14 @@ export async function createPlan(objective, environmentSnapshot) {
 		},
 	];
 
-	console.log('[planner] Chiamata all\'LLM per il piano...');
+	console.log('[planner] Calling LLM for plan...');
 	const raw = await callLLM(messages, { temperature: 0 });
-	console.log('[planner] Output grezzo:\n', raw, '\n');
+	console.log('[planner] Raw output:\n', raw, '\n');
 
 	const plan = parsePlan(raw);
 
 	if (!plan || plan.length === 0) {
-		console.log('[planner] Piano non valido, uso fallback.');
+		console.log('[planner] Invalid plan, using fallback.');
 		return [`Achieve the objective: ${objective}`];
 	}
 

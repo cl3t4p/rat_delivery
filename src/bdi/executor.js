@@ -9,7 +9,7 @@
  *   5. Notifies intentionRevision with done / failed
  */
 
-import { beliefs, canEnter } from './beliefs.js';
+import { beliefs, canEnter, blacklistCellTemporary, suppressClaimedParcel } from './beliefs.js';
 import { planTo } from './pathfinding.js';
 import { planWithPDDL } from '../pddl/pddlPlanner.js';
 import {
@@ -18,6 +18,8 @@ import {
     notifyActionFailed,
 } from './intentionRevision.js';
 import { broadcastIntention } from '../multi/notifier.js';
+import { MSG_TYPE, sendBroadcast } from '../multi/communication.js';
+import { consumeYieldRequest, getPeers } from '../multi/coordinator.js';
 
 // Planner selection:
 //
@@ -31,6 +33,12 @@ import { broadcastIntention } from '../multi/notifier.js';
 // Uses only the A* planner.
 const USE_PDDL = process.env.USE_PDDL === 'true';
 const PDDL_FALLBACK = process.env.PDDL_FALLBACK === 'true';
+const STUCK_FAILURE_THRESHOLD = 3;
+const STUCK_BLACKLIST_TTL_MS = 5000;
+const NO_PATH_RETRY_DELAY_MS = 400;
+const SOCKET_RETRY_DELAY_MS = 1000;
+const SOCKET_DISCONNECTED_SLEEP_MS = 500;
+const MOVE_BLOCK_BACKOFF_MAX_MS = 800;
 
 // Maps each direction to its delta, used for the canEnter pre-check before emitMove.
 const DIR_DELTA = {
@@ -63,6 +71,64 @@ function meReady() {
     return beliefs.me.x !== null && beliefs.me.y !== null;
 }
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let _lastSocketActionErrorLog = 0;
+let _lastSocketConnectErrorLog = 0;
+let _transportAvailable = true;
+let _socketHooksInstalled = false;
+let _everDisconnected = false;
+
+async function safeSocketAction(label, action) {
+    if (!_transportAvailable) {
+        await sleep(SOCKET_DISCONNECTED_SLEEP_MS);
+        return null;
+    }
+
+    try {
+        return await action();
+    } catch (err) {
+        const now = Date.now();
+        if (now - _lastSocketActionErrorLog > 2000) {
+            _lastSocketActionErrorLog = now;
+            console.log(`[executor] Socket action failed (${label}): ${err.message ?? err}`);
+        }
+        await sleep(SOCKET_RETRY_DELAY_MS);
+        return null;
+    }
+}
+
+function setupSocketLifecycle(socket) {
+    if (_socketHooksInstalled) return;
+    _socketHooksInstalled = true;
+
+    if (socket.connected === false) _transportAvailable = false;
+
+    if (typeof socket.on === 'function') {
+        socket.on('connect', () => {
+            _transportAvailable = true;
+            if (_everDisconnected) {
+                console.log('[executor] Socket reconnected; resuming actions');
+            }
+        });
+        socket.on('disconnect', (reason) => {
+            _transportAvailable = false;
+            _everDisconnected = true;
+            console.log(`[executor] Socket disconnected; pausing actions (${reason ?? 'unknown'})`);
+        });
+        socket.on('connect_error', (err) => {
+            _transportAvailable = false;
+            const now = Date.now();
+            if (now - _lastSocketConnectErrorLog > 2000) {
+                _lastSocketConnectErrorLog = now;
+                console.log(`[executor] Socket connect error; actions paused (${err?.message ?? err})`);
+            }
+        });
+    }
+}
+
 // Loop
 
 /**
@@ -73,14 +139,43 @@ function meReady() {
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send actions.
  */
+const failedMoves = new Map();
+
+// Tracks the start time of the current pickup to compute cycle duration on delivery.
+let _cycleStart = null;
+let _cyclePickupReward = 0;
+
 export async function startExecutor(socket) {
+    setupSocketLifecycle(socket);
+
     /** @type {Intention | null} */
     let lastIntention = null;
 
     while (true) {
         await new Promise((r) => setImmediate(r));
 
+        if (!_transportAvailable) {
+            await sleep(SOCKET_DISCONNECTED_SLEEP_MS);
+            continue;
+        }
+
         if (!meReady()) continue;
+
+        // Right-of-way yield: execute a lateral step requested by the coordinator
+        const yieldDir = consumeYieldRequest();
+        if (yieldDir) {
+            const moved = await safeSocketAction(
+                `yield ${yieldDir}`,
+                () => socket.emitMove(yieldDir)
+            );
+            if (moved) {
+                beliefs.me.x = moved.x;
+                beliefs.me.y = moved.y;
+                console.log(`[executor] Right-of-way yield: stepped ${yieldDir} to (${moved.x},${moved.y})`);
+            }
+            await sleep(100);
+            continue;
+        }
 
         const intention = getCurrentIntention();
         if (!intention) continue;
@@ -90,6 +185,10 @@ export async function startExecutor(socket) {
             lastIntention = intention;
             intention.status = 'active';
             broadcastIntention(intention);
+            // Stale failure counts from the previous intention could cause tiles that
+            // were only transiently blocked to be prematurely blacklisted if the agent
+            // navigates through them again under a different intention.
+            failedMoves.clear();
         }
 
         switch (intention.type) {
@@ -104,6 +203,9 @@ export async function startExecutor(socket) {
                 continue;
             case 'go_handoff':
                 await executeHandoff(socket, intention);
+                continue;
+            case 'go_handoff_receive':
+                await executeHandoffReceive(socket, intention);
                 continue;
         }
     }
@@ -132,9 +234,10 @@ async function stepTowardsTarget(socket, intention) {
     if (!intention.plan || intention.plan.length === 0) {
         const moves = await computePlan(intention);
         if (moves.length === 0) {
-            console.log(
-                `[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`
-            );
+            console.log(`[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`);
+
+            await sleep(NO_PATH_RETRY_DELAY_MS);
+
             notifyActionFailed('no_path');
             return;
         }
@@ -153,24 +256,89 @@ async function stepTowardsTarget(socket, intention) {
     const dir = intention.plan.shift();
     const fxBefore = Math.round(beliefs.me.x);
     const fyBefore = Math.round(beliefs.me.y);
-    const moved = await socket.emitMove(dir);
+    const moved = await safeSocketAction(`move ${dir}`, () => socket.emitMove(dir));
+
+    if (moved === null) {
+        intention.plan.unshift(dir);
+        return;
+    }
 
     if (!moved) {
-        // Move failed, clear the plan and retry later
-        const targetTile = beliefs.grid.get(
-            `${fxBefore + (DIR_DELTA[dir]?.dx ?? 0)},${fyBefore + (DIR_DELTA[dir]?.dy ?? 0)}`
+        const tx = fxBefore + (DIR_DELTA[dir]?.dx ?? 0);
+        const ty = fyBefore + (DIR_DELTA[dir]?.dy ?? 0);
+        const targetKey = `${tx},${ty}`;
+        const targetTile = beliefs.grid.get(targetKey);
+
+        const failures = (failedMoves.get(targetKey) ?? 0) + 1;
+        failedMoves.set(targetKey, failures);
+
+        // Include who (if anyone) is on the target tile to make blocked logs actionable.
+        const blockingAgent = [...beliefs.agents.values()].find(
+            (a) => !a.stale && Math.round(a.x) === tx && Math.round(a.y) === ty
         );
+        const goalStr = intention.targetPos
+            ? `goal=(${intention.targetPos.x},${intention.targetPos.y})`
+            : 'goal=?';
         console.log(
-            `[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) → tile=${targetTile?.type} moved=${JSON.stringify(moved)}`
+            `[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) ` +
+            `to (${tx},${ty}) tile=${targetTile?.type ?? '?'} failures=${failures} ` +
+            `${goalStr}` +
+            (blockingAgent ? ` blocker=${blockingAgent.id}` : '')
         );
+
+        // Right-of-way: only ask known teammates to yield. External agents do
+        // not speak our protocol, so broadcasting for them only adds log noise.
+        if (failures === 1) {
+            if (blockingAgent && isKnownPeer(blockingAgent.id)) {
+                sendBroadcast(MSG_TYPE.BLOCKED_AT, { x: tx, y: ty, direction: dir })
+                    .catch((err) => {
+                        console.log(`[executor] blocked_at broadcast failed: ${err.message ?? err}`);
+                    });
+                await sleep(250);
+            }
+        }
+
+        if (failures >= STUCK_FAILURE_THRESHOLD) {
+            const isGoal =
+                intention.targetPos?.x === tx &&
+                intention.targetPos?.y === ty;
+            const isCriticalTile = targetTile?.type === '1' || targetTile?.type === '2';
+            failedMoves.delete(targetKey);
+
+            if (!isGoal && !isCriticalTile) {
+                blacklistCellTemporary(tx, ty, STUCK_BLACKLIST_TTL_MS);
+                console.log(
+                    `[executor] Temporary blacklist (${tx},${ty}) for ${STUCK_BLACKLIST_TTL_MS}ms after repeated move failures`
+                );
+            } else {
+                console.log(
+                    `[executor] Skip blacklist for critical blocked tile (${tx},${ty}) ` +
+                    `goal=${isGoal} tile=${targetTile?.type ?? '?'}`
+                );
+            }
+
+            await sleep(Math.min(MOVE_BLOCK_BACKOFF_MAX_MS, failures * 150));
+            intention.plan = [];
+            notifyActionFailed('move_blocked');
+            return;
+        }
+
+        // Below threshold: replan within the same intention without triggering
+        // a full intention replacement. This lets failedMoves accumulate so the
+        // threshold is reached if the blocker persists.
+        await sleep(Math.min(MOVE_BLOCK_BACKOFF_MAX_MS, failures * 150));
         intention.plan = [];
-        notifyActionFailed('move_blocked');
         return;
     }
 
     // Update the position without waiting for the next sensing update
     beliefs.me.x = moved.x;
     beliefs.me.y = moved.y;
+    failedMoves.delete(`${Math.round(moved.x)},${Math.round(moved.y)}`);
+}
+
+function isKnownPeer(agentId) {
+    return getPeers().some((p) => p.id === agentId);
 }
 
 /**
@@ -227,45 +395,67 @@ async function computePlan(intention) {
  */
 async function finalize(socket, intention) {
     if (intention.type === 'go_pick_up') {
-        const picked = await socket.emitPickup();
+        const picked = await safeSocketAction('pickup', () => socket.emitPickup());
+        if (picked === null) return;
         if (!picked || picked.length === 0) {
             console.log(
                 `[executor] Empty pickup (parcel ${intention.parcelId} probably taken by another agent)`
             );
+            if (intention.parcelId) beliefs.parcels.delete(intention.parcelId);
+            await sleep(100);
             notifyActionFailed('pickup_empty');
             return;
         }
 
-        // Update beliefs before the next sensing event
+        _cycleStart = Date.now();
+        _cyclePickupReward = picked.reduce((s, p) => {
+            const stored = beliefs.parcels.get(p.id ?? intention.parcelId);
+            return s + (stored?.reward ?? p.reward ?? 0);
+        }, 0);
+
         for (const p of picked) {
             const id = p.id ?? intention.parcelId;
             const parcel = beliefs.parcels.get(id);
             if (parcel) parcel.carriedBy = beliefs.me.id;
             if (id && !beliefs.me.carrying.includes(id)) beliefs.me.carrying.push(id);
+            if (id) {
+                await sendBroadcast(MSG_TYPE.PARCEL_CLAIMED, {
+                    parcelId: id,
+                    x: p.x ?? parcel?.x ?? intention.targetPos?.x ?? null,
+                    y: p.y ?? parcel?.y ?? intention.targetPos?.y ?? null,
+                }).catch((err) => {
+                    console.log(`[executor] PARCEL_CLAIMED broadcast failed: ${err?.message ?? err}`);
+                });
+            }
         }
 
         console.log(
-            `[executor] Pickup OK: ${picked.length} parcel(s) (carrying=${beliefs.me.carrying.length})`
+            `[executor] Pickup OK: ${picked.length} parcel(s) reward=${_cyclePickupReward} (carrying=${beliefs.me.carrying.length})`
         );
         notifyIntentionDone();
         return;
     }
 
     if (intention.type === 'go_deliver') {
-        const dropped = await socket.emitPutdown();
+        const dropped = await safeSocketAction('putdown', () => socket.emitPutdown());
+        if (dropped === null) return;
+        const cycleMs = _cycleStart ? Date.now() - _cycleStart : null;
+        const actual  = (dropped ?? []).length;
 
-        // Remove all carried parcels locally
         for (const id of beliefs.me.carrying) {
             beliefs.parcels.delete(id);
         }
         beliefs.me.carrying = [];
-
-        // Remove parcels confirmed by the server
         for (const p of dropped ?? []) {
             if (p.id) beliefs.parcels.delete(p.id);
         }
 
-        console.log(`[executor] Delivery OK: ${(dropped ?? []).length} parcel(s)`);
+        const cycleInfo = cycleMs !== null
+            ? ` cycle=${(cycleMs / 1000).toFixed(1)}s pickupReward=${_cyclePickupReward}`
+            : '';
+        console.log(`[executor] Delivery OK: ${actual} parcel(s) score=${beliefs.me.score}${cycleInfo}`);
+        _cycleStart = null;
+        _cyclePickupReward = 0;
         notifyIntentionDone();
         return;
     }
@@ -273,6 +463,12 @@ async function finalize(socket, intention) {
     if (intention.type === 'go_to') {
         // Pure positioning: nothing to pick up or drop, the target was reached.
         console.log(`[executor] Reached (${intention.targetPos.x},${intention.targetPos.y})`);
+        notifyIntentionDone();
+        return;
+    }
+
+    if (intention.type === 'explore') {
+        console.log(`[executor] Reached spawner (${intention.targetPos.x},${intention.targetPos.y})`);
         notifyIntentionDone();
         return;
     }
@@ -293,13 +489,88 @@ async function executeHandoff(socket, intention) {
     }
 
     // At meetTile: drop all parcels
-    await socket.emitPutdown();
-    for (const id of beliefs.me.carrying) {
-        const parcel = beliefs.parcels.get(id);
-        if (parcel) parcel.carriedBy = null;
-    }
+    const dropped = await safeSocketAction('handoff putdown', () => socket.emitPutdown());
+    if (dropped === null) return;
+    const droppedIds = [...beliefs.me.carrying];
     beliefs.me.carrying = [];
+    for (const id of droppedIds) suppressClaimedParcel(id);
 
     console.log(`[executor] Handoff: parcels dropped at (${intention.targetPos.x},${intention.targetPos.y})`);
     notifyIntentionDone();
+}
+
+/**
+ * Executes a handoff-receive intention: B walks to the meetTile,
+ * picks up all parcels dropped there by A, then delivers them.
+ *
+ * After emitPickup the normal BDI loop takes over: the next
+ * revise() call will see carrying > 0 and produce go_deliver.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
+ * @param {Intention} intention
+ */
+async function executeHandoffReceive(socket, intention) {
+    const meetTile = intention._meetTile ?? intention.targetPos;
+
+    if (!isAtTarget(intention.targetPos)) {
+        await stepTowardsTarget(socket, intention);
+        return;
+    }
+
+    // With a staged handoff, B waits next to the meet tile so A can enter,
+    // put down the parcels, and leave. Once the dropped parcels are visible,
+    // B switches target to the meet tile and picks them up.
+    if (intention._meetTile && !isAtTarget(meetTile)) {
+        const parcelReady = [...beliefs.parcels.values()].some((parcel) =>
+            !parcel.carriedBy &&
+            Math.round(parcel.x) === meetTile.x &&
+            Math.round(parcel.y) === meetTile.y
+        );
+
+        if (!parcelReady) {
+            console.log(
+                `[executor] Handoff receive: waiting near meet tile ` +
+                `(${meetTile.x},${meetTile.y})`
+            );
+            await sleep(500);
+            return;
+        }
+
+        intention.targetPos = meetTile;
+        intention._pickupAttempts = 0;
+        return;
+    }
+
+    // At meetTile: try to pick up parcels dropped by A.
+    // A may not have arrived yet — retry up to MAX_PICKUP_ATTEMPTS times
+    // before giving up and letting BDI re-deliberate.
+    const MAX_PICKUP_ATTEMPTS = 5;
+    intention._pickupAttempts = (intention._pickupAttempts ?? 0) + 1;
+
+    const picked = await safeSocketAction('handoff pickup', () => socket.emitPickup());
+    if (picked === null) return;
+
+    if (!picked || picked.length === 0) {
+        if (intention._pickupAttempts >= MAX_PICKUP_ATTEMPTS) {
+            console.log('[executor] Handoff receive: no parcels after max attempts → failing');
+            notifyActionFailed('pickup_empty');
+        } else {
+            console.log(
+                `[executor] Handoff receive: nothing yet, attempt ${intention._pickupAttempts}/${MAX_PICKUP_ATTEMPTS} — waiting`
+            );
+            await sleep(500);
+        }
+        return;
+    }
+
+    // Update beliefs before the next sensing event
+    for (const p of picked) {
+        const id = p.id;
+        const parcel = beliefs.parcels.get(id);
+        if (parcel) parcel.carriedBy = beliefs.me.id;
+        if (id && !beliefs.me.carrying.includes(id)) beliefs.me.carrying.push(id);
+    }
+
+    console.log(`[executor] Handoff receive OK: picked up ${picked.length} parcel(s)`);
+    notifyIntentionDone(); // triggers revise() → go_deliver
 }

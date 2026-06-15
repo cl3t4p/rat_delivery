@@ -22,10 +22,15 @@ import { beliefs, manhattanDistance, isWalkable } from '../bdi/beliefs.js';
 import {
     createIntention,
     findNearestDeliveryTile,
+    findBestDeliveryTile,
     findNearestSpawnerTile,
     getBestIntention,
 } from '../bdi/deliberation.js';
 import { llmClient, llmMemory } from './llmAgent.js';
+import {
+    pickupValue,
+    deliveryValue,
+} from '../bdi/scoring.js';
 
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 
@@ -45,7 +50,8 @@ const INTENTION_TOOLS = [
             name: 'go_pick_up',
             description:
                 'Walk to a free parcel and pick it up. Pick the parcel that maximises ' +
-                'reward minus walking distance. Only choose a parcel listed in freeParcels.',
+                'expected delivered value considering distance to parcel, distance to delivery and decay. ' +
+                'Only choose a parcel listed in freeParcels with a positive score.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -64,6 +70,7 @@ const INTENTION_TOOLS = [
             name: 'go_deliver',
             description:
                 'Carry the parcels currently held to the nearest delivery tile and drop them. ' +
+                'Uses estimated reward at arrival accounting for decay. ' +
                 'Only valid when carrying at least one parcel.',
             parameters: { type: 'object', properties: {} },
         },
@@ -118,25 +125,20 @@ const TOOL_IMPL = {
     go_pick_up(args, me) {
         const parcel = args?.parcelId ? beliefs.parcels.get(args.parcelId) : null;
         if (!parcel || parcel.carriedBy || parcel.reward <= 0) return null;
-        const dist = manhattanDistance(me, { x: parcel.x, y: parcel.y });
-        return createIntention(
-            'go_pick_up',
-            parcel.id,
-            { x: parcel.x, y: parcel.y },
-            parcel.reward - dist
-        );
+        const deliveryTile = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
+        if (!deliveryTile) return null;
+        const score = pickupValue(parcel, me, deliveryTile);
+        if (score <= 0) return null;
+        return createIntention('go_pick_up', parcel.id, { x: parcel.x, y: parcel.y }, score);
     },
 
     /** @returns {Intention|null} */
     go_deliver(_args, me) {
         if (beliefs.me.carrying.length === 0) return null;
-        const target = findNearestDeliveryTile(me);
+        const target = findBestDeliveryTile(me);
         if (!target) return null;
-        const dist = manhattanDistance(me, target);
-        const totalReward = beliefs.me.carrying
-            .map((id) => beliefs.parcels.get(id)?.reward ?? 0)
-            .reduce((a, b) => a + b, 0);
-        return createIntention('go_deliver', null, target, totalReward - dist);
+        const score = deliveryValue(beliefs.me.carrying, me, target);
+        return createIntention('go_deliver', null, target, score);
     },
 
     /** @returns {Intention|null} */
@@ -176,21 +178,15 @@ The world is a grid. Each cell in the map has a type:
   3 = normal floor
   . = unknown / outside the map
 
-Rules of thumb:
-- If you are carrying parcels and there is no clearly better pickup nearby,
-  deliver them (go_deliver) before their reward decays.
-- Otherwise pick up the free parcel with the best reward-minus-distance
-  (go_pick_up).
-- If there is nothing useful to pick up or deliver, explore.
-- Use go_to(x,y) when you want to reposition to a specific cell for strategic
-  reasons (camp a particular spawner, move toward a parcel-rich or contested
-  area) rather than just heading to the nearest spawner. The cell must be
-  walkable.
-- world.parcelGenerationMs tells you how often parcels spawn. When it is high
-  (parcels are rare, e.g. >= 5000 ms) and there is nothing good to pick up
-  nearby, do NOT camp the closest spawner — prefer go_to a different, unexplored
-  or parcel-rich region of the map to find parcels faster. When it is low
-  (parcels are frequent), staying near a spawner with explore is fine.
+Rules:
+- Each free parcel in the state has: reward, distanceToParcel, distanceToDelivery,
+  estimatedRewardAtDelivery, and score (= estimatedRewardAtDelivery - total route distance).
+- Pick the parcel with the highest score. Never pick a parcel with score <= 0.
+- If carrying parcels, prefer go_deliver unless a detour to a new parcel clearly
+  improves the total estimated value at delivery.
+- Do not pick parcels that will be worthless (estimatedRewardAtDelivery = 0) at delivery.
+- If nothing is worth picking up and nothing to deliver, explore.
+- Use go_to(x,y) to reposition strategically (camp a spawner, move to a parcel-rich area).
 - Only use wait when nothing else is possible.
 
 Answer ONLY by calling one tool. Do not write prose.`.trim();
@@ -242,13 +238,31 @@ export function buildStateSnapshot(me) {
         },
         freeParcels: [...beliefs.parcels.values()]
             .filter((p) => !p.carriedBy && p.reward > 0)
-            .map((p) => ({
-                id: p.id,
-                x: p.x,
-                y: p.y,
-                reward: p.reward,
-                distance: manhattanDistance(me, { x: p.x, y: p.y }),
-            })),
+            .map((p) => {
+                const deliveryTile = findNearestDeliveryTile({ x: p.x, y: p.y });
+                const distanceToParcel = manhattanDistance(me, { x: p.x, y: p.y });
+                const distanceToDelivery = deliveryTile
+                    ? manhattanDistance({ x: p.x, y: p.y }, deliveryTile)
+                    : null;
+                const score = deliveryTile ? pickupValue(p, me, deliveryTile) : -Infinity;
+                const estimatedRewardAtDelivery = deliveryTile
+                    ? Math.max(0, p.reward - Math.floor(
+                        ((distanceToParcel + (distanceToDelivery ?? 0)) *
+                            (beliefs.config?.MS_PER_STEP ?? 500)) /
+                            (beliefs.config?.PARCEL_DECADING_INTERVAL ?? Infinity)
+                    ))
+                    : 0;
+                return {
+                    id: p.id,
+                    x: p.x,
+                    y: p.y,
+                    reward: p.reward,
+                    distanceToParcel,
+                    distanceToDelivery,
+                    estimatedRewardAtDelivery,
+                    score,
+                };
+            }),
         deliveryTiles: beliefs.deliveryTiles,
         otherAgents: [...beliefs.agents.values()]
             .filter((a) => !a.stale)
@@ -259,8 +273,6 @@ export function buildStateSnapshot(me) {
         }),
         constraints: llmMemory.constraints,
         world: {
-            // How often new parcels spawn, in ms. Higher = parcels are rare,
-            // so camping a spawner is less worthwhile than relocating.
             parcelGenerationMs: beliefs.config.PARCEL_GENERATION_INTERVAL,
             maxCarry: beliefs.config.MAX_PARCELS,
         },

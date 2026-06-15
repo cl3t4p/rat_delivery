@@ -24,6 +24,7 @@ const snapshot = {
         x: null,
         y: null,
         carrying: 0,
+        score: 0,
     },
     intentionKey: null,
 };
@@ -42,7 +43,7 @@ export function enableNotifier() {
 
 /**
  * Computes the delta vs. the last snapshot of own beliefs and, if any,
- * broadcasts a `belief_update`. Called from `index.js` after every
+ * broadcasts a `belief_update`. Called from `index_a.js` / `index_b.js` after every
  * `updateBeliefs(...)`.
  */
 export function tickBeliefDelta() {
@@ -99,9 +100,13 @@ export function tickBeliefDelta() {
         x: beliefs.me.x,
         y: beliefs.me.y,
         carrying: beliefs.me.carrying.length,
+        score: beliefs.me.score,
     };
     const meChanged =
-        snapshot.me.x !== me.x || snapshot.me.y !== me.y || snapshot.me.carrying !== me.carrying;
+        snapshot.me.x !== me.x ||
+        snapshot.me.y !== me.y ||
+        snapshot.me.carrying !== me.carrying ||
+        snapshot.me.score !== me.score;
     if (meChanged) {
         snapshot.me = { ...me };
     }
@@ -132,7 +137,10 @@ export function broadcastIntention(intention) {
     if (!commsReady) return;
     if (!intention) return;
 
-    const key = `${intention.type}|${intention.parcelId ?? ''}|${intention.status}`;
+    const tp = intention.targetPos
+        ? `${Math.round(intention.targetPos.x)},${Math.round(intention.targetPos.y)}`
+        : '';
+    const key = `${intention.type}|${intention.parcelId ?? ''}|${intention.status}|${tp}`;
     if (key === snapshot.intentionKey) return;
     snapshot.intentionKey = key;
 
@@ -142,6 +150,7 @@ export function broadcastIntention(intention) {
             parcelId: intention.parcelId ?? null,
             targetPos: intention.targetPos ?? null,
             status: intention.status,
+            score: intention.score ?? 0,
         },
     });
 }
