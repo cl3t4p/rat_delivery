@@ -9,7 +9,7 @@
  *   5. Notifies intentionRevision with done / failed
  */
 
-import { beliefs, canEnter, blacklistCellTemporary, suppressClaimedParcel } from './beliefs.js';
+import { beliefs, canEnter, canPush, blacklistCellTemporary, suppressClaimedParcel } from './beliefs.js';
 import { planTo } from './pathfinding.js';
 import { planWithPDDL } from '../pddl/pddlPlanner.js';
 import {
@@ -256,6 +256,16 @@ async function stepTowardsTarget(socket, intention) {
     const dir = intention.plan.shift();
     const fxBefore = Math.round(beliefs.me.x);
     const fyBefore = Math.round(beliefs.me.y);
+
+    // If the next tile holds a crate, this step is a push: remember it so the local
+    // crate beliefs can be updated immediately after the move, before the next sensing
+    // event, keeping chained pushes and the next isStepValid check consistent.
+    const delta = DIR_DELTA[dir];
+    const crateKey =
+        delta && beliefs.crates.has(`${fxBefore + delta.dx},${fyBefore + delta.dy}`)
+            ? `${fxBefore + delta.dx},${fyBefore + delta.dy}`
+            : null;
+
     const moved = await safeSocketAction(`move ${dir}`, () => socket.emitMove(dir));
 
     if (moved === null) {
@@ -335,6 +345,16 @@ async function stepTowardsTarget(socket, intention) {
     beliefs.me.x = moved.x;
     beliefs.me.y = moved.y;
     failedMoves.delete(`${Math.round(moved.x)},${Math.round(moved.y)}`);
+
+    // If this step pushed a crate, advance it one tile in the same direction locally
+    // so the rest of the plan sees the new layout before sensing catches up.
+    if (crateKey) {
+        const crate = beliefs.crates.get(crateKey);
+        beliefs.crates.delete(crateKey);
+        const bx = fxBefore + 2 * delta.dx;
+        const by = fyBefore + 2 * delta.dy;
+        beliefs.crates.set(`${bx},${by}`, { ...crate, x: bx, y: by });
+    }
 }
 
 function isKnownPeer(agentId) {
@@ -353,7 +373,10 @@ function isStepValid(dir) {
     if (!delta) return false;
     const fx = Math.round(beliefs.me.x);
     const fy = Math.round(beliefs.me.y);
-    return canEnter(fx, fy, fx + delta.dx, fy + delta.dy);
+    const nx = fx + delta.dx;
+    const ny = fy + delta.dy;
+    // The step is valid if the agent can walk onto the tile, or push a crate off it.
+    return canEnter(fx, fy, nx, ny) || canPush(fx, fy, nx, ny);
 }
 
 /**
@@ -495,7 +518,9 @@ async function executeHandoff(socket, intention) {
     beliefs.me.carrying = [];
     for (const id of droppedIds) suppressClaimedParcel(id);
 
-    console.log(`[executor] Handoff: parcels dropped at (${intention.targetPos.x},${intention.targetPos.y})`);
+    console.log(
+        `[executor] Handoff: parcels dropped at (${intention.targetPos.x},${intention.targetPos.y})`
+    );
     notifyIntentionDone();
 }
 

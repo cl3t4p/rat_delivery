@@ -3,4 +3,5 @@ node_modules/
 *.pdf
 Deliveroo.js/
 planning-as-a-service/
+report/
 logs/

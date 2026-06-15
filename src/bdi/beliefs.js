@@ -198,11 +198,46 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
         }
     }
 
-    // 3. Update Crates
-    beliefs.crates.clear();
+    // 3. Update crates.
+    // Crates are persisted across sensing updates so the planner keeps routing around
+    // a crate even after it leaves the field of view. The server only reports crates
+    // currently in range, so clearing them every tick made the agent forget any crate
+    // it could not see and later walk into / wrongly push it.
+    //
+    // A remembered crate is dropped only when we can actually observe its tile is
+    // empty: it is within observation range yet absent from the current sensing. With
+    // unlimited vision every crate is observable, so an unseen crate is always gone.
+    // Crates out of range are assumed to still sit where we last saw them.
+    const seenCrateKeys = new Set();
+    const seenCrateIds = new Set();
     for (const c of sensedCrates) {
         const key = `${Math.round(c.x)},${Math.round(c.y)}`;
+        seenCrateKeys.add(key);
+        if (c.id != null) seenCrateIds.add(c.id);
         beliefs.crates.set(key, { id: c.id, x: c.x, y: c.y, lastSeen: now });
+    }
+
+    const view = beliefs.config.OBSERVATION_DISTANCE;
+    const unlimitedView = view == null || view <= 0;
+    const meKnown = beliefs.me.x !== null && beliefs.me.y !== null;
+    for (const [key, c] of beliefs.crates) {
+        if (seenCrateKeys.has(key)) continue;
+        // Same crate id sensed on another tile this tick → this is a stale duplicate
+        // of a crate that has since moved; drop it regardless of range.
+        if (c.id != null && seenCrateIds.has(c.id)) {
+            beliefs.crates.delete(key);
+            continue;
+        }
+        if (unlimitedView || (meKnown && manhattanDistance(beliefs.me, c) < view)) {
+            beliefs.crates.delete(key);
+        }
+    }
+
+    // The agent can never share a tile with a crate. If we are standing on a
+    // remembered crate it must be stale, so drop it — this also lets the planner
+    // treat our own tile as a free crate destination once we step aside.
+    if (meKnown) {
+        beliefs.crates.delete(`${Math.round(beliefs.me.x)},${Math.round(beliefs.me.y)}`);
     }
 }
 
@@ -352,4 +387,4 @@ export function clearBlacklist() {
     beliefs.temporaryBlacklist.clear();
 }
 
-export { isWalkable, canEnter } from './grid.js';
+export { isWalkable, canEnter, canTraverse, canPush } from './grid.js';
