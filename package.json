@@ -11,12 +11,7 @@
     "agent:b": "node src/index_b.js",
     "agent:b:llm": "USE_LLM=true node src/index_b.js",
 
-    "agent:a:pddl": "USE_PDDL=true node src/index_a.js",
-    "agent:b:pddl": "USE_PDDL=true node src/index_b.js",
-
-    "agent:a:pddl:fallback": "USE_PDDL=true PDDL_FALLBACK=true node src/index_a.js",
-    "agent:b:pddl:fallback": "USE_PDDL=true PDDL_FALLBACK=true node src/index_b.js",
-    "agent:b:llm:pddl:fallback": "USE_LLM=true USE_PDDL=true PDDL_FALLBACK=true node src/index_b.js",
+    "pddl": "USE_PDDL=true node src/index_a.js",
 
     "planner:build": "cd planning-as-a-service/server && DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t paas:latest .",
     "planner:up": "docker compose -f docker-compose.planner.yml up -d",
