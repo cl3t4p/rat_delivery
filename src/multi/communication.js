@@ -135,14 +135,16 @@ export async function sendDirect(toId, type, payload) {
  *
  * @param {Envelope} requestEnvelope - The envelope that triggered this reply.
  * @param {boolean} accepted
- * @param {'ok'|'already_carrying'|'out_of_range'|'unknown'} [reason]
+ * @param {'ok'|'already_carrying'|'out_of_range'|'unknown'|'busy'} [reason]
+ * @param {object} [extraPayload]
  * @returns {Promise<any>}
  */
-export async function replyTo(requestEnvelope, accepted, reason = 'ok') {
+export async function replyTo(requestEnvelope, accepted, reason = 'ok', extraPayload = {}) {
     const payload = {
         requestId: requestEnvelope.ts,
         accepted,
         reason,
+        ...extraPayload,
     };
     const targetId = requestEnvelope.from;
     if (targetId) {

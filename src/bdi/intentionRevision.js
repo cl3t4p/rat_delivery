@@ -8,7 +8,7 @@
 import { beliefs, isWalkable, manhattanDistance } from './beliefs.js';
 import { getBestIntention, createIntention, setZoneConstraint, resetRoamTarget, findBestLocalPickUp } from './deliberation.js';
 import { broadcastIntention } from '../multi/notifier.js';
-import { isParcelClaimedByPeer, shouldYieldParcel, requestTakeover, evaluateHandoff, requestHandoff, getNearestReachableZoneTarget } from '../multi/coordinator.js';
+import { isParcelClaimedByPeer, shouldYieldParcel, requestTakeover, evaluateHandoff, requestHandoff, getNearestReachableZoneTarget, getPeers } from '../multi/coordinator.js';
 import { MSG_TYPE, onMessage } from '../multi/communication.js';
 import { aStar } from './pathfinding.js';
 
@@ -25,6 +25,9 @@ const WAIT_MAX_AGE_MS = 5000;
 // this long, force a fresh deliberation — escapes tight failure loops where
 // the executor keeps retrying an unreachable or blocked destination.
 const STUCK_TIMEOUT_MS = 4000;
+const HANDOFF_BUSY_RETRY_MS = 300;
+const HANDOFF_BUSY_SLOW_RETRY_MS = 1000;
+const HANDOFF_BUSY_FAST_RETRIES = 6;
 
 // When enabled, the next intention is chosen by the standalone LLM agent
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
@@ -103,25 +106,79 @@ export function notifyIntentionDone() {
     if (beliefs.me.carrying.length >= 1) {
         const handoff = evaluateHandoff();
         if (handoff) {
-            console.log(`[intentionRevision] Proposing handoff to ${handoff.peerId}`);
-            requestHandoff(handoff.meetTile, handoff.peerId)
-                .then((res) => {
-                    if (res.accepted) {
-                        console.log(`[intentionRevision] Handoff accepted → go_handoff`);
-                        const intention = createIntention(
-                            'go_handoff', null, handoff.meetTile, 0
-                        );
-                        commitNewIntention(intention);
-                    } else {
-                        requestRevision(true);
-                    }
-                })
-                .catch(() => requestRevision(true));
+            proposeHandoffWithBusyRetry(handoff);
             return;
         }
     }
 
     requestRevision(true);
+}
+
+function proposeHandoffWithBusyRetry(handoff, attempt = 0) {
+    if (beliefs.me.carrying.length < 1) {
+        requestRevision(true);
+        return;
+    }
+
+    if (!currentIntention || currentIntention.status === 'failed' || currentIntention.status === 'done') {
+        const hold = createIntention(
+            'wait',
+            null,
+            beliefs.me.x !== null && beliefs.me.y !== null
+                ? { x: Math.round(beliefs.me.x), y: Math.round(beliefs.me.y) }
+                : null,
+            0
+        );
+        hold._handoffRetry = true;
+        hold._handoffRetryPeerId = handoff.peerId;
+        commitNewIntention(hold);
+    } else if (!isHandoffRetryWait(currentIntention)) {
+        return;
+    }
+
+    currentIntention.createdAt = Date.now();
+
+    console.log(`[intentionRevision] Proposing handoff to ${handoff.peerId}`);
+    requestHandoff(handoff.meetTile, handoff.peerId)
+        .then((res) => {
+            if (res.accepted) {
+                if (currentIntention && !isHandoffRetryWait(currentIntention)) return;
+                console.log(`[intentionRevision] Handoff accepted → go_handoff`);
+                const intention = createIntention(
+                    'go_handoff', null, handoff.meetTile, 0
+                );
+                intention._peerStagingTile = res.stagingTile ?? null;
+                intention._peerId = handoff.peerId;
+                intention._peerCarryBefore =
+                    getPeers().find((p) => p.id === handoff.peerId)?.carrying ?? 0;
+                commitNewIntention(intention);
+                return;
+            }
+
+            if (res.reason === 'busy') {
+                if (currentIntention && !isHandoffRetryWait(currentIntention)) return;
+                const delay =
+                    attempt < HANDOFF_BUSY_FAST_RETRIES
+                        ? HANDOFF_BUSY_RETRY_MS
+                        : HANDOFF_BUSY_SLOW_RETRY_MS;
+                console.log(
+                    `[intentionRevision] Handoff peer busy → retry ` +
+                    `${attempt + 1}${attempt >= HANDOFF_BUSY_FAST_RETRIES ? ' (slow)' : `/${HANDOFF_BUSY_FAST_RETRIES}`}`
+                );
+                setTimeout(
+                    () => proposeHandoffWithBusyRetry(handoff, attempt + 1),
+                    delay
+                );
+                return;
+            }
+
+            requestRevision(true);
+        })
+        .catch(() => requestRevision(true));
+}
+
+function isHandoffRetryWait(intention) {
+    return intention?.type === 'wait' && intention._handoffRetry === true;
 }
 
 // Helper used internally whenever currentIntention is replaced.
@@ -324,7 +381,8 @@ export async function revise(force = false) {
         // them with an opportunistic pickup — let the handoff complete first.
         const handoffProtected =
             currentIntention.type === 'go_handoff' ||
-            currentIntention.type === 'go_handoff_receive';
+            currentIntention.type === 'go_handoff_receive' ||
+            isHandoffRetryWait(currentIntention);
 
         const improvement = candidate.score - currentIntention.score;
         if ( !exploringBeatsPickup && !handoffProtected && (escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD) ) {

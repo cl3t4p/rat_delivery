@@ -50,6 +50,7 @@ export const beliefs = {
 };
 
 const claimedParcelSuppressions = new Map(); // parcelId -> expiresAt
+const handoffDroppedParcels = new Map(); // parcelId -> expiresAt after own handoff drop
 
 // Functions
 
@@ -135,10 +136,20 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     const seenParcelIds = new Set();
 
     for (const p of sensedParcels) {
+        if (isHandoffDropSuppressed(p.id, now)) {
+            if (p.carriedBy === beliefs.me.id) {
+                handoffDroppedParcels.delete(p.id);
+                claimedParcelSuppressions.delete(p.id);
+            } else {
+                continue;
+            }
+        }
+
         if (isParcelSuppressed(p.id, now)) {
             if (p.carriedBy !== beliefs.me.id) continue;
             claimedParcelSuppressions.delete(p.id);
         }
+
         if (p.carriedBy && p.carriedBy !== beliefs.me.id) {
             suppressClaimedParcel(p.id);
             continue;
@@ -247,11 +258,24 @@ export function suppressClaimedParcel(parcelId, ttlMs = beliefs.config.CLAIMED_P
     beliefs.parcels.delete(parcelId);
 }
 
-export function clearParcelSuppressions() {
+/** Suppresses a parcel that this agent intentionally dropped for a handoff.
+ *  Unlike suppressClaimedParcel, this suppression is NOT cleared when the
+ *  sensing shows the parcel unclaimed — A must not re-pick its own drop. */
+export function suppressHandoffDrop(parcelId, ttlMs = beliefs.config.CLAIMED_PARCEL_SUPPRESS_MS) {
+    if (!parcelId) return;
+    const expiresAt = Date.now() + ttlMs;
+    handoffDroppedParcels.set(parcelId, expiresAt);
+    claimedParcelSuppressions.set(parcelId, expiresAt);
+    beliefs.parcels.delete(parcelId);
+}
+
+export function clearParcelSuppressions({ includeHandoffDrops = false } = {}) {
     claimedParcelSuppressions.clear();
+    if (includeHandoffDrops) handoffDroppedParcels.clear();
 }
 
 function isParcelSuppressed(parcelId, now = Date.now()) {
+    if (isHandoffDropSuppressed(parcelId, now)) return true;
     const expiresAt = claimedParcelSuppressions.get(parcelId);
     if (!expiresAt) return false;
     if (expiresAt <= now) {
@@ -261,9 +285,25 @@ function isParcelSuppressed(parcelId, now = Date.now()) {
     return true;
 }
 
+function isHandoffDropSuppressed(parcelId, now = Date.now()) {
+    const expiresAt = handoffDroppedParcels.get(parcelId);
+    if (!expiresAt) return false;
+    if (expiresAt <= now) {
+        handoffDroppedParcels.delete(parcelId);
+        if (claimedParcelSuppressions.get(parcelId) === expiresAt) {
+            claimedParcelSuppressions.delete(parcelId);
+        }
+        return false;
+    }
+    return true;
+}
+
 function pruneClaimedParcelSuppressions(now = Date.now()) {
     for (const [id, expiresAt] of claimedParcelSuppressions) {
         if (expiresAt <= now) claimedParcelSuppressions.delete(id);
+    }
+    for (const [id, expiresAt] of handoffDroppedParcels) {
+        if (expiresAt <= now) handoffDroppedParcels.delete(id);
     }
 }
 

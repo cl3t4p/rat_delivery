@@ -3,7 +3,7 @@
  * Each test file imports what it needs from here.
  */
 
-import { beliefs } from '../src/bdi/beliefs.js';
+import { beliefs, clearParcelSuppressions } from '../src/bdi/beliefs.js';
 import { invalidateBounds } from '../src/shared/zones.js';
 import { setZoneConstraint, resetRoamTarget } from '../src/bdi/deliberation.js';
 
@@ -27,6 +27,7 @@ export function resetBeliefs() {
         AGENT_STALE_MS: 3000,
         CLAIMED_PARCEL_SUPPRESS_MS: 8000,
     };
+    clearParcelSuppressions({ includeHandoffDrops: true });
     invalidateBounds();
     resetRoamTarget();
     setZoneConstraint(null);

@@ -49,6 +49,15 @@ const PERP_DIRS = {
 /** @type {string|null} */
 let _pendingYield = null;
 
+// Push-chain detection: if we're forced to back off in the same direction
+// N consecutive times (narrow corridor, no perpendicular exit), force a
+// proper navigation intention to escape instead of being walked to spawn.
+let _pushChainDir = null;
+let _pushChainCount = 0;
+let _pushChainTs = 0;
+const PUSH_CHAIN_THRESHOLD = 2;
+const PUSH_CHAIN_WINDOW_MS = 2500;
+
 /**
  * @typedef {Object} PeerRecord
  * @property {string} id
@@ -361,7 +370,7 @@ const ZONE_ASSIGN_INTERVAL_MS        = 15_000;
 const BOTH_BUSY_SCORE_THRESHOLD      = 10;
 const PEER_DISCOVERY_ASSIGN_DELAY_MS = 500;
 const ASSIGNMENT_REFRESH_GRACE_MS     = 3000;
-const USE_HEURISTIC_PREASSIGN         = process.env.USE_HEURISTIC_PREASSIGN === 'true';
+const USE_HEURISTIC_PREASSIGN         = process.env.USE_HEURISTIC_PREASSIGN !== 'false';
 
 const SCORE_IMBALANCE_THRESHOLD       = 0.7;
 // Require 3 consecutive imbalanced intervals before acting: reduces false
@@ -586,6 +595,16 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
 
     // Re-evaluate live so a stale pre-LLM snapshot cannot interrupt an active delivery.
     const liveIntention = _getCurrentIntention();
+    const isHandoffActive =
+        liveIntention &&
+        (liveIntention.status === 'active' || liveIntention.status === 'pending') &&
+        (liveIntention.type === 'go_handoff' || liveIntention.type === 'go_handoff_receive');
+
+    if (isHandoffActive) {
+        console.log('[coord] Zone assignment deferred: handoff in progress');
+        return;
+    }
+
     const selfBusy = liveIntention?.status === 'active' &&
         (liveIntention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
 
@@ -702,6 +721,40 @@ function scheduleZoneAssignment(delayMs = PEER_DISCOVERY_ASSIGN_DELAY_MS) {
         _zoneAssignPending = false;
         await runZoneAssignment();
     }, delayMs);
+}
+
+/**
+ * If an assignment sends each agent to the other's current zone (they would
+ * have to cross paths on a narrow corridor), swap the assignments to keep
+ * each agent on its own side.
+ *
+ * Only triggers when the two agents are in genuinely different zones, so it
+ * does not interfere when both agents are on the same side (e.g. both in
+ * topLeft during an active handoff transit).
+ *
+ * @param {Record<string, string>} assignment
+ * @param {string} selfId
+ * @param {{ x: number, y: number }} selfPos
+ * @param {string} peerId
+ * @param {{ x: number, y: number }} peerPos
+ * @returns {Record<string, string>}
+ */
+function uncrossAssignment(assignment, selfId, selfPos, peerId, peerPos) {
+    const selfCurrentZone = getZone(selfPos, beliefs.grid);
+    const peerCurrentZone = getZone(peerPos, beliefs.grid);
+    if (
+        selfCurrentZone !== peerCurrentZone &&
+        assignment[selfId] === peerCurrentZone &&
+        assignment[peerId] === selfCurrentZone
+    ) {
+        const swapped = { ...assignment, [selfId]: assignment[peerId], [peerId]: assignment[selfId] };
+        console.log(
+            `[coord] Zone assignment un-crossed: ` +
+            `${selfId}→${swapped[selfId]} ${peerId}→${swapped[peerId]}`
+        );
+        return swapped;
+    }
+    return assignment;
 }
 
 /**
@@ -848,6 +901,7 @@ async function runZoneAssignment() {
             return;
         }
         console.log('[coord] Periodic zone refresh (re-applying last assignment, no LLM call)');
+        _lastAssignment = uncrossAssignment(_lastAssignment, selfId, selfPos, peerId, peerPos);
         applyAssignment(_lastAssignment, zoneStats, selfId, selfPos, peerId, peerPos, {
             forceNavigation: false,
         });
@@ -863,6 +917,7 @@ async function runZoneAssignment() {
     if (!assignment) return;
     if (isImbalanced) _lastRebalanceTs = now;
     _lastAssignment = repairAssignment(assignment, zoneStats, selfId, peerId, { laggingAgentId });
+    _lastAssignment = uncrossAssignment(_lastAssignment, selfId, selfPos, peerId, peerPos);
 
     applyAssignment(_lastAssignment, zoneStats, selfId, selfPos, peerId, peerPos);
 }
@@ -1005,11 +1060,11 @@ export function requestTakeover(parcelId) {
  * Proposes a parcel handoff to the first known peer.
  *
  * Sends a handoff_request with the meetTile and waits for acceptance.
- * Resolves with { accepted, meetTile } or rejects on timeout.
+ * Resolves with { accepted, reason, meetTile } or rejects on timeout.
  *
  * @param {{ x: number, y: number }} meetTile
  * @param {string} peerId
- * @returns {Promise<{ accepted: boolean, meetTile: {x,y} }>}
+ * @returns {Promise<{ accepted: boolean, reason: string, meetTile: {x,y}, stagingTile?: {x,y}|null }>}
  */
 export function requestHandoff(meetTile, peerId) {
     return new Promise((resolve, reject) => {
@@ -1024,7 +1079,12 @@ export function requestHandoff(meetTile, peerId) {
                 state.pendingRequests.set(ts, {
                     resolve: (res) => {
                         clearTimeout(timer);
-                        resolve({ accepted: res.accepted, meetTile });
+                        resolve({
+                            accepted: res.accepted,
+                            reason: res.reason ?? 'ok',
+                            meetTile,
+                            stagingTile: res.stagingTile ?? null,
+                        });
                     },
                     reject,
                     timer,
@@ -1121,12 +1181,17 @@ function handleRequest(envelope, senderId, senderName, reply) {
 }
 
 function handleResponse(envelope, senderId) {
-    const { requestId, accepted, reason } = envelope.payload ?? {};
+    const { requestId, accepted, reason, ...extraPayload } = envelope.payload ?? {};
     const pending = state.pendingRequests.get(requestId);
     if (pending && pending.peerId === senderId) {
         clearTimeout(pending.timer);
         state.pendingRequests.delete(requestId);
-        pending.resolve({ accepted: !!accepted, reason: reason ?? 'ok', requestId });
+        pending.resolve({
+            accepted: !!accepted,
+            reason: reason ?? 'ok',
+            requestId,
+            ...extraPayload,
+        });
     }
 }
 
@@ -1148,10 +1213,10 @@ function handleParcelClaimed(envelope, senderId, senderName) {
     }
 }
 
-function handleBlockedAt(envelope) {
+function handleBlockedAt(envelope, senderId) {
     if (isSelfMessage(envelope, null)) return;
 
-    const { x: bx, y: by, direction: blockedDir } = envelope.payload ?? {};
+    const { x: bx, y: by, direction: blockedDir, carrying } = envelope.payload ?? {};
     if (bx === undefined || by === undefined || !blockedDir) return;
 
     const myX = Math.round(beliefs.me.x ?? -1);
@@ -1160,17 +1225,85 @@ function handleBlockedAt(envelope) {
 
     if (_pendingYield) return; // already scheduled a yield
 
+    const requesterCarry = Number.isFinite(carrying)
+        ? carrying
+        : (state.peers.get(senderId)?.carrying ?? 0);
+    const myCarry = beliefs.me.carrying.length;
+    if (myCarry > requesterCarry) {
+        console.log(
+            `[coord] Right-of-way: keeping priority at (${myX},${myY}) ` +
+            `mine=${myCarry} requester=${requesterCarry}`
+        );
+        return;
+    }
+
     const candidates = PERP_DIRS[blockedDir] ?? [];
     for (const dir of candidates) {
         const { dx, dy } = DIR_DELTA_COORD[dir];
         if (canEnter(myX, myY, myX + dx, myY + dy)) {
             _pendingYield = dir;
+            _pushChainCount = 0;
+            _pushChainDir = null;
             console.log(`[coord] Right-of-way: yielding ${dir} from (${myX},${myY})`);
             return;
         }
     }
 
-    console.log(`[coord] Right-of-way: no free perpendicular direction at (${myX},${myY}), staying`);
+    // Fallback for narrow corridors (e.g. 1D): no perpendicular tile available.
+    // Back off in the same direction the blocked agent is travelling so it can
+    // pass through our current tile.
+    const { dx: bfDx, dy: bfDy } = DIR_DELTA_COORD[blockedDir] ?? {};
+    const fallbackX = myX + (bfDx ?? 0);
+    const fallbackY = myY + (bfDy ?? 0);
+    const fallbackTile = beliefs.grid.get(`${fallbackX},${fallbackY}`);
+    const wouldRetreatIntoDelivery = fallbackTile?.type === '2' && beliefs.me.carrying.length === 0;
+    if (
+        bfDx !== undefined &&
+        !wouldRetreatIntoDelivery &&
+        canEnter(myX, myY, fallbackX, fallbackY)
+    ) {
+        // Push-chain detection: if we keep backing off in the same direction
+        // (narrow 1D corridor), escape laterally to the zone center after N steps.
+        const nowPc = Date.now();
+        if (_pushChainDir === blockedDir && nowPc - _pushChainTs < PUSH_CHAIN_WINDOW_MS) {
+            _pushChainCount++;
+        } else {
+            _pushChainCount = 1;
+            _pushChainDir = blockedDir;
+        }
+        _pushChainTs = nowPc;
+
+        if (_pushChainCount >= PUSH_CHAIN_THRESHOLD) {
+            _pushChainCount = 0;
+            _pushChainDir = null;
+            const myPos = { x: myX, y: myY };
+            const zone = getZone(myPos, beliefs.grid);
+            const target = getNearestReachableZoneTarget(zone, myPos);
+            if (target && (target.x !== myX || target.y !== myY)) {
+                console.log(
+                    `[coord] Push-chain break (${PUSH_CHAIN_THRESHOLD}×${blockedDir}) ` +
+                    `→ go_to (${target.x},${target.y})`
+                );
+                _forceIntention(createIntention('go_to', null, target, 5));
+            } else {
+                _requestRevision(true);
+            }
+            return;
+        }
+
+        _pendingYield = blockedDir;
+        console.log(`[coord] Right-of-way: backing off ${blockedDir} from (${myX},${myY})`);
+        return;
+    }
+    if (wouldRetreatIntoDelivery) {
+        console.log(
+            `[coord] Right-of-way: not backing off ${blockedDir} into delivery ` +
+            `from (${myX},${myY}) while empty`
+        );
+        return;
+    }
+
+    console.log(`[coord] Right-of-way: no free direction at (${myX},${myY}), staying`);
 }
 
 function handleHandoffRequest(envelope, senderId) {
@@ -1200,15 +1333,16 @@ function handleHandoffRequest(envelope, senderId) {
         return;
     }
 
-    replyTo(envelope, true, 'ok');
-    console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
-    // Clear any local suppression so the dropped parcel is visible when B delivers it.
-    clearParcelSuppressions();
-
     const stagingTile = findHandoffStagingTile(meetTile, {
         x: beliefs.me.x,
         y: beliefs.me.y,
     }) ?? meetTile;
+
+    replyTo(envelope, true, 'ok', { stagingTile });
+    console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
+    // Clear any local suppression so the dropped parcel is visible when B delivers it.
+    clearParcelSuppressions();
+
     const receiveIntention = createIntention('go_handoff_receive', null, stagingTile, 0);
     receiveIntention._meetTile = meetTile;
     _forceIntention(receiveIntention);

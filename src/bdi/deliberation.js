@@ -183,23 +183,34 @@ export function getBestIntention() {
                 if (pickUp) {
                     const parcel = beliefs.parcels.get(pickUp.parcelId);
                     if (parcel) {
-                        const parcelDelivery = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
-                        if (parcelDelivery) {
-                            const gain = detourValue(parcel, me, beliefs.me.carrying, parcelDelivery);
-                            const detour = evaluateDetour(me, parcel, target, parcelDelivery, gain);
-
-                            if (detour?.accepted) {
-                                const deliveryScore = deliveryValue(beliefs.me.carrying, me, target);
-                                pickUp.score = deliveryScore + detour.effectiveGain;
-
+                        if (isTileOccupiedByOtherAgent({ x: parcel.x, y: parcel.y })) {
+                            const key = `detour_occupied:${pickUp.parcelId}`;
+                            if (_lastDelibLog !== key) {
+                                _lastDelibLog = key;
                                 console.log(
-                                    `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
-                                    `gain=${gain.toFixed(1)} ` +
-                                    `extraSteps=${detour.extraSteps} ` +
-                                    `effectiveGain=${detour.effectiveGain.toFixed(1)} ` +
-                                    `score=${pickUp.score.toFixed(1)}`
+                                    `[deliberation] Detour skipped parcel=${pickUp.parcelId} ` +
+                                    'pickup tile occupied by another agent'
                                 );
-                                return pickUp;
+                            }
+                        } else {
+                            const parcelDelivery = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
+                            if (parcelDelivery) {
+                                const gain = detourValue(parcel, me, beliefs.me.carrying, parcelDelivery);
+                                const detour = evaluateDetour(me, parcel, target, parcelDelivery, gain);
+
+                                if (detour?.accepted) {
+                                    const deliveryScore = deliveryValue(beliefs.me.carrying, me, target);
+                                    pickUp.score = deliveryScore + detour.effectiveGain;
+
+                                    console.log(
+                                        `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
+                                        `gain=${gain.toFixed(1)} ` +
+                                        `extraSteps=${detour.extraSteps} ` +
+                                        `effectiveGain=${detour.effectiveGain.toFixed(1)} ` +
+                                        `score=${pickUp.score.toFixed(1)}`
+                                    );
+                                    return pickUp;
+                                }
                             }
                         }
                     }
@@ -249,20 +260,35 @@ export function getBestIntention() {
     const spawnsAreRare = genMs !== null && genMs >= SLOW_SPAWN_THRESHOLD_MS;
     const allSpawners = findSpawnerTiles().filter(spawnerCanReachDelivery);
 
-    // Respect zone constraint: use only in-zone spawners. Falling back to all
-    // spawners makes an assigned zone meaningless and can send the agent into
-    // its peer's area. If the zone has no spawner, stay in-zone and wait for a
-    // rebalance or visible parcel instead.
+    // Respect zone constraint: use only in-zone spawners. If the assigned zone
+    // has no spawner, stay near the delivery area as a relay receiver — do NOT
+    // cross into the peer's zone to reach their spawner. This prevents the
+    // deliverer from colliding with the picker on a shared corridor.
     const preferredSpawners = _zoneConstraint
         ? allSpawners.filter((s) => _isInZone(s))
         : allSpawners;
-    const spawners = preferredSpawners;
 
-    if (_zoneConstraint && spawners.length === 0) {
+    if (_zoneConstraint && preferredSpawners.length === 0) {
         resetRoamTarget();
-        console.log(`[deliberation] No spawner in assigned zone ${_zoneConstraint} → wait`);
+        // If standing on a delivery tile, step to the nearest non-delivery
+        // in-zone tile so the endpoint stays free for the peer to deliver.
+        const onDelivery = beliefs.deliveryTiles.some(
+            (t) => Math.round(me.x) === t.x && Math.round(me.y) === t.y
+        );
+        if (onDelivery) {
+            const stepOff = findNearestNonDeliveryInZoneTile(me);
+            if (stepOff) {
+                console.log(
+                    `[deliberation] No in-zone spawner, on delivery tile → relay to (${stepOff.x},${stepOff.y})`
+                );
+                return createIntention('go_to', null, stepOff, 0);
+            }
+        }
+        console.log(`[deliberation] No spawner in zone ${_zoneConstraint} → wait (relay receiver)`);
         return createIntention('wait', null, null, 0);
     }
+
+    const spawners = preferredSpawners;
 
     // Roam when spawners are scattered beyond what the agent can watch from one
     // spot (parcels can appear out of sight) even if the spawn rate is fine; a
@@ -448,6 +474,15 @@ function isDeliveryOccupied(tile) {
         agent.id !== beliefs.me.id &&
         Math.round(agent.x) === tile.x &&
         Math.round(agent.y) === tile.y
+    );
+}
+
+function isTileOccupiedByOtherAgent(tile) {
+    return [...beliefs.agents.values()].some((agent) =>
+        !agent.stale &&
+        agent.id !== beliefs.me.id &&
+        Math.round(agent.x) === Math.round(tile.x) &&
+        Math.round(agent.y) === Math.round(tile.y)
     );
 }
 
@@ -739,6 +774,31 @@ export function spawnersAreSparse(spawners = findSpawnerTiles()) {
     }
     // Unlimited vision: fall back to normalized geometric spread.
     return spawnerSparseness(spawners) >= SPARSE_THRESHOLD;
+}
+
+/**
+ * Finds the nearest walkable, non-delivery tile inside the active zone constraint.
+ * Used to step off a delivery tile when waiting as a relay receiver.
+ *
+ * @param {Position} myPos
+ * @returns {Position|null}
+ */
+function findNearestNonDeliveryInZoneTile(myPos) {
+    const deliverySet = new Set(beliefs.deliveryTiles.map((t) => `${t.x},${t.y}`));
+    let best = null;
+    let bestDist = Infinity;
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type === '0') continue;
+        if (deliverySet.has(key)) continue;
+        const [x, y] = key.split(',').map(Number);
+        if (_zoneConstraint && !_isInZone({ x, y })) continue;
+        const dist = manhattanDistance(myPos, { x, y });
+        if (dist > 0 && dist < bestDist) {
+            bestDist = dist;
+            best = { x, y };
+        }
+    }
+    return best;
 }
 
 /**
