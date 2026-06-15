@@ -737,7 +737,7 @@ export function spawnersAreSparse(spawners = findSpawnerTiles()) {
         // Finite vision: sparse if one vantage point can't watch them all.
         return radius > view;
     }
-    // Unlimited vision: fall back to normalised geometric spread.
+    // Unlimited vision: fall back to normalized geometric spread.
     return spawnerSparseness(spawners) >= SPARSE_THRESHOLD;
 }
 

@@ -296,11 +296,13 @@ export function clockEventToMs(event) {
 
 // Blacklisted cells
 //
-// Cells the agent must treat as impassable for now. Honoured by isWalkable /
+// The agent must treat as impassable for now. Honored by isWalkable /
 // canEnter (grid.js), so A* pathfinding, go_to and the executor all route
 // around them. Populated by the LLM policy (or coordination) at runtime.
 
-/** @param {number} x @param {number} y */
+/** @param {number} x
+ * @param {number} y
+ */
 export function blacklistCell(x, y) {
     beliefs.blacklist.add(`${x},${y}`);
 }
@@ -317,12 +319,18 @@ export function blacklistCellTemporary(x, y, ttlMs = 5000) {
     beliefs.temporaryBlacklist.set(key, Date.now() + ttlMs);
 }
 
-/** @param {number} x @param {number} y */
+/**
+ * @param {number} x
+ * @param {number} y
+ */
 export function unblacklistCell(x, y) {
     beliefs.blacklist.delete(`${x},${y}`);
 }
 
-/** @param {number} x @param {number} y @returns {boolean} */
+/** @param {number} x
+ * @param {number} y
+ * @returns {boolean}
+ */
 export function isBlacklisted(x, y) {
     const key = `${x},${y}`;
 
