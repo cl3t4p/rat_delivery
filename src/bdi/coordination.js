@@ -42,6 +42,10 @@ const defaults = {
     evaluateHandoff: () => null,
     proposeHandoff: () => {},
     requestHandoff: () => Promise.resolve({ accepted: false }),
+    // Handoff execution lives in the multi layer; in solo mode no go_handoff
+    // intention is ever produced, so these stay inert no-ops.
+    tryBlockedDeliveryHandoff: () => Promise.resolve(false),
+    runHandoff: () => Promise.resolve(),
     getNearestReachableZoneTarget: () => null,
     consumeYieldRequest: () => null,
     getPeers: () => [],
@@ -79,6 +83,8 @@ export const requestTakeover = (...a) => impl.requestTakeover(...a);
 export const evaluateHandoff = (...a) => impl.evaluateHandoff(...a);
 export const proposeHandoff = (...a) => impl.proposeHandoff(...a);
 export const requestHandoff = (...a) => impl.requestHandoff(...a);
+export const tryBlockedDeliveryHandoff = (...a) => impl.tryBlockedDeliveryHandoff(...a);
+export const runHandoff = (...a) => impl.runHandoff(...a);
 export const getNearestReachableZoneTarget = (...a) => impl.getNearestReachableZoneTarget(...a);
 export const consumeYieldRequest = (...a) => impl.consumeYieldRequest(...a);
 export const getPeers = (...a) => impl.getPeers(...a);

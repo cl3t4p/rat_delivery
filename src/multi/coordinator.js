@@ -19,6 +19,7 @@ import {
     isWalkable,
     suppressClaimedParcel,
     clearParcelSuppressions,
+    suppressHandoffDrop,
 } from '../bdi/beliefs.js';
 import {
     MSG_TYPE,
@@ -34,6 +35,7 @@ import {
     setZoneConstraint,
     findSpawnerTiles,
 } from '../bdi/deliberation.js';
+import { notifyIntentionDone, notifyActionFailed } from '../bdi/intentionRevision.js';
 import { deliveryValue, estimatedRewardAtDelivery } from '../bdi/scoring.js';
 import { aStar } from '../bdi/pathfinding.js';
 import { getZone, getMapBounds } from '../shared/zones.js';
@@ -52,6 +54,14 @@ const YIELDED_PARCEL_TTL_MS = Number(process.env.YIELDED_PARCEL_TTL_MS) || 2000;
 const HANDOFF_BUSY_RETRY_MS = 300;
 const HANDOFF_BUSY_SLOW_RETRY_MS = 1000;
 const HANDOFF_BUSY_FAST_RETRIES = 6;
+
+// Handoff execution pacing (sender drop / receiver pickup).
+const HANDOFF_STAGING_MAX_WAIT = 20; // 20 × 500 ms = 10 s max wait at staging tile
+const HANDOFF_SENDER_RELEASE_TIMEOUT_MS = 2000;
+const HANDOFF_RECEIVE_MAX_PICKUP_ATTEMPTS = 5;
+
+// Reactive handoff when a delivery is blocked by an empty teammate.
+const BLOCKED_HANDOFF_COOLDOWN_MS = 3000;
 
 // Zone-assignment acceptance: a new assignment must beat the current intention
 // by at least IMPROVEMENT_THRESHOLD to preempt it; an assigned centre within
@@ -452,6 +462,12 @@ const IMBALANCE_CONSECUTIVE_INTERVALS = 3;
 // is asked again, preventing oscillation caused by short-lived rate snapshots.
 const LLM_MIN_INTERVAL_MS = 90_000;
 const REBALANCE_MIN_INTERVAL_MS = 60_000;
+// Once agents are actively relaying (handing off), the deliverer scores and the
+// feeder scores 0 — a permanent imbalance that would otherwise keep triggering a
+// zone re-split and flip the roles mid-relay. While a handoff happened within
+// this window, freeze the assignment (no LLM re-split). It releases on its own
+// once handoffs stop (e.g. a peer drops) and the window lapses.
+const RELAY_FREEZE_TTL_MS = 12_000;
 // Trigger a rebalance when the trailing agent has less than this fraction
 // of the leading agent's score (and both have scored enough to be reliable).
 // Raised from 0.55 to 0.60 so minor asymmetries don't trigger unnecessary swaps.
@@ -481,6 +497,9 @@ let _hasEverAssigned = false;
 /** Timestamp of the last actual LLM call (ms). */
 let _lastLlmCallTs = 0;
 let _lastRebalanceTs = 0;
+// Last time this agent took part in a handoff (as sender or receiver). Drives the
+// relay freeze in runZoneAssignment.
+let _lastHandoffActivityTs = 0;
 
 /**
  * Marks this agent as the LLM coordinator.
@@ -1003,7 +1022,20 @@ async function runZoneAssignment() {
         console.log('[coord] Rebalance skipped: recent LLM rebalance still cooling down');
         isImbalanced = false;
     }
-    const needsLlm = isImbalanced || !_lastAssignment || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS;
+
+    // Relay freeze: while agents are actively handing off, keep the current
+    // assignment frozen. The feeder/deliverer score gap is inherent to a relay,
+    // not a real imbalance, so a re-split here only flip-flops the roles. The
+    // first assignment still proceeds (no handoff can have happened yet); the
+    // freeze lifts once handoffs stop (e.g. a peer drops) and the window lapses.
+    const relayActive = _lastHandoffActivityTs > 0 && now - _lastHandoffActivityTs < RELAY_FREEZE_TTL_MS;
+    if (relayActive && _lastAssignment && (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS)) {
+        console.log('[coord] Zone re-split suppressed: relay active (assignment frozen)');
+        isImbalanced = false;
+    }
+
+    const needsLlm =
+        !_lastAssignment || (!relayActive && (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS));
 
     if (!needsLlm) {
         if (now - _lastAssignmentAppliedTs < ASSIGNMENT_REFRESH_GRACE_MS) {
@@ -1204,6 +1236,7 @@ export function requestHandoff(meetTile, peerId) {
         state.pendingRequests.set(ts, {
             resolve: (res) => {
                 clearTimeout(timer);
+                if (res.accepted) _lastHandoffActivityTs = Date.now();
                 resolve({
                     accepted: res.accepted,
                     reason: res.reason ?? 'ok',
@@ -1339,6 +1372,294 @@ export function proposeHandoff(handoff, attempt = 0) {
             abandonHandoffRetryWait();
             _requestRevision(true);
         });
+}
+
+// Handoff execution (executor seam)
+//
+// Executing a go_handoff / go_handoff_receive intention is a multi-agent
+// concern, so the bodies live here rather than in the BDI executor. The
+// executor dispatches its switch cases to runHandoff(), passing an execCtx
+// of the two executor primitives the handoff needs — stepTowardsTarget (to
+// walk to the meet tile) and safeSocketAction (the transport-aware action
+// wrapper). Everything else (beliefs mutation, peer lookups, intention
+// lifecycle) is reached directly, keeping the executor free of handoff logic.
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** True when the agent stands on `tile`. */
+function isAtTile(tile) {
+    if (!tile) return false;
+    return Math.round(beliefs.me.x) === tile.x && Math.round(beliefs.me.y) === tile.y;
+}
+
+/** Cardinal direction from `from` to an orthogonally adjacent `to`, or null. */
+function directionTo(from, to) {
+    if (!from || !to) return null;
+    const dx = Math.round(to.x) - Math.round(from.x);
+    const dy = Math.round(to.y) - Math.round(from.y);
+    return Object.entries(DIR_DELTA_COORD).find(([, d]) => d.dx === dx && d.dy === dy)?.[0] ?? null;
+}
+
+function isPeerId(agentId) {
+    return getPeers().some((p) => p.id === agentId);
+}
+
+function peerCarryingCount(agentId) {
+    return getPeers().find((p) => p.id === agentId)?.carrying ?? 0;
+}
+
+// Reactive blocked-delivery handoff: at most one in flight, rate-limited.
+let _blockedHandoffInFlight = false;
+let _lastBlockedHandoffAt = 0;
+
+/**
+ * When the agent is delivering but an empty teammate blocks the path, propose
+ * handing the load to that teammate at the agent's current tile instead of
+ * fighting for the route. Returns true when the situation was handled (a
+ * handoff was committed, or a retry/cooldown sleep was taken), false when the
+ * caller should fall through to its normal blocked-move handling.
+ *
+ * @param {import('../shared/types.js').Intention} intention
+ * @param {{ id: string, x: number, y: number } | null} blockingAgent
+ * @param {number} blockerCarryCount
+ * @returns {Promise<boolean>}
+ */
+export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blockerCarryCount) {
+    if (
+        intention.type !== 'go_deliver' ||
+        beliefs.me.carrying.length === 0 ||
+        !blockingAgent ||
+        !isPeerId(blockingAgent.id) ||
+        blockerCarryCount > 0
+    ) {
+        return false;
+    }
+
+    const now = Date.now();
+    if (_blockedHandoffInFlight || now - _lastBlockedHandoffAt < BLOCKED_HANDOFF_COOLDOWN_MS) {
+        await sleep(250);
+        return true;
+    }
+
+    const meetTile = {
+        x: Math.round(beliefs.me.x),
+        y: Math.round(beliefs.me.y),
+    };
+    _blockedHandoffInFlight = true;
+    _lastBlockedHandoffAt = now;
+
+    console.log(
+        `[coord] Blocked delivery: proposing handoff at (${meetTile.x},${meetTile.y}) ` +
+            `to blocker ${blockingAgent.id}`
+    );
+
+    try {
+        const res = await requestHandoff(meetTile, blockingAgent.id);
+        if (!res.accepted) {
+            console.log(
+                `[coord] Blocked delivery handoff refused by ${blockingAgent.id} ` +
+                    `(${res.reason ?? 'unknown'})`
+            );
+            if (res.reason === 'busy') {
+                await sleep(300);
+                return true;
+            }
+            return false;
+        }
+
+        const handoff = createIntention('go_handoff', null, meetTile, 0);
+        handoff._peerId = blockingAgent.id;
+        handoff._peerCarryBefore = blockerCarryCount;
+        handoff._peerStagingTile = res.stagingTile ?? {
+            x: Math.round(blockingAgent.x),
+            y: Math.round(blockingAgent.y),
+        };
+        console.log(
+            `[coord] Blocked delivery handoff accepted by ${blockingAgent.id} ` +
+                `→ go_handoff at (${meetTile.x},${meetTile.y})`
+        );
+        _forceIntention(handoff);
+        return true;
+    } catch (err) {
+        console.log(`[coord] Blocked delivery handoff failed: ${err?.message ?? err}`);
+        return false;
+    } finally {
+        _blockedHandoffInFlight = false;
+    }
+}
+
+/**
+ * Dispatches a handoff intention to its executor body.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
+ * @param {import('../shared/types.js').Intention} intention
+ * @param {{ stepTowardsTarget: Function, safeSocketAction: Function }} execCtx
+ */
+export async function runHandoff(socket, intention, execCtx) {
+    if (intention.type === 'go_handoff_receive') {
+        await executeHandoffReceive(socket, intention, execCtx);
+    } else {
+        await executeHandoff(socket, intention, execCtx);
+    }
+}
+
+/**
+ * Executes a handoff intention: walks to the meetTile and puts down all parcels.
+ * The peer will pick them up and deliver them. After put_down, A resumes normal
+ * deliberation.
+ */
+async function executeHandoff(socket, intention, execCtx) {
+    if (!isAtTile(intention.targetPos)) {
+        await execCtx.stepTowardsTarget(socket, intention);
+        return;
+    }
+
+    // At meetTile: drop all parcels
+    const dropped = await execCtx.safeSocketAction('handoff putdown', () => socket.emitPutdown());
+    if (dropped === null) return;
+    const droppedIds = [...beliefs.me.carrying];
+    beliefs.me.carrying = [];
+    for (const id of droppedIds) suppressHandoffDrop(id);
+
+    console.log(
+        `[coord] Handoff: parcels dropped at (${intention.targetPos.x},${intention.targetPos.y})`
+    );
+
+    // Vacate the meet tile so B can enter and pick up.
+    // Try each direction; pick the first walkable tile that is NOT the staging
+    // tile B is coming from (i.e., avoid moving toward B).
+    const stagingDir =
+        intention._peerApproachDir ?? directionTo(intention.targetPos, intention._peerStagingTile);
+    for (const dir of ['right', 'left', 'up', 'down']) {
+        if (dir === stagingDir) continue;
+        const fx = Math.round(beliefs.me.x);
+        const fy = Math.round(beliefs.me.y);
+        const { dx, dy } = DIR_DELTA_COORD[dir];
+        const nx = fx + dx;
+        const ny = fy + dy;
+        if (canEnter(fx, fy, nx, ny)) {
+            await execCtx.safeSocketAction(`handoff vacate ${dir}`, () => socket.emitMove(dir));
+            console.log(`[coord] Handoff: vacated meet tile → moved ${dir}`);
+            break;
+        }
+    }
+
+    await waitForHandoffReceiver(intention);
+
+    notifyIntentionDone();
+}
+
+async function waitForHandoffReceiver(intention) {
+    if (!intention._peerId) {
+        await sleep(500);
+        return;
+    }
+
+    const startedAt = Date.now();
+    const peerCarryBefore = intention._peerCarryBefore ?? peerCarryingCount(intention._peerId);
+    while (Date.now() - startedAt < HANDOFF_SENDER_RELEASE_TIMEOUT_MS) {
+        const peerCarryNow = peerCarryingCount(intention._peerId);
+        if (peerCarryNow > peerCarryBefore) {
+            console.log(
+                `[coord] Handoff: receiver ${intention._peerId} picked up; releasing sender`
+            );
+            return;
+        }
+        await sleep(100);
+    }
+
+    console.log(
+        `[coord] Handoff: receiver confirmation timeout after ` +
+            `${HANDOFF_SENDER_RELEASE_TIMEOUT_MS}ms; releasing sender`
+    );
+}
+
+/**
+ * Executes a handoff-receive intention: B walks to the meetTile, picks up all
+ * parcels dropped there by A, then delivers them.
+ *
+ * After emitPickup the normal BDI loop takes over: the next revise() call will
+ * see carrying > 0 and produce go_deliver.
+ */
+async function executeHandoffReceive(socket, intention, execCtx) {
+    const meetTile = intention._meetTile ?? intention.targetPos;
+
+    if (!isAtTile(intention.targetPos)) {
+        await execCtx.stepTowardsTarget(socket, intention);
+        return;
+    }
+
+    // With a staged handoff, B waits next to the meet tile so A can enter,
+    // put down the parcels, and leave. Once the dropped parcels are visible,
+    // B switches target to the meet tile and picks them up.
+    if (intention._meetTile && !isAtTile(meetTile)) {
+        // The receiver may have suppressed the parcel while A was carrying it.
+        // Keep clearing normal claim suppressions during the staged wait so A's
+        // dropped parcel becomes visible immediately after putdown.
+        clearParcelSuppressions();
+
+        const parcelReady = [...beliefs.parcels.values()].some(
+            (parcel) =>
+                !parcel.carriedBy &&
+                Math.round(parcel.x) === meetTile.x &&
+                Math.round(parcel.y) === meetTile.y
+        );
+
+        if (!parcelReady) {
+            intention._stagingWait = (intention._stagingWait ?? 0) + 1;
+            if (intention._stagingWait >= HANDOFF_STAGING_MAX_WAIT) {
+                console.log(
+                    '[coord] Handoff receive: timed out waiting at staging tile → failing'
+                );
+                notifyActionFailed('handoff_timeout');
+                return;
+            }
+            console.log(
+                `[coord] Handoff receive: waiting near meet tile ` +
+                    `(${meetTile.x},${meetTile.y}) [${intention._stagingWait}/${HANDOFF_STAGING_MAX_WAIT}]`
+            );
+            await sleep(500);
+            return;
+        }
+
+        intention.targetPos = meetTile;
+        intention._pickupAttempts = 0;
+        return;
+    }
+
+    // At meetTile: try to pick up parcels dropped by A.
+    // A may not have arrived yet — retry up to HANDOFF_RECEIVE_MAX_PICKUP_ATTEMPTS
+    // times before giving up and letting BDI re-deliberate.
+    intention._pickupAttempts = (intention._pickupAttempts ?? 0) + 1;
+
+    const picked = await execCtx.safeSocketAction('handoff pickup', () => socket.emitPickup());
+    if (picked === null) return;
+
+    if (!picked || picked.length === 0) {
+        if (intention._pickupAttempts >= HANDOFF_RECEIVE_MAX_PICKUP_ATTEMPTS) {
+            console.log('[coord] Handoff receive: no parcels after max attempts → failing');
+            notifyActionFailed('pickup_empty');
+        } else {
+            console.log(
+                `[coord] Handoff receive: nothing yet, attempt ${intention._pickupAttempts}/${HANDOFF_RECEIVE_MAX_PICKUP_ATTEMPTS} — waiting`
+            );
+            await sleep(500);
+        }
+        return;
+    }
+
+    // Update beliefs before the next sensing event
+    for (const p of picked) {
+        const id = p.id;
+        const parcel = beliefs.parcels.get(id);
+        if (parcel) parcel.carriedBy = beliefs.me.id;
+        if (id && !beliefs.me.carrying.includes(id)) beliefs.me.carrying.push(id);
+    }
+
+    console.log(`[coord] Handoff receive OK: picked up ${picked.length} parcel(s)`);
+    notifyIntentionDone(); // triggers revise() → go_deliver
 }
 
 // Zone assignment (receiver side)
@@ -1678,6 +1999,7 @@ function handleHandoffRequest(envelope, senderId) {
         }) ?? meetTile;
 
     replyTo(envelope, true, 'ok', { stagingTile });
+    _lastHandoffActivityTs = Date.now();
     console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
     // Clear any local suppression so the dropped parcel is visible when B delivers it.
     clearParcelSuppressions();
