@@ -4,7 +4,6 @@
  * Central scoring functions for BDI deliberation.
  * All value estimates account for parcel decay during travel.
  *
- * Used by deliberation.js to evaluate pickup, delivery, and detour decisions.
  */
 
 import { beliefs } from './beliefs.js';
@@ -19,13 +18,10 @@ const DEFAULT_MS_PER_STEP = 500;
 /**
  * Estimates how many times a parcel will decay during a journey of `steps` tiles.
  *
- * Uses PARCEL_DECADING_INTERVAL from the server config and MS_PER_STEP
- * (measured dynamically in beliefs.config, falling back to the default).
- *
- * Returns 0 if decay interval is unknown (safe fallback — no decay assumed).
+ * Returns 0 if decay interval is unknown.
  *
  * @param {number} steps - Number of tiles to travel.
- * @returns {number} Number of decay events during the journey.
+ * @returns {number}.
  */
 export function estimateDecay(steps) {
     const decayInterval = beliefs.config?.PARCEL_DECADING_INTERVAL;

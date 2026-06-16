@@ -16,6 +16,8 @@ import {
     proposeHandoff,
 } from './coordination.js';
 
+import { USE_PDDL } from './helper.js';
+
 import { findNearestSpawnerTile } from './components/tilesearch.js';
 
 // Improvement threshold: replace the current intention only if the new one
@@ -24,11 +26,10 @@ const IMPROVEMENT_THRESHOLD = 5;
 
 // Max lifetime of a 'wait' intention: after this, force a fresh deliberation
 // so the agent can never stay idle indefinitely.
-const WAIT_MAX_AGE_MS = 5000;
+const WAIT_MAX_AGE_MS = 3000;
 
 // Stuck watchdog: if the agent hasn't made progress toward its target for
-// this long, force a fresh deliberation — escapes tight failure loops where
-// the executor keeps retrying an unreachable or blocked destination.
+// this long, force a fresh deliberation
 const STUCK_TIMEOUT_MS = 4000;
 
 // When enabled, the next intention is chosen by the standalone LLM agent
@@ -39,18 +40,17 @@ const USE_LLM = process.env.USE_LLM === 'true';
 // (see ../llm/policyAgent.js) instead of the per-tick intention agent.
 const USE_LLM_POLICY = process.env.USE_LLM_POLICY === 'true';
 
-// In PDDL mode the planner produces multi-step plans that legitimately detour
-// away from the target (e.g. circling a crate to push it from the right side),
-// which the distance-based stuck watchdog would mistake for being stuck and abort.
-// The pddl branch has no watchdog and works, so we simply disable it here.
-const USE_PDDL = process.env.USE_PDDL === 'true';
-
 /** @type {Intention|null} */
 let currentIntention = null;
 
 // Guards against launching overlapping LLM deliberations: the model call is
 // async and slow compared to the sensing rate, so at most one runs at a time.
 let deliberationInFlight = false;
+
+// Monotonic token identifying the current deliberation. interruptForRevision()
+// bumps it so an in-flight (now stale) deliberation discards its result instead
+// of committing a decision taken before a new mission arrived.
+let _deliberationGen = 0;
 
 // Tracks the best (minimum) Manhattan distance achieved toward the current target
 // and when it last improved. Resets on goal change or arrival.
@@ -60,6 +60,25 @@ export function requestRevision(force = false) {
     revise(force).catch((err) => {
         console.error(`[intentionRevision] revise failed: ${err?.message ?? err}`);
     });
+}
+
+/**
+ * Preempts the current intention and re-deliberates immediately.
+ *
+ * Used when new information must be acted on right away — notably an incoming
+ * natural-language mission/objective. A plain revise() would not preempt an
+ * active intention, so the mission would only be seen once it finished; this
+ * abandons it now and bumps the deliberation token so any in-flight LLM call
+ * cannot commit a pre-mission decision.
+ */
+export function interruptForRevision() {
+    _deliberationGen++; // invalidate any in-flight deliberation
+    if (currentIntention && currentIntention.status === 'active') {
+        currentIntention.status = 'failed';
+        broadcastIntention(currentIntention);
+        currentIntention = null;
+    }
+    requestRevision(true);
 }
 
 /**
@@ -306,11 +325,18 @@ export async function revise(force = false) {
         // stack a second one; the in-flight one will commit its result.
         if (deliberationInFlight) return;
         deliberationInFlight = true;
+        const gen = ++_deliberationGen;
+        let rerun = false;
         try {
             const next = await deliberate();
-            // While we were waiting, an intention may have been committed or
-            // the situation may have changed; only commit if still idle.
-            if (
+            // A newer interrupt (e.g. an incoming mission) happened while the
+            // model was thinking: discard this stale result and re-deliberate so
+            // the new context is taken into account.
+            if (gen !== _deliberationGen) {
+                rerun = true;
+            } else if (
+                // While we were waiting, an intention may have been committed or
+                // the situation may have changed; only commit if still idle.
                 !currentIntention ||
                 currentIntention.status === 'failed' ||
                 currentIntention.status === 'done'
@@ -323,13 +349,35 @@ export async function revise(force = false) {
         } finally {
             deliberationInFlight = false;
         }
+        // Re-run outside the in-flight guard so the fresh deliberation can start.
+        if (rerun) requestRevision(true);
         return;
     }
 
     // If there is already an active intention, compare it with the best option.
-    // The comparison uses the cheap synchronous heuristic even in LLM mode, so
-    // we don't fire a model call on every sensing tick.
     if (!force && currentIntention.status === 'active') {
+        // LLM mode: the model is the sole decision-maker, so we never fall back to
+        // the heuristic getBestIntention as a comparator. A 'wait' never completes
+        // on its own,
+        if (USE_LLM) {
+            if (currentIntention.type !== 'wait') return;
+            if (deliberationInFlight) return;
+            deliberationInFlight = true;
+            try {
+                const next = await deliberate();
+                if (currentIntention?.type === 'wait' && next.type !== 'wait') {
+                    console.log('[intentionRevision] Replacing wait (LLM)');
+                    currentIntention.status = 'failed';
+                    broadcastIntention(currentIntention);
+                    commitNewIntention(next);
+                }
+            } finally {
+                deliberationInFlight = false;
+            }
+            return;
+        }
+
+        // Heuristic mode: cheap synchronous comparison on every sensing tick.
         let candidate = getBestIntention();
         if (
             currentIntention.type === 'go_to' &&

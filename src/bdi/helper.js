@@ -82,18 +82,13 @@ export function manhattanDistance(a, b) {
 /**
  * Reachability distance (in steps) used for deliberation only (not for movement).
  *
- * Agents are always ignored: they move, so they shouldn't make a target look
- * farther or unreachable when only scoring intentions. Collision avoidance
- * (e.g. not crossing an agent in a single-slot corridor) belongs to the
- * movement layer's aStar. No caller needs the actual path, so this returns just
- * the step count (0 when already there), or null when the target is unreachable.
  *
  * @param {Position} from
  * @param {Position} to
- * @returns {number | null}
+ * @returns {number | null} returns null if no path exists
  */
 export function costToReachPath(from, to) {
     if (USE_PDDL) return manhattanDistance(from, to);
-    const result = aStar(from, to, { avoidAgents: false });
+    const result = aStar(from, to, { avoidAgents: true });
     return result ? result.moves.length : null;
 }

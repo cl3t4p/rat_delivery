@@ -67,8 +67,19 @@ export { llmClient };
 export const llmMemory = {
     objective: null, // e.g. "Focus on the top-left area"
     constraints: [],
+    // Special missions received in natural language over the Deliveroo chat.
+    // We just store them here verbatim; the LLM intention agent reads them and
+    // decides how (or whether) to act on them with its normal tools.
+    missions: [],
     environmentSnapshot: null, // position, visible parcels, delivery tiles
+    // Sends a chat message to another agent (or broadcasts). Wired by the
+    // multi-agent entrypoint; null in single-agent mode (no peer to talk to).
+    /** @type {((text: string, to?: 'peer'|'all') => void) | null} */
+    sendMessage: null,
 };
+
+// Keep only the most recent missions so the prompt stays small.
+const MAX_MISSIONS = 5;
 
 /**
  * Keywords that identify a constraint message.
@@ -154,8 +165,11 @@ export async function setObjective(objectiveText) {
             console.log(`[llmAgent] Blacklisted cell (${cell.x},${cell.y})`);
         }
     } else {
-        llmMemory.objective = objectiveText;
-        console.log(`[llmAgent] New strategy: "${objectiveText}"`);
+        // Anything that is not a constraint is treated as a special mission:
+        // store it verbatim and let the LLM intention agent interpret it.
+        llmMemory.missions.push({ text: objectiveText, ts: Date.now() });
+        if (llmMemory.missions.length > MAX_MISSIONS) llmMemory.missions.shift();
+        console.log(`[llmAgent] Mission stored. Total: ${llmMemory.missions.length}`);
     }
 
     updateContext();

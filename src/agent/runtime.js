@@ -25,8 +25,13 @@ import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk/client';
 const REVISE_HEARTBEAT_MS = Number(process.env.REVISE_HEARTBEAT_MS) || 200;
 
 import { updateMap, updateMe, updateBeliefs } from '../bdi/beliefs.js';
-import { onSensingRevise } from '../bdi/intentionRevision.js';
+import { onSensingRevise, interruptForRevision } from '../bdi/intentionRevision.js';
 import { startExecutor } from '../bdi/executor.js';
+
+// The single agent uses the LLM deliberation when USE_LLM=true. That path needs
+// the LLM client created up front (otherwise generateBestIntention has no client
+// to call). USE_LLM_POLICY shares the same client.
+const USE_LLM = process.env.USE_LLM === 'true' || process.env.USE_LLM_POLICY === 'true';
 
 import {
     installTimestampedConsole,
@@ -57,6 +62,24 @@ export function startSingleAgent({ tag = 'single', token } = {}) {
     // No multi-agent layer: a solo agent does not communicate, coordinate, or
     // accept zone assignments. The BDI modules' notifier/coordinator calls silently
     // no-op while uninitialised (see bdi/coordination.js), so nothing here stubs them.
+
+    // LLM deliberation needs the client initialised. Re-deliberate when an
+    // objective/mission arrives. A solo agent has no peer, so sendMessage just
+    // broadcasts (used to answer special-mission questions over the chat).
+    if (USE_LLM) {
+        import('../llm/llmAgent.js').then(({ initLlmAgent, llmMemory, setObjective }) => {
+            initLlmAgent(interruptForRevision);
+            llmMemory.sendMessage = (text) => {
+                Promise.resolve(socket.emitShout(text)).catch((err) =>
+                    console.log(`[${tag}] sendMessage failed: ${err?.message ?? err}`)
+                );
+            };
+            // Receive natural-language objectives / special missions over chat.
+            socket.onMsg((id, name, msg) => {
+                if (typeof msg === 'string' && msg.trim() !== '') setObjective(msg);
+            });
+        });
+    }
 
     const logState = makeLogState('state');
 

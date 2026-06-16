@@ -24,10 +24,11 @@ import {
     requestRevision,
     commitIntention,
     clearIntention,
-    revise,
+    interruptForRevision,
 } from '../bdi/intentionRevision.js';
 import { startExecutor } from '../bdi/executor.js';
-import { updateContext, setObjective, initLlmAgent } from '../llm/llmAgent.js';
+import { updateContext, setObjective, initLlmAgent, llmMemory } from '../llm/llmAgent.js';
+import { getPeers } from '../bdi/coordination.js';
 import { initCommunication, onFallbackMsg } from '../multi/communication.js';
 import {
     initCoordinator,
@@ -84,8 +85,18 @@ export function startMultiAgent({ role, token }) {
     // Agent B owns the LLM coordination loop; Agent A only receives assignments.
     if (isB) {
         setCoordinatorRole();
-        initLlmAgent(revise);
+        initLlmAgent(interruptForRevision);
         startZoneAssignmentLoop();
+
+        // Let the LLM intention agent talk to the teammate (or broadcast), e.g.
+        // to coordinate or to answer a special-mission question.
+        llmMemory.sendMessage = (text, to = 'all') => {
+            const peerId = to === 'peer' ? getPeers()[0]?.id : null;
+            const send = peerId ? socket.emitSay(peerId, text) : socket.emitShout(text);
+            Promise.resolve(send).catch((err) =>
+                console.log(`[${tag}] sendMessage failed: ${err?.message ?? err}`)
+            );
+        };
     }
 
     const logState = makeLogState(`state_${role}`);
