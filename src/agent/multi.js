@@ -22,13 +22,19 @@ import {
     getCurrentIntention,
     forceIntention,
     requestRevision,
+    commitIntention,
+    clearIntention,
     revise,
-    initZoneAssignHandler,
 } from '../bdi/intentionRevision.js';
 import { startExecutor } from '../bdi/executor.js';
 import { updateContext, setObjective, initLlmAgent } from '../llm/llmAgent.js';
 import { initCommunication, onFallbackMsg } from '../multi/communication.js';
-import { initCoordinator, startZoneAssignmentLoop, setCoordinatorRole } from '../multi/coordinator.js';
+import {
+    initCoordinator,
+    startZoneAssignmentLoop,
+    setCoordinatorRole,
+    initZoneAssignHandler,
+} from '../multi/coordinator.js';
 import { enableNotifier, tickBeliefDelta } from '../multi/notifier.js';
 import { installMultiAgent } from '../multi/helper.js';
 
@@ -65,7 +71,13 @@ export function startMultiAgent({ role, token }) {
     // into the BDI core, which otherwise runs solo (see bdi/coordination.js).
     installMultiAgent();
     initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
-    initCoordinator({ getCurrentIntention, forceIntention, requestRevision });
+    initCoordinator({
+        getCurrentIntention,
+        forceIntention,
+        requestRevision,
+        commitIntention,
+        clearIntention,
+    });
     initZoneAssignHandler();
     enableNotifier();
 

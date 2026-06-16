@@ -30,7 +30,7 @@ function isCellBlacklisted(key) {
  * @param {number} x
  * @param {number} y
  * @param {boolean} [awareOfCrates=true] - when false, a crate on the tile does not
- *   make it unwalkable.
+ *  make it unwalkable.
  * @returns {boolean}
  */
 export function isWalkable(x, y, awareOfCrates = true) {
@@ -62,14 +62,13 @@ export function canTraverse(fromX, fromY, toX, toY) {
     if (!tile) return false;
     if (BLOCKING_TYPES.has(tile.type)) return false;
     if (beliefs.blacklist.has(key)) return false;
-    if(isCellBlacklisted(key)) return false;
+    if (isCellBlacklisted(key)) return false;
     const v = ARROW_VEC[tile.type];
     if (!v) return true;
     const dx = toX - fromX;
     const dy = toY - fromY;
     return dx === v[0] && dy === v[1];
 }
-
 
 /**
  * Checks whether the agent can simply step onto a tile (no crate in the way).

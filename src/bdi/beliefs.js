@@ -313,8 +313,7 @@ export function decayParcelsReward() {
     const interval = beliefs.config?.PARCEL_DECADING_INTERVAL;
     if (!interval || interval <= 0) return;
 
-    beliefs.config._decayAccumulatedMs =
-        (beliefs.config._decayAccumulatedMs ?? 0) + 1000;
+    beliefs.config._decayAccumulatedMs = (beliefs.config._decayAccumulatedMs ?? 0) + 1000;
 
     const steps = Math.floor(beliefs.config._decayAccumulatedMs / interval);
     if (steps === 0) return;

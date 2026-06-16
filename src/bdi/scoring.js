@@ -113,10 +113,7 @@ export function detourValue(parcel, myPos, carriedIds, deliveryTile) {
 
     // Scenario B: detour to parcel, then deliver everything
     const stepsToParcel = manhattanDistance(myPos, { x: parcel.x, y: parcel.y });
-    const stepsParcelToDelivery = manhattanDistance(
-        { x: parcel.x, y: parcel.y },
-        deliveryTile
-    );
+    const stepsParcelToDelivery = manhattanDistance({ x: parcel.x, y: parcel.y }, deliveryTile);
 
     // Carried parcels decay during the walk to the new parcel
     const rewardCarriedAfterDetour = carriedIds.reduce((total, id) => {

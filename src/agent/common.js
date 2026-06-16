@@ -23,8 +23,11 @@ export function installTimestampedConsole() {
 
 /** Reads the game config event into beliefs.config and logs it under `tag`. */
 export function applyConfig(tag, config) {
-    beliefs.config.PARCEL_DECADING_INTERVAL = clockEventToMs(config?.GAME?.parcels?.decaying_event) ?? null;
-    beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(config?.GAME?.parcels?.generation_event);
+    beliefs.config.PARCEL_DECADING_INTERVAL =
+        clockEventToMs(config?.GAME?.parcels?.decaying_event) ?? null;
+    beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(
+        config?.GAME?.parcels?.generation_event
+    );
     beliefs.config.OBSERVATION_DISTANCE = config?.GAME?.player?.observation_distance ?? null;
     beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
 
@@ -32,7 +35,7 @@ export function applyConfig(tag, config) {
     console.log(`[${tag}] Decay interval: ${beliefs.config.PARCEL_DECADING_INTERVAL}ms`);
 }
 
-/** Starts the 1 Hz local parcel-reward decay loop. */
+/** Starts the 1 sec local parcel-reward decay loop. */
 export function startDecayLoop() {
     setInterval(() => decayParcelsReward(), 1000);
 }
@@ -79,7 +82,8 @@ export function makeLogState(label) {
             carrying === last.carrying &&
             type === last.type &&
             parcelId === last.parcelId
-        ) return;
+        )
+            return;
 
         last.x = x;
         last.y = y;

@@ -27,10 +27,7 @@ import {
 } from '../bdi/deliberation.js';
 import { llmMemory } from './llmAgent.js';
 import { buildStateSnapshot } from './intentionAgent.js';
-import {
-    pickupValue,
-    deliveryValue,
-} from '../bdi/scoring.js';
+import { pickupValue, deliveryValue } from '../bdi/scoring.js';
 
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */

@@ -40,6 +40,7 @@ const defaults = {
     isParcelClaimedByPeer: () => false,
     requestTakeover: () => Promise.resolve({ accepted: true, reason: 'solo' }),
     evaluateHandoff: () => null,
+    proposeHandoff: () => {},
     requestHandoff: () => Promise.resolve({ accepted: false }),
     getNearestReachableZoneTarget: () => null,
     consumeYieldRequest: () => null,
@@ -76,6 +77,7 @@ export const shouldYieldParcel = (...a) => impl.shouldYieldParcel(...a);
 export const isParcelClaimedByPeer = (...a) => impl.isParcelClaimedByPeer(...a);
 export const requestTakeover = (...a) => impl.requestTakeover(...a);
 export const evaluateHandoff = (...a) => impl.evaluateHandoff(...a);
+export const proposeHandoff = (...a) => impl.proposeHandoff(...a);
 export const requestHandoff = (...a) => impl.requestHandoff(...a);
 export const getNearestReachableZoneTarget = (...a) => impl.getNearestReachableZoneTarget(...a);
 export const consumeYieldRequest = (...a) => impl.consumeYieldRequest(...a);

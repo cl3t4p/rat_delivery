@@ -39,8 +39,10 @@ export function invalidateBounds() {
  */
 export function getMapBounds(grid) {
     if (_cachedBounds) return _cachedBounds;
-    let minX = Infinity, maxX = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
+    let minX = Infinity,
+        maxX = -Infinity;
+    let minY = Infinity,
+        maxY = -Infinity;
     for (const key of grid.keys()) {
         const [x, y] = key.split(',').map(Number);
         if (x < minX) minX = x;
@@ -64,10 +66,10 @@ export function getZone(pos, grid) {
     const { minX, maxX, minY, maxY } = getMapBounds(grid);
     const midX = (minX + maxX) / 2;
     const midY = (minY + maxY) / 2;
-    const top   = pos.y >= midY;
+    const top = pos.y >= midY;
     const right = pos.x >= midX;
-    if (top && !right)  return 'topLeft';
-    if (top && right)   return 'topRight';
+    if (top && !right) return 'topLeft';
+    if (top && right) return 'topRight';
     if (!top && !right) return 'bottomLeft';
     return 'bottomRight';
 }

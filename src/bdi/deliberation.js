@@ -7,13 +7,13 @@
 
 import { beliefs, manhattanDistance } from './beliefs.js';
 import { shouldYieldParcel } from './coordination.js';
-import {
-    deliveryValue,
-    detourValue,
-    estimatedRewardAtDelivery,
-} from './scoring.js';
+import { deliveryValue, detourValue, estimatedRewardAtDelivery } from './scoring.js';
 import { aStar } from './pathfinding.js';
-import { getZone as _sharedGetZone, getMapBounds as _getMapBounds, onBoundsInvalidated } from '../shared/zones.js';
+import {
+    getZone as _sharedGetZone,
+    getMapBounds as _getMapBounds,
+    onBoundsInvalidated,
+} from '../shared/zones.js';
 
 const USE_PDDL = process.env.USE_PDDL === 'true';
 
@@ -100,9 +100,7 @@ const DETOUR_NEAR_EXTRA_STEPS = 3;
 const DETOUR_MAX_EXTRA_STEPS = 8;
 const DETOUR_HIGH_EFFECTIVE_GAIN = 10;
 const MIN_PICKUP_SCORE =
-    process.env.MIN_PICKUP_SCORE === undefined
-        ? -Infinity
-        : Number(process.env.MIN_PICKUP_SCORE);
+    process.env.MIN_PICKUP_SCORE === undefined ? -Infinity : Number(process.env.MIN_PICKUP_SCORE);
 const LOCAL_PICKUP_MAX_DISTANCE = Number(process.env.LOCAL_PICKUP_MAX_DISTANCE ?? 3);
 const LOCAL_PICKUP_MIN_REWARD = Number(process.env.LOCAL_PICKUP_MIN_REWARD ?? 15);
 const LOCAL_PICKUP_MIN_SCORE = Number(process.env.LOCAL_PICKUP_MIN_SCORE ?? -25);
@@ -195,7 +193,7 @@ export function getBestIntention() {
                         _lastDelibLog = key;
                         console.log(
                             `[deliberation] go_deliver (full) to (${target.x},${target.y}) ` +
-                            `estimatedReward=${dvScore.toFixed(1)}`
+                                `estimatedReward=${dvScore.toFixed(1)}`
                         );
                     }
                     return createIntention('go_deliver', null, target, dvScore);
@@ -215,25 +213,43 @@ export function getBestIntention() {
                                 _lastDelibLog = key;
                                 console.log(
                                     `[deliberation] Detour skipped parcel=${pickUp.parcelId} ` +
-                                    'pickup tile occupied by another agent'
+                                        'pickup tile occupied by another agent'
                                 );
                             }
                         } else {
-                            const parcelDelivery = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
+                            const parcelDelivery = findNearestDeliveryTile({
+                                x: parcel.x,
+                                y: parcel.y,
+                            });
                             if (parcelDelivery) {
-                                const gain = detourValue(parcel, me, beliefs.me.carrying, parcelDelivery);
-                                const detour = evaluateDetour(me, parcel, target, parcelDelivery, gain);
+                                const gain = detourValue(
+                                    parcel,
+                                    me,
+                                    beliefs.me.carrying,
+                                    parcelDelivery
+                                );
+                                const detour = evaluateDetour(
+                                    me,
+                                    parcel,
+                                    target,
+                                    parcelDelivery,
+                                    gain
+                                );
 
                                 if (detour?.accepted) {
-                                    const deliveryScore = deliveryValue(beliefs.me.carrying, me, target);
+                                    const deliveryScore = deliveryValue(
+                                        beliefs.me.carrying,
+                                        me,
+                                        target
+                                    );
                                     pickUp.score = deliveryScore + detour.effectiveGain;
 
                                     console.log(
                                         `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
-                                        `gain=${gain.toFixed(1)} ` +
-                                        `extraSteps=${detour.extraSteps} ` +
-                                        `effectiveGain=${detour.effectiveGain.toFixed(1)} ` +
-                                        `score=${pickUp.score.toFixed(1)}`
+                                            `gain=${gain.toFixed(1)} ` +
+                                            `extraSteps=${detour.extraSteps} ` +
+                                            `effectiveGain=${detour.effectiveGain.toFixed(1)} ` +
+                                            `score=${pickUp.score.toFixed(1)}`
                                     );
                                     return pickUp;
                                 }
@@ -248,7 +264,7 @@ export function getBestIntention() {
                     _lastDelibLog = key;
                     console.log(
                         `[deliberation] go_deliver to (${target.x},${target.y}) ` +
-                        `estimatedReward=${dvScore.toFixed(1)}`
+                            `estimatedReward=${dvScore.toFixed(1)}`
                     );
                 }
                 return createIntention('go_deliver', null, target, dvScore);
@@ -348,7 +364,7 @@ export function getBestIntention() {
                     : 'spawners spread beyond view range';
                 console.log(
                     `[deliberation] ${reason} → continue to spawner ` +
-                    `(${_roamTarget.x},${_roamTarget.y})`
+                        `(${_roamTarget.x},${_roamTarget.y})`
                 );
                 return createIntention('go_to', null, _roamTarget, 0);
             }
@@ -360,7 +376,7 @@ export function getBestIntention() {
             if (opportunisticPickUp) {
                 console.log(
                     `[deliberation] On a sparse spawner but visible parcel is reachable → ` +
-                    `go_pick_up ${opportunisticPickUp.parcelId}`
+                        `go_pick_up ${opportunisticPickUp.parcelId}`
                 );
                 return opportunisticPickUp;
             }
@@ -379,10 +395,7 @@ export function getBestIntention() {
 
         let target;
         if (onIdx !== -1) {
-            const rotated = [
-                ...spawners.slice(onIdx + 1),
-                ...spawners.slice(0, onIdx),
-            ];
+            const rotated = [...spawners.slice(onIdx + 1), ...spawners.slice(0, onIdx)];
             target = findFirstReachableSpawnerTile(me, rotated);
         } else {
             target = findBestReachableSpawnerTile(me, spawners);
@@ -399,9 +412,7 @@ export function getBestIntention() {
         const reason = spawnsAreRare
             ? `spawns rare (${genMs}ms)`
             : 'spawners spread beyond view range';
-        console.log(
-            `[deliberation] ${reason} → roam to spawner (${target.x},${target.y})`
-        );
+        console.log(`[deliberation] ${reason} → roam to spawner (${target.x},${target.y})`);
         return createIntention('go_to', null, target, 0);
     }
 
@@ -417,7 +428,7 @@ export function getBestIntention() {
             if (opportunisticPickUp) {
                 console.log(
                     `[deliberation] On a spawner but visible parcel is reachable → ` +
-                    `go_pick_up ${opportunisticPickUp.parcelId}`
+                        `go_pick_up ${opportunisticPickUp.parcelId}`
                 );
                 return opportunisticPickUp;
             }
@@ -495,20 +506,22 @@ function findBestDeliveryTileMatching(myPos, predicate) {
 }
 
 function isDeliveryOccupied(tile) {
-    return [...beliefs.agents.values()].some((agent) =>
-        !agent.stale &&
-        agent.id !== beliefs.me.id &&
-        Math.round(agent.x) === tile.x &&
-        Math.round(agent.y) === tile.y
+    return [...beliefs.agents.values()].some(
+        (agent) =>
+            !agent.stale &&
+            agent.id !== beliefs.me.id &&
+            Math.round(agent.x) === tile.x &&
+            Math.round(agent.y) === tile.y
     );
 }
 
 function isTileOccupiedByOtherAgent(tile) {
-    return [...beliefs.agents.values()].some((agent) =>
-        !agent.stale &&
-        agent.id !== beliefs.me.id &&
-        Math.round(agent.x) === Math.round(tile.x) &&
-        Math.round(agent.y) === Math.round(tile.y)
+    return [...beliefs.agents.values()].some(
+        (agent) =>
+            !agent.stale &&
+            agent.id !== beliefs.me.id &&
+            Math.round(agent.x) === Math.round(tile.x) &&
+            Math.round(agent.y) === Math.round(tile.y)
     );
 }
 
@@ -562,11 +575,9 @@ function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
 
     const direct = reachPath(myPos, directDelivery, { avoidAgents: false });
     const toParcel = reachPath(myPos, { x: parcel.x, y: parcel.y }, { avoidAgents: false });
-    const parcelToDelivery = reachPath(
-        { x: parcel.x, y: parcel.y },
-        parcelDelivery,
-        { avoidAgents: false }
-    );
+    const parcelToDelivery = reachPath({ x: parcel.x, y: parcel.y }, parcelDelivery, {
+        avoidAgents: false,
+    });
 
     if (!direct || !toParcel || !parcelToDelivery) {
         _detourCache.set(parcel.id, null);
@@ -589,8 +600,8 @@ function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
     if (!accepted && extraSteps <= DETOUR_MAX_EXTRA_STEPS + 4) {
         console.log(
             `[deliberation] Detour rejected parcel=${parcel.id} ` +
-            `gain=${gain.toFixed(1)} ` +
-            `extraSteps=${extraSteps} effectiveGain=${effectiveGain.toFixed(1)}`
+                `gain=${gain.toFixed(1)} ` +
+                `extraSteps=${extraSteps} effectiveGain=${effectiveGain.toFixed(1)}`
         );
     }
 
@@ -662,9 +673,7 @@ export function findBestPickUp(myPos, options = {}) {
 
     if (bestIntention && log) {
         const parcel = beliefs.parcels.get(bestIntention.parcelId);
-        const delivery = parcel
-            ? findBestDeliveryPathFrom({ x: parcel.x, y: parcel.y })
-            : null;
+        const delivery = parcel ? findBestDeliveryPathFrom({ x: parcel.x, y: parcel.y }) : null;
         const deliveryTile = delivery?.tile ?? null;
 
         const key = `pickup:${bestIntention.parcelId}`;
@@ -672,10 +681,10 @@ export function findBestPickUp(myPos, options = {}) {
             _lastDelibLog = key;
             console.log(
                 `[deliberation] go_pick_up parcel=${bestIntention.parcelId} ` +
-                `score=${bestIntention.score.toFixed(1)} ` +
-                `parcelReward=${parcel?.reward ?? '?'} ` +
-                `target=(${bestIntention.targetPos.x},${bestIntention.targetPos.y})` +
-                (deliveryTile ? ` delivery=(${deliveryTile.x},${deliveryTile.y})` : '')
+                    `score=${bestIntention.score.toFixed(1)} ` +
+                    `parcelReward=${parcel?.reward ?? '?'} ` +
+                    `target=(${bestIntention.targetPos.x},${bestIntention.targetPos.y})` +
+                    (deliveryTile ? ` delivery=(${deliveryTile.x},${deliveryTile.y})` : '')
             );
         }
     }
@@ -769,8 +778,7 @@ export function spawnerSparseness(spawners = findSpawnerTiles()) {
     const cx = spawners.reduce((s, p) => s + p.x, 0) / spawners.length;
     const cy = spawners.reduce((s, p) => s + p.y, 0) / spawners.length;
     const meanRadius =
-        spawners.reduce((s, p) => s + Math.abs(p.x - cx) + Math.abs(p.y - cy), 0) /
-        spawners.length;
+        spawners.reduce((s, p) => s + Math.abs(p.x - cx) + Math.abs(p.y - cy), 0) / spawners.length;
 
     const { maxX, maxY } = _getMapBounds(beliefs.grid);
     const halfExtent = (maxX + maxY) / 2 || 1;
@@ -798,9 +806,7 @@ export function spawnersAreSparse(spawners = findSpawnerTiles()) {
     const cx = spawners.reduce((s, p) => s + p.x, 0) / spawners.length;
     const cy = spawners.reduce((s, p) => s + p.y, 0) / spawners.length;
     // Cluster radius: farthest spawner from the centroid.
-    const radius = Math.max(
-        ...spawners.map((p) => Math.abs(p.x - cx) + Math.abs(p.y - cy))
-    );
+    const radius = Math.max(...spawners.map((p) => Math.abs(p.x - cx) + Math.abs(p.y - cy)));
 
     if (view !== null && view > 0) {
         // Finite vision: sparse if one vantage point can't watch them all.

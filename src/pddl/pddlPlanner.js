@@ -272,7 +272,8 @@ function goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames
     if (intention.type === 'go_handoff' || intention.type === 'go_handoff_receive') {
         const t = intention.targetPos;
         if (!t) return null;
-        const tx = Math.round(t.x), ty = Math.round(t.y);
+        const tx = Math.round(t.x),
+            ty = Math.round(t.y);
         if (!tiles.has(`${tx},${ty}`)) return null;
         return `(at ${agentName} t_${tx}_${ty})`;
     }

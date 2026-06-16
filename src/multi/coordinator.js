@@ -12,9 +12,28 @@
  * Plus a parcel reservation table keyed by `parcelId`.
  */
 
-import { beliefs, manhattanDistance, canEnter, isWalkable, suppressClaimedParcel, clearParcelSuppressions } from '../bdi/beliefs.js';
-import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast, prepareDirect } from './communication.js';
-import { findNearestDeliveryTile, createIntention, setZoneConstraint, findSpawnerTiles } from '../bdi/deliberation.js';
+import {
+    beliefs,
+    manhattanDistance,
+    canEnter,
+    isWalkable,
+    suppressClaimedParcel,
+    clearParcelSuppressions,
+} from '../bdi/beliefs.js';
+import {
+    MSG_TYPE,
+    onMessage,
+    replyTo,
+    sendDirect,
+    sendBroadcast,
+    prepareDirect,
+} from './communication.js';
+import {
+    findNearestDeliveryTile,
+    createIntention,
+    setZoneConstraint,
+    findSpawnerTiles,
+} from '../bdi/deliberation.js';
 import { deliveryValue, estimatedRewardAtDelivery } from '../bdi/scoring.js';
 import { aStar } from '../bdi/pathfinding.js';
 import { getZone, getMapBounds } from '../shared/zones.js';
@@ -28,11 +47,23 @@ const HANDOFF_GAIN_THRESHOLD = 2;
 const HANDOFF_MAX_REWARD_LOSS = 2;
 const YIELDED_PARCEL_TTL_MS = Number(process.env.YIELDED_PARCEL_TTL_MS) || 2000;
 
+// Handoff request retry pacing: fast retries first, then a slower cadence while
+// the peer stays busy.
+const HANDOFF_BUSY_RETRY_MS = 300;
+const HANDOFF_BUSY_SLOW_RETRY_MS = 1000;
+const HANDOFF_BUSY_FAST_RETRIES = 6;
+
+// Zone-assignment acceptance: a new assignment must beat the current intention
+// by at least IMPROVEMENT_THRESHOLD to preempt it; an assigned centre within
+// SAME_ZONE_TARGET_DISTANCE of the current target is treated as a no-op.
+const IMPROVEMENT_THRESHOLD = 5;
+const SAME_ZONE_TARGET_DISTANCE = 0;
+
 const DIR_DELTA_COORD = {
-    up:    { dx: 0,  dy: 1  },
-    down:  { dx: 0,  dy: -1 },
-    left:  { dx: -1, dy: 0  },
-    right: { dx: 1,  dy: 0  },
+    up: { dx: 0, dy: 1 },
+    down: { dx: 0, dy: -1 },
+    left: { dx: -1, dy: 0 },
+    right: { dx: 1, dy: 0 },
 };
 
 function hasKnownPosition(pos) {
@@ -40,10 +71,10 @@ function hasKnownPosition(pos) {
 }
 
 const PERP_DIRS = {
-    left:  ['up', 'down'],
+    left: ['up', 'down'],
     right: ['up', 'down'],
-    up:    ['left', 'right'],
-    down:  ['left', 'right'],
+    up: ['left', 'right'],
+    down: ['left', 'right'],
 };
 
 /** @type {string|null} */
@@ -90,10 +121,34 @@ const state = {
  */
 async function computeZoneStats() {
     const zones = {
-        topLeft:     { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForSelf: 0, bestScoreForPeer: 0 },
-        topRight:    { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForSelf: 0, bestScoreForPeer: 0 },
-        bottomLeft:  { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForSelf: 0, bestScoreForPeer: 0 },
-        bottomRight: { totalReward: 0, freeParcels: 0, spawnerCount: 0, bestScoreForSelf: 0, bestScoreForPeer: 0 },
+        topLeft: {
+            totalReward: 0,
+            freeParcels: 0,
+            spawnerCount: 0,
+            bestScoreForSelf: 0,
+            bestScoreForPeer: 0,
+        },
+        topRight: {
+            totalReward: 0,
+            freeParcels: 0,
+            spawnerCount: 0,
+            bestScoreForSelf: 0,
+            bestScoreForPeer: 0,
+        },
+        bottomLeft: {
+            totalReward: 0,
+            freeParcels: 0,
+            spawnerCount: 0,
+            bestScoreForSelf: 0,
+            bestScoreForPeer: 0,
+        },
+        bottomRight: {
+            totalReward: 0,
+            freeParcels: 0,
+            spawnerCount: 0,
+            bestScoreForSelf: 0,
+            bestScoreForPeer: 0,
+        },
     };
 
     // Import scoring functions dynamically to avoid circular dependencies.
@@ -146,10 +201,10 @@ function getZoneCenter(zoneName) {
     const midY = maxY / 2;
 
     const centers = {
-        topLeft:     { x: Math.round(midX / 2),         y: Math.round(midY + midY / 2) },
-        topRight:    { x: Math.round(midX + midX / 2),  y: Math.round(midY + midY / 2) },
-        bottomLeft:  { x: Math.round(midX / 2),         y: Math.round(midY / 2)        },
-        bottomRight: { x: Math.round(midX + midX / 2),  y: Math.round(midY / 2)        },
+        topLeft: { x: Math.round(midX / 2), y: Math.round(midY + midY / 2) },
+        topRight: { x: Math.round(midX + midX / 2), y: Math.round(midY + midY / 2) },
+        bottomLeft: { x: Math.round(midX / 2), y: Math.round(midY / 2) },
+        bottomRight: { x: Math.round(midX + midX / 2), y: Math.round(midY / 2) },
     };
 
     return centers[zoneName];
@@ -253,9 +308,9 @@ export function evaluateHandoff() {
     const delivery = findNearestDeliveryTile(meetTile);
     if (!delivery) return null;
 
-    const distADel    = manhattanDistance(posA, delivery);
-    const distAMeet   = manhattanDistance(posA, meetTile);
-    const distBMeet   = manhattanDistance(posB, meetTile);
+    const distADel = manhattanDistance(posA, delivery);
+    const distAMeet = manhattanDistance(posA, meetTile);
+    const distBMeet = manhattanDistance(posB, meetTile);
     const distMeetDel = manhattanDistance(meetTile, delivery);
 
     // Condition 1: A should save enough travel before direct delivery. The
@@ -273,9 +328,7 @@ export function evaluateHandoff() {
         peer.intention.targetPos
             ? peer.intention.targetPos
             : null;
-    const distBCurrent = peerTarget
-        ? manhattanDistance(posB, peerTarget)
-        : Infinity;
+    const distBCurrent = peerTarget ? manhattanDistance(posB, peerTarget) : Infinity;
     const condition2 = distBMeet + distMeetDel < distBCurrent;
 
     // Condition 3: handoff should free A significantly before direct delivery,
@@ -299,7 +352,7 @@ export function evaluateHandoff() {
             // Route is shorter but reward does not improve — log and skip.
             console.log(
                 `[coord] Handoff rejected: Aalone=${valueAAlone.toFixed(1)} ` +
-                `handoff=${valueHandoff.toFixed(1)} savedA=${savedASteps}`
+                    `handoff=${valueHandoff.toFixed(1)} savedA=${savedASteps}`
             );
         }
         return null;
@@ -307,9 +360,9 @@ export function evaluateHandoff() {
 
     console.log(
         `[coord] Handoff viable: Aalone=${valueAAlone.toFixed(1)} ` +
-        `handoff=${valueHandoff.toFixed(1)} savedA=${savedASteps} ` +
-        `route=max(${distAMeet},${distBMeet})+${distMeetDel} ` +
-        `parcelDecay=${distAMeet}+${distMeetDel}`
+            `handoff=${valueHandoff.toFixed(1)} savedA=${savedASteps} ` +
+            `route=max(${distAMeet},${distBMeet})+${distMeetDel} ` +
+            `parcelDecay=${distAMeet}+${distMeetDel}`
     );
     return { meetTile, peerId: peer.id };
 }
@@ -345,16 +398,32 @@ let _getCurrentIntention = () => null;
 let _forceIntention = () => {};
 /** @type {(force?: boolean) => void} */
 let _requestRevision = () => {};
+/** @type {(intention: import('../shared/types.js').Intention) => void} */
+let _commitIntention = () => {};
+/** @type {() => void} */
+let _clearIntention = () => {};
 
 /**
  * Initialises the coordinator.
  *
- * @param {{ getCurrentIntention: Function, forceIntention: Function, requestRevision?: Function }} callbacks
+ * The intention-control callbacks (getCurrentIntention / forceIntention /
+ * requestRevision / commitIntention / clearIntention) are how the multi layer
+ * drives the BDI intention lifecycle without the BDI core importing multi/.
+ *
+ * @param {{ getCurrentIntention: Function, forceIntention: Function, requestRevision?: Function, commitIntention?: Function, clearIntention?: Function }} callbacks
  */
-export function initCoordinator({ getCurrentIntention, forceIntention, requestRevision }) {
+export function initCoordinator({
+    getCurrentIntention,
+    forceIntention,
+    requestRevision,
+    commitIntention,
+    clearIntention,
+}) {
     _getCurrentIntention = getCurrentIntention;
     _forceIntention = forceIntention;
     if (requestRevision) _requestRevision = requestRevision;
+    if (commitIntention) _commitIntention = commitIntention;
+    if (clearIntention) _clearIntention = clearIntention;
     onMessage(MSG_TYPE.BELIEF_UPDATE, handleBeliefUpdate);
     onMessage(MSG_TYPE.INTENTION_UPDATE, handleIntentionUpdate);
     onMessage(MSG_TYPE.REQUEST, handleRequest);
@@ -366,13 +435,13 @@ export function initCoordinator({ getCurrentIntention, forceIntention, requestRe
 }
 // Zone assignment
 
-const ZONE_ASSIGN_INTERVAL_MS        = 15_000;
-const BOTH_BUSY_SCORE_THRESHOLD      = 10;
+const ZONE_ASSIGN_INTERVAL_MS = 15_000;
+const BOTH_BUSY_SCORE_THRESHOLD = 10;
 const PEER_DISCOVERY_ASSIGN_DELAY_MS = 500;
-const ASSIGNMENT_REFRESH_GRACE_MS     = 3000;
-const USE_HEURISTIC_PREASSIGN         = process.env.USE_HEURISTIC_PREASSIGN !== 'false';
+const ASSIGNMENT_REFRESH_GRACE_MS = 3000;
+const USE_HEURISTIC_PREASSIGN = process.env.USE_HEURISTIC_PREASSIGN !== 'false';
 
-const SCORE_IMBALANCE_THRESHOLD       = 0.7;
+const SCORE_IMBALANCE_THRESHOLD = 0.7;
 // Require 3 consecutive imbalanced intervals before acting: reduces false
 // positives caused by one agent temporarily being in transit between zones.
 const IMBALANCE_CONSECUTIVE_INTERVALS = 3;
@@ -381,14 +450,14 @@ const IMBALANCE_CONSECUTIVE_INTERVALS = 3;
 // deterministically instead of paying LLM latency every 15 s.
 // 90 s gives the agents enough time to actually work in a zone before the LLM
 // is asked again, preventing oscillation caused by short-lived rate snapshots.
-const LLM_MIN_INTERVAL_MS       = 90_000;
+const LLM_MIN_INTERVAL_MS = 90_000;
 const REBALANCE_MIN_INTERVAL_MS = 60_000;
 // Trigger a rebalance when the trailing agent has less than this fraction
 // of the leading agent's score (and both have scored enough to be reliable).
 // Raised from 0.55 to 0.60 so minor asymmetries don't trigger unnecessary swaps.
-const SCORE_GAP_RATIO_THRESHOLD = 0.60;
-const SCORE_GAP_MIN_SCORE       = 50;
-const SCORE_GAP_FORCE_RATIO     = 0.45;
+const SCORE_GAP_RATIO_THRESHOLD = 0.6;
+const SCORE_GAP_MIN_SCORE = 50;
+const SCORE_GAP_FORCE_RATIO = 0.45;
 
 /** @type {{ selfScore: number, peerScore: number, ts: number } | null} */
 let _scoreSnapshot = null;
@@ -455,9 +524,7 @@ function computeHeuristicAssignment(selfId, selfPos, peerId, peerPos) {
 }
 
 function zoneOpportunityForAgent(stats, agentKey) {
-    const bestScore = agentKey === 'self'
-        ? stats.bestScoreForSelf
-        : stats.bestScoreForPeer;
+    const bestScore = agentKey === 'self' ? stats.bestScoreForSelf : stats.bestScoreForPeer;
     return Math.max(0, bestScore) + stats.totalReward + stats.spawnerCount * 5;
 }
 
@@ -492,7 +559,10 @@ function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
     const zones = Object.keys(zoneStats);
     const repaired = { ...assignment };
 
-    for (const [agentId, agentKey] of [[selfId, 'self'], [peerId, 'peer']]) {
+    for (const [agentId, agentKey] of [
+        [selfId, 'self'],
+        [peerId, 'peer'],
+    ]) {
         const currentZone = repaired[agentId];
         const currentStats = currentZone ? zoneStats[currentZone] : null;
         if (currentStats && zoneHasOpportunity(currentStats, agentKey)) continue;
@@ -517,7 +587,7 @@ function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
         if (bestZone && bestZone !== currentZone) {
             console.log(
                 `[coord] Zone assignment repaired for ${agentId}: ` +
-                `${currentZone ?? 'none'} → ${bestZone} (no useful opportunity)`
+                    `${currentZone ?? 'none'} → ${bestZone} (no useful opportunity)`
             );
             repaired[agentId] = bestZone;
         }
@@ -532,12 +602,17 @@ function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
         const moveKey = moveId === selfId ? 'self' : 'peer';
         const stayId = moveId === selfId ? peerId : selfId;
         const targetSide = oppositeSide(repaired[stayId]);
-        const bestZone = bestZoneOnSide(zoneStats, targetSide, moveKey, new Set([repaired[stayId]]));
+        const bestZone = bestZoneOnSide(
+            zoneStats,
+            targetSide,
+            moveKey,
+            new Set([repaired[stayId]])
+        );
 
         if (bestZone && bestZone !== repaired[moveId]) {
             console.log(
                 `[coord] Zone assignment side-repaired for ${moveId}: ` +
-                `${repaired[moveId]} → ${bestZone} (same side coverage)`
+                    `${repaired[moveId]} → ${bestZone} (same side coverage)`
             );
             repaired[moveId] = bestZone;
         }
@@ -563,7 +638,7 @@ function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
         if (bestZone !== repaired[laggingAgentId]) {
             console.log(
                 `[coord] Zone assignment force-repaired for lagging ${laggingAgentId}: ` +
-                `${repaired[laggingAgentId]} → ${bestZone}`
+                    `${repaired[laggingAgentId]} → ${bestZone}`
             );
             repaired[laggingAgentId] = bestZone;
         }
@@ -605,7 +680,8 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
         return;
     }
 
-    const selfBusy = liveIntention?.status === 'active' &&
+    const selfBusy =
+        liveIntention?.status === 'active' &&
         (liveIntention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
 
     const selfZoneName = assignment[selfId];
@@ -615,11 +691,13 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
     const selfCenter = getNearestReachableZoneTarget(selfZoneName, selfPos);
     const selfEffectiveScore = Math.max(
         zoneStats[selfZoneName]?.bestScoreForSelf ?? 0,
-        zoneStats[selfZoneName]?.totalReward      ?? 0,
-        (zoneStats[selfZoneName]?.spawnerCount    ?? 0) * 2
+        zoneStats[selfZoneName]?.totalReward ?? 0,
+        (zoneStats[selfZoneName]?.spawnerCount ?? 0) * 2
     );
 
-    console.log(`[coord] Zone assignment → self (${selfId}): ${selfZoneName} (${selfCenter.x},${selfCenter.y})`);
+    console.log(
+        `[coord] Zone assignment → self (${selfId}): ${selfZoneName} (${selfCenter.x},${selfCenter.y})`
+    );
 
     setZoneConstraint(selfZoneName);
     if (forceNavigation && !selfBusy) {
@@ -628,11 +706,11 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
 
     if (assignment[peerId]) {
         const peerZoneName = assignment[peerId];
-        const peerCenter   = getNearestReachableZoneTarget(peerZoneName, peerPos);
+        const peerCenter = getNearestReachableZoneTarget(peerZoneName, peerPos);
         const peerEffectiveScore = Math.max(
             zoneStats[peerZoneName]?.bestScoreForPeer ?? 0,
-            zoneStats[peerZoneName]?.totalReward      ?? 0,
-            (zoneStats[peerZoneName]?.spawnerCount    ?? 0) * 2
+            zoneStats[peerZoneName]?.totalReward ?? 0,
+            (zoneStats[peerZoneName]?.spawnerCount ?? 0) * 2
         );
         console.log(`[coord] Zone assignment → peer (${peerId}): ${peerZoneName}`);
         sendDirect(peerId, MSG_TYPE.ZONE_ASSIGN, {
@@ -659,12 +737,12 @@ async function runHeuristicZoneAssignment() {
     if (beliefs.me.x === null) return;
 
     const peers = getPeers();
-    const peer  = peers[0] ?? null;
+    const peer = peers[0] ?? null;
     if (!peer || peer.x === null) return;
 
-    const selfId  = beliefs.me.id;
+    const selfId = beliefs.me.id;
     const selfPos = { x: beliefs.me.x, y: beliefs.me.y };
-    const peerId  = peer.id;
+    const peerId = peer.id;
     const peerPos = { x: peer.x, y: peer.y };
 
     const assignment = computeHeuristicAssignment(selfId, selfPos, peerId, peerPos);
@@ -677,12 +755,15 @@ async function runHeuristicZoneAssignment() {
     const selfZoneName = repaired[selfId];
     const peerZoneName = repaired[peerId];
 
-    console.log(`[coord] Heuristic zone split: ${selfId}→${selfZoneName} ${peerId}→${peerZoneName}`);
+    console.log(
+        `[coord] Heuristic zone split: ${selfId}→${selfZoneName} ${peerId}→${peerZoneName}`
+    );
 
     // For the heuristic split, also apply live-selfBusy so we never interrupt
     // an active delivery just to reposition toward a zone center.
     const liveIntentionH = _getCurrentIntention();
-    const selfBusyH = liveIntentionH?.status === 'active' &&
+    const selfBusyH =
+        liveIntentionH?.status === 'active' &&
         (liveIntentionH.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
 
     const selfCenter = getNearestReachableZoneTarget(selfZoneName, selfPos);
@@ -747,10 +828,14 @@ function uncrossAssignment(assignment, selfId, selfPos, peerId, peerPos) {
         assignment[selfId] === peerCurrentZone &&
         assignment[peerId] === selfCurrentZone
     ) {
-        const swapped = { ...assignment, [selfId]: assignment[peerId], [peerId]: assignment[selfId] };
+        const swapped = {
+            ...assignment,
+            [selfId]: assignment[peerId],
+            [peerId]: assignment[selfId],
+        };
         console.log(
             `[coord] Zone assignment un-crossed: ` +
-            `${selfId}→${swapped[selfId]} ${peerId}→${swapped[peerId]}`
+                `${selfId}→${swapped[selfId]} ${peerId}→${swapped[peerId]}`
         );
         return swapped;
     }
@@ -772,16 +857,17 @@ async function runZoneAssignment() {
     if (beliefs.me.x === null) return;
 
     const peers = getPeers();
-    const peer  = peers[0] ?? null;
+    const peer = peers[0] ?? null;
     if (!peer) {
         console.log('[coord] Zone assignment skipped: no peer known yet');
         return;
     }
 
     const intention = _getCurrentIntention();
-    const selfBusy  = intention?.status === 'active' &&
-        (intention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
-    const peerBusy  = peer.intention?.status === 'active' &&
+    const selfBusy =
+        intention?.status === 'active' && (intention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
+    const peerBusy =
+        peer.intention?.status === 'active' &&
         (peer.intention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
 
     if (selfBusy && peerBusy) {
@@ -790,10 +876,11 @@ async function runZoneAssignment() {
     }
 
     // Scoring-rate tracking and imbalance detection
-    const now       = Date.now();
+    const now = Date.now();
     const selfScore = beliefs.me.score ?? 0;
     const peerScore = peer.score ?? 0;
-    let selfRate = null, peerRate = null;
+    let selfRate = null,
+        peerRate = null;
     let isImbalanced = false;
     let laggingAgentId = null;
 
@@ -812,18 +899,21 @@ async function runZoneAssignment() {
                     _imbalanceDirection = null;
                     console.log(
                         `[coord] Score imbalance ignored: leader is slower ` +
-                        `self=${selfRate.toFixed(2)}/s peer=${peerRate.toFixed(2)}/s ` +
-                        `scores self=${selfScore} peer=${peerScore}`
+                            `self=${selfRate.toFixed(2)}/s peer=${peerRate.toFixed(2)}/s ` +
+                            `scores self=${selfScore} peer=${peerScore}`
                     );
                 } else {
-                    if (_imbalanceDirection && _imbalanceDirection !== direction) _imbalanceDirectionChanges++;
+                    if (_imbalanceDirection && _imbalanceDirection !== direction)
+                        _imbalanceDirectionChanges++;
                     _imbalanceDirection = direction;
                     _imbalanceCount++;
                     console.log(
                         `[coord] Score imbalance (${_imbalanceCount}/${IMBALANCE_CONSECUTIVE_INTERVALS}):` +
-                        ` self=${selfRate.toFixed(2)}/s peer=${peerRate.toFixed(2)}/s` +
-                        ` direction=${direction}` +
-                        (_imbalanceDirectionChanges ? ` changes=${_imbalanceDirectionChanges}` : '')
+                            ` self=${selfRate.toFixed(2)}/s peer=${peerRate.toFixed(2)}/s` +
+                            ` direction=${direction}` +
+                            (_imbalanceDirectionChanges
+                                ? ` changes=${_imbalanceDirectionChanges}`
+                                : '')
                     );
                     if (_imbalanceCount >= IMBALANCE_CONSECUTIVE_INTERVALS) {
                         isImbalanced = true;
@@ -853,7 +943,7 @@ async function runZoneAssignment() {
             _gapImbalanceCount++;
             console.log(
                 `[coord] Score gap (${_gapImbalanceCount}/${IMBALANCE_CONSECUTIVE_INTERVALS}):` +
-                ` self=${selfScore} peer=${peerScore} ratio=${ratio.toFixed(2)}`
+                    ` self=${selfScore} peer=${peerScore} ratio=${ratio.toFixed(2)}`
             );
             if (_gapImbalanceCount >= IMBALANCE_CONSECUTIVE_INTERVALS) {
                 isImbalanced = true;
@@ -865,21 +955,23 @@ async function runZoneAssignment() {
         }
     }
 
-    const selfId  = beliefs.me.id;
+    const selfId = beliefs.me.id;
     const selfPos = { x: beliefs.me.x, y: beliefs.me.y };
     if (!selfId || !hasKnownPosition(selfPos)) {
         console.log('[coord] Zone assignment skipped: own position unknown');
         return;
     }
-    const peerId  = peer.id;
-    const peerPos = hasKnownPosition(peer)
-        ? { x: peer.x, y: peer.y }
-        : selfPos; // fallback: treat peer as co-located until position arrives
+    const peerId = peer.id;
+    const peerPos = hasKnownPosition(peer) ? { x: peer.x, y: peer.y } : selfPos; // fallback: treat peer as co-located until position arrives
 
     const zoneStats = await computeZoneStats();
 
-    const scoreGapRatio = Math.min(selfScore, peerScore) / Math.max(1, Math.max(selfScore, peerScore));
-    if (Math.max(selfScore, peerScore) >= SCORE_GAP_MIN_SCORE && scoreGapRatio < SCORE_GAP_FORCE_RATIO) {
+    const scoreGapRatio =
+        Math.min(selfScore, peerScore) / Math.max(1, Math.max(selfScore, peerScore));
+    if (
+        Math.max(selfScore, peerScore) >= SCORE_GAP_MIN_SCORE &&
+        scoreGapRatio < SCORE_GAP_FORCE_RATIO
+    ) {
         laggingAgentId = selfScore <= peerScore ? selfId : peerId;
     }
 
@@ -910,10 +1002,12 @@ async function runZoneAssignment() {
 
     const { callZoneAssignment } = await import('../llm/llmAgent.js');
     _lastLlmCallTs = now;
-    const assignment = await callZoneAssignment(
-        zoneStats, selfId, selfPos, peerId, peerPos,
-        { selfRate, peerRate, isImbalanced, currentAssignment: _lastAssignment }
-    );
+    const assignment = await callZoneAssignment(zoneStats, selfId, selfPos, peerId, peerPos, {
+        selfRate,
+        peerRate,
+        isImbalanced,
+        currentAssignment: _lastAssignment,
+    });
     if (!assignment) return;
     if (isImbalanced) _lastRebalanceTs = now;
     _lastAssignment = repairAssignment(assignment, zoneStats, selfId, peerId, { laggingAgentId });
@@ -1051,17 +1145,19 @@ export function requestTakeover(parcelId) {
 
         console.log(`[coord] → request take_parcel ${parcelId} to=${reservation.peerId} ts=${ts}`);
 
-        send().then((result) => {
-            if (result === null) {
+        send()
+            .then((result) => {
+                if (result === null) {
+                    clearTimeout(timer);
+                    state.pendingRequests.delete(ts);
+                    reject(new Error('send_failed'));
+                }
+            })
+            .catch((err) => {
                 clearTimeout(timer);
                 state.pendingRequests.delete(ts);
-                reject(new Error('send_failed'));
-            }
-        }).catch((err) => {
-            clearTimeout(timer);
-            state.pendingRequests.delete(ts);
-            reject(err);
-        });
+                reject(err);
+            });
     });
 }
 
@@ -1102,17 +1198,19 @@ export function requestHandoff(meetTile, peerId) {
             peerId,
         });
 
-        send().then((result) => {
-            if (result === null) {
+        send()
+            .then((result) => {
+                if (result === null) {
+                    clearTimeout(timer);
+                    state.pendingRequests.delete(ts);
+                    reject(new Error('send_failed'));
+                }
+            })
+            .catch((err) => {
                 clearTimeout(timer);
                 state.pendingRequests.delete(ts);
-                reject(new Error('send_failed'));
-            }
-        }).catch((err) => {
-            clearTimeout(timer);
-            state.pendingRequests.delete(ts);
-            reject(err);
-        });
+                reject(err);
+            });
     });
 }
 
@@ -1125,6 +1223,207 @@ export function getPeers() {
 export function getReservations() {
     pruneStale();
     return [...state.reservations.entries()].map(([parcelId, r]) => ({ parcelId, ...r }));
+}
+
+// Handoff protocol (sender side)
+//
+// After a pickup the BDI core asks evaluateHandoff() whether passing the load
+// to the peer is worthwhile; if so it calls proposeHandoff() (via the
+// coordination seam). proposeHandoff parks the agent on a placeholder `wait`
+// (flagged _handoffRetry so revise() won't preempt it), negotiates with the
+// peer through requestHandoff, and on acceptance commits the go_handoff
+// intention the executor carries out. All intention mutation goes through the
+// injected _commitIntention / _clearIntention / _requestRevision callbacks so
+// this module never imports the BDI core.
+
+/** True for the placeholder `wait` held while a handoff request is in flight. */
+export function isHandoffRetryWait(intention) {
+    return intention?.type === 'wait' && intention._handoffRetry === true;
+}
+
+// Clears a stuck _handoffRetry wait so revise() can produce a fresh intention.
+// Called when a handoff attempt fails or times out, since requestRevision(true)
+// alone cannot replace an already-active wait (revise skips the comparison block
+// when force=true and an active intention exists).
+function abandonHandoffRetryWait() {
+    if (isHandoffRetryWait(_getCurrentIntention())) {
+        _clearIntention();
+    }
+}
+
+/**
+ * Proposes a handoff to the peer, retrying while the peer is busy.
+ *
+ * @param {{ peerId: string, meetTile: Position }} handoff
+ * @param {number} [attempt]
+ */
+export function proposeHandoff(handoff, attempt = 0) {
+    if (beliefs.me.carrying.length < 1) {
+        _requestRevision(true);
+        return;
+    }
+
+    let current = _getCurrentIntention();
+    if (!current || current.status === 'failed' || current.status === 'done') {
+        const hold = createIntention(
+            'wait',
+            null,
+            beliefs.me.x !== null && beliefs.me.y !== null
+                ? { x: Math.round(beliefs.me.x), y: Math.round(beliefs.me.y) }
+                : null,
+            0
+        );
+        hold._handoffRetry = true;
+        hold._handoffRetryPeerId = handoff.peerId;
+        _commitIntention(hold);
+        current = _getCurrentIntention();
+    } else if (!isHandoffRetryWait(current)) {
+        return;
+    }
+
+    if (current) current.createdAt = Date.now();
+
+    console.log(`[coord] Proposing handoff to ${handoff.peerId}`);
+    requestHandoff(handoff.meetTile, handoff.peerId)
+        .then((res) => {
+            if (res.accepted) {
+                const live = _getCurrentIntention();
+                if (live && !isHandoffRetryWait(live)) return;
+                console.log(`[coord] Handoff accepted → go_handoff`);
+                const intention = createIntention('go_handoff', null, handoff.meetTile, 0);
+                intention._peerStagingTile = res.stagingTile ?? null;
+                intention._peerId = handoff.peerId;
+                intention._peerCarryBefore =
+                    getPeers().find((p) => p.id === handoff.peerId)?.carrying ?? 0;
+                _commitIntention(intention);
+                return;
+            }
+
+            if (res.reason === 'busy') {
+                const live = _getCurrentIntention();
+                if (live && !isHandoffRetryWait(live)) return;
+                const delay =
+                    attempt < HANDOFF_BUSY_FAST_RETRIES
+                        ? HANDOFF_BUSY_RETRY_MS
+                        : HANDOFF_BUSY_SLOW_RETRY_MS;
+                console.log(
+                    `[coord] Handoff peer busy → retry ` +
+                        `${attempt + 1}${attempt >= HANDOFF_BUSY_FAST_RETRIES ? ' (slow)' : `/${HANDOFF_BUSY_FAST_RETRIES}`}`
+                );
+                setTimeout(() => proposeHandoff(handoff, attempt + 1), delay);
+                return;
+            }
+
+            abandonHandoffRetryWait();
+            _requestRevision(true);
+        })
+        .catch(() => {
+            abandonHandoffRetryWait();
+            _requestRevision(true);
+        });
+}
+
+// Zone assignment (receiver side)
+
+/**
+ * Registers the handler for incoming ZONE_ASSIGN messages.
+ *
+ * Converts a zone assignment into a go_to intention toward the zone center.
+ * Accepted only if the assignment score exceeds the current intention score
+ * by at least IMPROVEMENT_THRESHOLD, so the LLM cannot interrupt a
+ * high-value pickup mid-execution.
+ *
+ * Call once from multiagent_a.js / multiagent_b.js after initCoordinator().
+ */
+export function initZoneAssignHandler() {
+    onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {
+        const { targetId, center, score: payloadScore, totalReward } = envelope.payload ?? {};
+
+        // Ignore assignments meant for the other agent.
+        if (targetId !== beliefs.me.id) return;
+        if (!center) return;
+
+        const score = payloadScore ?? totalReward ?? 0;
+
+        const current = _getCurrentIntention();
+        const currentScore = current?.score ?? 0;
+        const currentType = current?.type ?? null;
+
+        const isLowValueIntention =
+            !current ||
+            currentType === 'wait' ||
+            currentType === 'explore' ||
+            (currentType === 'go_to' && currentScore <= 0);
+
+        const hasImportantIntention =
+            current && current.status === 'active' && !isLowValueIntention;
+
+        if (
+            current?.targetPos &&
+            manhattanDistance(current.targetPos, center) <= SAME_ZONE_TARGET_DISTANCE
+        ) {
+            console.log(
+                `[coord] Zone assign ignored: target already close ` +
+                    `current=(${current.targetPos.x},${current.targetPos.y}) ` +
+                    `assigned=(${center.x},${center.y})`
+            );
+            return;
+        }
+
+        const myPos =
+            beliefs.me.x !== null && beliefs.me.y !== null
+                ? { x: beliefs.me.x, y: beliefs.me.y }
+                : null;
+
+        // Resolve the navigation target: use the assigned centre if reachable,
+        // otherwise find the nearest reachable tile in the zone (spawner first,
+        // then the closest walkable tile to the geometric centre).
+        let target = center;
+        if (myPos && !aStar(myPos, target, { avoidAgents: false })) {
+            const zoneName = envelope.payload?.zone ?? null;
+            const alternative = zoneName ? getNearestReachableZoneTarget(zoneName, myPos) : null;
+            if (alternative && aStar(myPos, alternative, { avoidAgents: false })) {
+                console.log(
+                    `[coord] Zone centre unreachable (${center.x},${center.y})` +
+                        ` → nearest reachable (${alternative.x},${alternative.y})`
+                );
+                target = alternative;
+            } else {
+                console.log(
+                    `[coord] Zone assign ignored: no reachable target in zone` +
+                        ` (centre=(${center.x},${center.y}))`
+                );
+                return;
+            }
+        }
+
+        if (hasImportantIntention && score - currentScore <= IMPROVEMENT_THRESHOLD) {
+            console.log(
+                `[coord] Zone assign ignored: ` +
+                    `assignment=${score.toFixed(1)} ` +
+                    `current=${currentScore.toFixed(1)} ` +
+                    `threshold=${IMPROVEMENT_THRESHOLD}`
+            );
+            return;
+        }
+
+        // Persist the zone so every future deliberation cycle stays within it,
+        // not just the one-shot go_to waypoint.
+        if (envelope.payload?.zone) setZoneConstraint(envelope.payload.zone);
+
+        if (envelope.payload?.forceNavigation === false) {
+            console.log(`[coord] Zone assign refreshed constraint only: ${envelope.payload.zone}`);
+            return;
+        }
+
+        const intention = createIntention('go_to', null, target, score);
+        console.log(
+            `[coord] Zone assign accepted → go_to (${target.x},${target.y}) score=${score}`
+        );
+
+        // Replace the current intention (fails + broadcasts it, then commits).
+        _forceIntention(intention);
+    });
 }
 
 // Message handlers
@@ -1253,7 +1552,7 @@ function handleBlockedAt(envelope, senderId) {
     if (myCarry > requesterCarry) {
         console.log(
             `[coord] Right-of-way: keeping priority at (${myX},${myY}) ` +
-            `mine=${myCarry} requester=${requesterCarry}`
+                `mine=${myCarry} requester=${requesterCarry}`
         );
         return;
     }
@@ -1303,7 +1602,7 @@ function handleBlockedAt(envelope, senderId) {
             if (target && (target.x !== myX || target.y !== myY)) {
                 console.log(
                     `[coord] Push-chain break (${PUSH_CHAIN_THRESHOLD}×${blockedDir}) ` +
-                    `→ go_to (${target.x},${target.y})`
+                        `→ go_to (${target.x},${target.y})`
                 );
                 _forceIntention(createIntention('go_to', null, target, 5));
             } else {
@@ -1319,7 +1618,7 @@ function handleBlockedAt(envelope, senderId) {
     if (wouldRetreatIntoDelivery) {
         console.log(
             `[coord] Right-of-way: not backing off ${blockedDir} into delivery ` +
-            `from (${myX},${myY}) while empty`
+                `from (${myX},${myY}) while empty`
         );
         return;
     }
@@ -1354,10 +1653,11 @@ function handleHandoffRequest(envelope, senderId) {
         return;
     }
 
-    const stagingTile = findHandoffStagingTile(meetTile, {
-        x: beliefs.me.x,
-        y: beliefs.me.y,
-    }) ?? meetTile;
+    const stagingTile =
+        findHandoffStagingTile(meetTile, {
+            x: beliefs.me.x,
+            y: beliefs.me.y,
+        }) ?? meetTile;
 
     replyTo(envelope, true, 'ok', { stagingTile });
     console.log(`[coord] Handoff request accepted: meet at (${meetTile.x},${meetTile.y})`);
@@ -1374,9 +1674,7 @@ function findHandoffStagingTile(meetTile, myPos) {
         .map(({ dx, dy }) => ({ x: meetTile.x + dx, y: meetTile.y + dy }))
         .filter((tile) => isWalkable(tile.x, tile.y));
 
-    candidates.sort((a, b) =>
-        manhattanDistance(myPos, a) - manhattanDistance(myPos, b)
-    );
+    candidates.sort((a, b) => manhattanDistance(myPos, a) - manhattanDistance(myPos, b));
 
     return candidates[0] ?? null;
 }

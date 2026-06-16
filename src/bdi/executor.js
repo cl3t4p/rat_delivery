@@ -71,8 +71,10 @@ function directionFromTo(from, to) {
     if (!from || !to) return null;
     const dx = Math.round(to.x) - Math.round(from.x);
     const dy = Math.round(to.y) - Math.round(from.y);
-    return Object.entries(DIR_DELTA)
-        .find(([, delta]) => delta.dx === dx && delta.dy === dy)?.[0] ?? null;
+    return (
+        Object.entries(DIR_DELTA).find(([, delta]) => delta.dx === dx && delta.dy === dy)?.[0] ??
+        null
+    );
 }
 
 /** @typedef {import('../shared/types.js').Intention} Intention */
@@ -153,7 +155,9 @@ function setupSocketLifecycle(socket) {
             const now = Date.now();
             if (now - _lastSocketConnectErrorLog > 2000) {
                 _lastSocketConnectErrorLog = now;
-                console.log(`[executor] Socket connect error; actions paused (${err?.message ?? err})`);
+                console.log(
+                    `[executor] Socket connect error; actions paused (${err?.message ?? err})`
+                );
             }
         });
     }
@@ -201,14 +205,15 @@ export async function startExecutor(socket) {
         // Right-of-way yield: execute a lateral step requested by the coordinator
         const yieldDir = consumeYieldRequest();
         if (yieldDir) {
-            const moved = await safeSocketAction(
-                `yield ${yieldDir}`,
-                () => socket.emitMove(yieldDir)
+            const moved = await safeSocketAction(`yield ${yieldDir}`, () =>
+                socket.emitMove(yieldDir)
             );
             if (moved) {
                 beliefs.me.x = moved.x;
                 beliefs.me.y = moved.y;
-                console.log(`[executor] Right-of-way yield: stepped ${yieldDir} to (${moved.x},${moved.y})`);
+                console.log(
+                    `[executor] Right-of-way yield: stepped ${yieldDir} to (${moved.x},${moved.y})`
+                );
                 if (beliefs.me.carrying.length === 0 && EMPTY_YIELD_HOLD_MS > 0) {
                     _yieldHoldUntil = Date.now() + EMPTY_YIELD_HOLD_MS;
                 }
@@ -274,7 +279,9 @@ async function stepTowardsTarget(socket, intention) {
     if (!intention.plan || intention.plan.length === 0) {
         const moves = await computePlan(intention);
         if (moves.length === 0) {
-            console.log(`[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`);
+            console.log(
+                `[executor] No path to (${intention.targetPos.x},${intention.targetPos.y})`
+            );
 
             await sleep(NO_PATH_RETRY_DELAY_MS);
 
@@ -331,16 +338,14 @@ async function stepTowardsTarget(socket, intention) {
             : 'goal=?';
         console.log(
             `[executor] Move failed: ${dir} from (${fxBefore},${fyBefore}) ` +
-            `to (${tx},${ty}) tile=${targetTile?.type ?? '?'} failures=${failures} ` +
-            `${goalStr}` +
-            (blockingAgent ? ` blocker=${blockingAgent.id}` : '')
+                `to (${tx},${ty}) tile=${targetTile?.type ?? '?'} failures=${failures} ` +
+                `${goalStr}` +
+                (blockingAgent ? ` blocker=${blockingAgent.id}` : '')
         );
 
         const isKnownTeammateBlocker = blockingAgent && isKnownPeer(blockingAgent.id);
         const myCarryCount = beliefs.me.carrying.length;
-        const blockerCarryCount = isKnownTeammateBlocker
-            ? peerCarryingCount(blockingAgent.id)
-            : 0;
+        const blockerCarryCount = isKnownTeammateBlocker ? peerCarryingCount(blockingAgent.id) : 0;
         if (blockingAgent) {
             rememberBlockingContext(
                 targetKey,
@@ -356,13 +361,15 @@ async function stepTowardsTarget(socket, intention) {
             const rx = fxBefore + (retreatDelta?.dx ?? 0);
             const ry = fyBefore + (retreatDelta?.dy ?? 0);
             const retreatTile = beliefs.grid.get(`${rx},${ry}`);
-            const emptyWouldRetreatIntoDelivery =
-                myCarryCount === 0 && retreatTile?.type === '2';
+            const emptyWouldRetreatIntoDelivery = myCarryCount === 0 && retreatTile?.type === '2';
 
-            if (retreatDir && !emptyWouldRetreatIntoDelivery && canEnter(fxBefore, fyBefore, rx, ry)) {
-                const retreated = await safeSocketAction(
-                    `priority retreat ${retreatDir}`,
-                    () => socket.emitMove(retreatDir)
+            if (
+                retreatDir &&
+                !emptyWouldRetreatIntoDelivery &&
+                canEnter(fxBefore, fyBefore, rx, ry)
+            ) {
+                const retreated = await safeSocketAction(`priority retreat ${retreatDir}`, () =>
+                    socket.emitMove(retreatDir)
                 );
                 if (retreated) {
                     beliefs.me.x = retreated.x;
@@ -372,11 +379,11 @@ async function stepTowardsTarget(socket, intention) {
                     }
                     console.log(
                         `[executor] Priority yield: blocker ${blockingAgent.id} ` +
-                        `carrying=${blockerCarryCount} > mine=${myCarryCount}; ` +
-                        `stepped ${retreatDir}` +
-                        (myCarryCount === 0 && EMPTY_YIELD_HOLD_MS > 0
-                            ? `; holding ${EMPTY_YIELD_HOLD_MS}ms`
-                            : '')
+                            `carrying=${blockerCarryCount} > mine=${myCarryCount}; ` +
+                            `stepped ${retreatDir}` +
+                            (myCarryCount === 0 && EMPTY_YIELD_HOLD_MS > 0
+                                ? `; holding ${EMPTY_YIELD_HOLD_MS}ms`
+                                : '')
                     );
                 }
             } else {
@@ -385,11 +392,13 @@ async function stepTowardsTarget(socket, intention) {
                 }
                 console.log(
                     `[executor] Priority yield: blocker ${blockingAgent.id} ` +
-                    `carrying=${blockerCarryCount} > mine=${myCarryCount}; waiting` +
-                    (emptyWouldRetreatIntoDelivery ? ' (delivery tile not used as empty retreat)' : '') +
-                    (myCarryCount === 0 && EMPTY_YIELD_HOLD_MS > 0
-                        ? ` ${EMPTY_YIELD_HOLD_MS}ms`
-                        : '')
+                        `carrying=${blockerCarryCount} > mine=${myCarryCount}; waiting` +
+                        (emptyWouldRetreatIntoDelivery
+                            ? ' (delivery tile not used as empty retreat)'
+                            : '') +
+                        (myCarryCount === 0 && EMPTY_YIELD_HOLD_MS > 0
+                            ? ` ${EMPTY_YIELD_HOLD_MS}ms`
+                            : '')
                 );
                 await sleep(250);
             }
@@ -407,17 +416,18 @@ async function stepTowardsTarget(socket, intention) {
                     y: ty,
                     direction: dir,
                     carrying: myCarryCount,
-                })
-                    .catch((err) => {
-                        console.log(`[executor] blocked_at broadcast failed: ${err.message ?? err}`);
-                    });
+                }).catch((err) => {
+                    console.log(`[executor] blocked_at broadcast failed: ${err.message ?? err}`);
+                });
 
                 // Fast-path: if delivering and the blocker is empty, propose a
                 // handoff immediately instead of waiting for STUCK_FAILURE_THRESHOLD.
                 // Saves ~2 × (backoff + retry) ≈ 0.6 s per reactive handoff cycle.
                 if (intention.type === 'go_deliver' && blockerCarryCount === 0) {
                     const handled = await tryBlockedDeliveryHandoff(
-                        intention, blockingAgent, blockerCarryCount
+                        intention,
+                        blockingAgent,
+                        blockerCarryCount
                     );
                     if (handled) {
                         intention.plan = [];
@@ -430,15 +440,14 @@ async function stepTowardsTarget(socket, intention) {
         }
 
         if (failures >= STUCK_FAILURE_THRESHOLD) {
-            const isGoal =
-                intention.targetPos?.x === tx &&
-                intention.targetPos?.y === ty;
+            const isGoal = intention.targetPos?.x === tx && intention.targetPos?.y === ty;
             const isCriticalTile = targetTile?.type === '1' || targetTile?.type === '2';
             failedMoves.delete(targetKey);
             const recentBlocker = getBlockingContext(targetKey);
-            const recentPeerBlocker = recentBlocker?.teammate && recentBlocker.blockerId
-                ? getPeerById(recentBlocker.blockerId)
-                : null;
+            const recentPeerBlocker =
+                recentBlocker?.teammate && recentBlocker.blockerId
+                    ? getPeerById(recentBlocker.blockerId)
+                    : null;
             const effectiveBlocker = blockingAgent ?? recentPeerBlocker;
             const effectiveBlockerCarry = blockingAgent
                 ? blockerCarryCount
@@ -472,9 +481,9 @@ async function stepTowardsTarget(socket, intention) {
             } else {
                 console.log(
                     `[executor] Skip blacklist for critical blocked tile (${tx},${ty}) ` +
-                    `goal=${isGoal} tile=${targetTile?.type ?? '?'} ` +
-                    `occupied=${Boolean(blockingAgent) || occupiedByRecentBlocker} ` +
-                    `teammate=${Boolean(isKnownTeammateBlocker) || teammateBlockedRecently}`
+                        `goal=${isGoal} tile=${targetTile?.type ?? '?'} ` +
+                        `occupied=${Boolean(blockingAgent) || occupiedByRecentBlocker} ` +
+                        `teammate=${Boolean(isKnownTeammateBlocker) || teammateBlockedRecently}`
                 );
             }
 
@@ -566,7 +575,7 @@ async function tryBlockedDeliveryHandoff(intention, blockingAgent, blockerCarryC
 
     console.log(
         `[executor] Blocked delivery: proposing handoff at (${meetTile.x},${meetTile.y}) ` +
-        `to blocker ${blockingAgent.id}`
+            `to blocker ${blockingAgent.id}`
     );
 
     try {
@@ -574,7 +583,7 @@ async function tryBlockedDeliveryHandoff(intention, blockingAgent, blockerCarryC
         if (!res.accepted) {
             console.log(
                 `[executor] Blocked delivery handoff refused by ${blockingAgent.id} ` +
-                `(${res.reason ?? 'unknown'})`
+                    `(${res.reason ?? 'unknown'})`
             );
             if (res.reason === 'busy') {
                 await sleep(300);
@@ -592,14 +601,12 @@ async function tryBlockedDeliveryHandoff(intention, blockingAgent, blockerCarryC
         };
         console.log(
             `[executor] Blocked delivery handoff accepted by ${blockingAgent.id} ` +
-            `→ go_handoff at (${meetTile.x},${meetTile.y})`
+                `→ go_handoff at (${meetTile.x},${meetTile.y})`
         );
         forceIntention(handoff);
         return true;
     } catch (err) {
-        console.log(
-            `[executor] Blocked delivery handoff failed: ${err?.message ?? err}`
-        );
+        console.log(`[executor] Blocked delivery handoff failed: ${err?.message ?? err}`);
         return false;
     } finally {
         _blockedHandoffInFlight = false;
@@ -687,7 +694,9 @@ async function finalize(socket, intention) {
                     x: p.x ?? parcel?.x ?? intention.targetPos?.x ?? null,
                     y: p.y ?? parcel?.y ?? intention.targetPos?.y ?? null,
                 }).catch((err) => {
-                    console.log(`[executor] PARCEL_CLAIMED broadcast failed: ${err?.message ?? err}`);
+                    console.log(
+                        `[executor] PARCEL_CLAIMED broadcast failed: ${err?.message ?? err}`
+                    );
                 });
             }
         }
@@ -703,7 +712,7 @@ async function finalize(socket, intention) {
         const dropped = await safeSocketAction('putdown', () => socket.emitPutdown());
         if (dropped === null) return;
         const cycleMs = _cycleStart ? Date.now() - _cycleStart : null;
-        const actual  = (dropped ?? []).length;
+        const actual = (dropped ?? []).length;
 
         for (const id of beliefs.me.carrying) {
             beliefs.parcels.delete(id);
@@ -713,10 +722,13 @@ async function finalize(socket, intention) {
             if (p.id) beliefs.parcels.delete(p.id);
         }
 
-        const cycleInfo = cycleMs !== null
-            ? ` cycle=${(cycleMs / 1000).toFixed(1)}s pickupReward=${_cyclePickupReward}`
-            : '';
-        console.log(`[executor] Delivery OK: ${actual} parcel(s) score=${beliefs.me.score}${cycleInfo}`);
+        const cycleInfo =
+            cycleMs !== null
+                ? ` cycle=${(cycleMs / 1000).toFixed(1)}s pickupReward=${_cyclePickupReward}`
+                : '';
+        console.log(
+            `[executor] Delivery OK: ${actual} parcel(s) score=${beliefs.me.score}${cycleInfo}`
+        );
         _cycleStart = null;
         _cyclePickupReward = 0;
         notifyIntentionDone();
@@ -731,7 +743,9 @@ async function finalize(socket, intention) {
     }
 
     if (intention.type === 'explore') {
-        console.log(`[executor] Reached spawner (${intention.targetPos.x},${intention.targetPos.y})`);
+        console.log(
+            `[executor] Reached spawner (${intention.targetPos.x},${intention.targetPos.y})`
+        );
         notifyIntentionDone();
         return;
     }
@@ -808,7 +822,7 @@ async function waitForHandoffReceiver(intention) {
 
     console.log(
         `[executor] Handoff: receiver confirmation timeout after ` +
-        `${HANDOFF_SENDER_RELEASE_TIMEOUT_MS}ms; releasing sender`
+            `${HANDOFF_SENDER_RELEASE_TIMEOUT_MS}ms; releasing sender`
     );
 }
 
@@ -839,22 +853,25 @@ async function executeHandoffReceive(socket, intention) {
         // dropped parcel becomes visible immediately after putdown.
         clearParcelSuppressions();
 
-        const parcelReady = [...beliefs.parcels.values()].some((parcel) =>
-            !parcel.carriedBy &&
-            Math.round(parcel.x) === meetTile.x &&
-            Math.round(parcel.y) === meetTile.y
+        const parcelReady = [...beliefs.parcels.values()].some(
+            (parcel) =>
+                !parcel.carriedBy &&
+                Math.round(parcel.x) === meetTile.x &&
+                Math.round(parcel.y) === meetTile.y
         );
 
         if (!parcelReady) {
             intention._stagingWait = (intention._stagingWait ?? 0) + 1;
             if (intention._stagingWait >= HANDOFF_STAGING_MAX_WAIT) {
-                console.log('[executor] Handoff receive: timed out waiting at staging tile → failing');
+                console.log(
+                    '[executor] Handoff receive: timed out waiting at staging tile → failing'
+                );
                 notifyActionFailed('handoff_timeout');
                 return;
             }
             console.log(
                 `[executor] Handoff receive: waiting near meet tile ` +
-                `(${meetTile.x},${meetTile.y}) [${intention._stagingWait}/${HANDOFF_STAGING_MAX_WAIT}]`
+                    `(${meetTile.x},${meetTile.y}) [${intention._stagingWait}/${HANDOFF_STAGING_MAX_WAIT}]`
             );
             await sleep(500);
             return;

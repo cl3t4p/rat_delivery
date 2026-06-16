@@ -5,26 +5,20 @@
  *
  */
 
-import { beliefs, isWalkable, manhattanDistance } from './beliefs.js';
-import { getBestIntention, createIntention, setZoneConstraint, resetRoamTarget, findBestLocalPickUp } from './deliberation.js';
+import { beliefs, isWalkable } from './beliefs.js';
+import { getBestIntention, resetRoamTarget, findBestLocalPickUp } from './deliberation.js';
 import {
     broadcastIntention,
     isParcelClaimedByPeer,
     shouldYieldParcel,
     requestTakeover,
     evaluateHandoff,
-    requestHandoff,
-    getNearestReachableZoneTarget,
-    getPeers,
-    MSG_TYPE,
-    onMessage,
+    proposeHandoff,
 } from './coordination.js';
-import { aStar } from './pathfinding.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
 const IMPROVEMENT_THRESHOLD = 5;
-const SAME_ZONE_TARGET_DISTANCE = 0;
 
 // Max lifetime of a 'wait' intention: after this, force a fresh deliberation
 // so the agent can never stay idle indefinitely.
@@ -34,13 +28,14 @@ const WAIT_MAX_AGE_MS = 5000;
 // this long, force a fresh deliberation — escapes tight failure loops where
 // the executor keeps retrying an unreachable or blocked destination.
 const STUCK_TIMEOUT_MS = 4000;
-const HANDOFF_BUSY_RETRY_MS = 300;
-const HANDOFF_BUSY_SLOW_RETRY_MS = 1000;
-const HANDOFF_BUSY_FAST_RETRIES = 6;
 
 // When enabled, the next intention is chosen by the standalone LLM agent
 // (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
 const USE_LLM = process.env.USE_LLM === 'true';
+
+// When enabled, the next intention is produced by the LLM policy agent
+// (see ../llm/policyAgent.js) instead of the per-tick intention agent.
+const USE_LLM_POLICY = process.env.USE_LLM_POLICY === 'true';
 
 // In PDDL mode the planner produces multi-step plans that legitimately detour
 // away from the target (e.g. circling a crate to push it from the right side),
@@ -71,6 +66,10 @@ export function requestRevision(force = false) {
  * @returns {Promise<Intention>}
  */
 async function deliberate() {
+    if (USE_LLM_POLICY) {
+        const { generateBestIntentionFromPolicy } = await import('../llm/policyAgent.js');
+        return generateBestIntentionFromPolicy();
+    }
     if (USE_LLM) {
         const { generateBestIntention } = await import('../llm/intentionAgent.js');
         return generateBestIntention();
@@ -117,11 +116,16 @@ export function notifyIntentionDone() {
     }
     currentIntention = null;
 
-    // After each pickup, check if a handoff to the peer is beneficial.
+    // After each pickup, check if a handoff to the peer is beneficial. The
+    // handoff protocol itself lives in the multi layer (multi/coordinator.js)
+    // and reaches back into the intention lifecycle through the exported
+    // commitIntention / clearIntention / forceIntention primitives. In solo
+    // mode evaluateHandoff() returns null, so this short-circuits and we
+    // re-deliberate normally.
     if (beliefs.me.carrying.length >= 1) {
         const handoff = evaluateHandoff();
         if (handoff) {
-            proposeHandoffWithBusyRetry(handoff);
+            proposeHandoff(handoff);
             return;
         }
     }
@@ -129,87 +133,11 @@ export function notifyIntentionDone() {
     requestRevision(true);
 }
 
-function proposeHandoffWithBusyRetry(handoff, attempt = 0) {
-    if (beliefs.me.carrying.length < 1) {
-        requestRevision(true);
-        return;
-    }
-
-    if (!currentIntention || currentIntention.status === 'failed' || currentIntention.status === 'done') {
-        const hold = createIntention(
-            'wait',
-            null,
-            beliefs.me.x !== null && beliefs.me.y !== null
-                ? { x: Math.round(beliefs.me.x), y: Math.round(beliefs.me.y) }
-                : null,
-            0
-        );
-        hold._handoffRetry = true;
-        hold._handoffRetryPeerId = handoff.peerId;
-        commitNewIntention(hold);
-    } else if (!isHandoffRetryWait(currentIntention)) {
-        return;
-    }
-
-    currentIntention.createdAt = Date.now();
-
-    console.log(`[intentionRevision] Proposing handoff to ${handoff.peerId}`);
-    requestHandoff(handoff.meetTile, handoff.peerId)
-        .then((res) => {
-            if (res.accepted) {
-                if (currentIntention && !isHandoffRetryWait(currentIntention)) return;
-                console.log(`[intentionRevision] Handoff accepted → go_handoff`);
-                const intention = createIntention(
-                    'go_handoff', null, handoff.meetTile, 0
-                );
-                intention._peerStagingTile = res.stagingTile ?? null;
-                intention._peerId = handoff.peerId;
-                intention._peerCarryBefore =
-                    getPeers().find((p) => p.id === handoff.peerId)?.carrying ?? 0;
-                commitNewIntention(intention);
-                return;
-            }
-
-            if (res.reason === 'busy') {
-                if (currentIntention && !isHandoffRetryWait(currentIntention)) return;
-                const delay =
-                    attempt < HANDOFF_BUSY_FAST_RETRIES
-                        ? HANDOFF_BUSY_RETRY_MS
-                        : HANDOFF_BUSY_SLOW_RETRY_MS;
-                console.log(
-                    `[intentionRevision] Handoff peer busy → retry ` +
-                    `${attempt + 1}${attempt >= HANDOFF_BUSY_FAST_RETRIES ? ' (slow)' : `/${HANDOFF_BUSY_FAST_RETRIES}`}`
-                );
-                setTimeout(
-                    () => proposeHandoffWithBusyRetry(handoff, attempt + 1),
-                    delay
-                );
-                return;
-            }
-
-            abandonHandoffRetryWait();
-            requestRevision(true);
-        })
-        .catch(() => {
-            abandonHandoffRetryWait();
-            requestRevision(true);
-        });
-}
-
+// True when an intention is the placeholder `wait` held while a handoff request
+// is in flight (see proposeHandoff in multi/coordinator.js). Such waits are
+// protected from preemption in revise().
 function isHandoffRetryWait(intention) {
     return intention?.type === 'wait' && intention._handoffRetry === true;
-}
-
-// Clears a stuck _handoffRetry wait so revise() can produce a fresh intention.
-// Called when a handoff attempt fails or times out, since requestRevision(true)
-// alone cannot replace an already-active wait (revise skips the comparison block
-// when force=true and an active intention exists).
-function abandonHandoffRetryWait() {
-    if (isHandoffRetryWait(currentIntention)) {
-        currentIntention.status = 'failed';
-        broadcastIntention(currentIntention);
-        currentIntention = null;
-    }
 }
 
 // Helper used internally whenever currentIntention is replaced.
@@ -248,6 +176,37 @@ function commitNewIntention(intention) {
     }
 }
 
+// Intention-control primitives exposed to the multi layer
+//
+// The handoff protocol (multi/coordinator.js) drives the intention lifecycle
+// from outside the BDI core. These small wrappers give it the exact operations
+// it needs without exposing the module-private `currentIntention` binding, and
+// keep the bdi → multi dependency from ever being created (multi receives them
+// via initCoordinator).
+
+/**
+ * Commits a new intention, replacing the current one WITHOUT marking the
+ * previous one failed (used by the handoff flow when the prior intention was
+ * already a completed/failed/placeholder hold).
+ *
+ * @param {Intention} intention
+ */
+export function commitIntention(intention) {
+    commitNewIntention(intention);
+}
+
+/**
+ * Fails, broadcasts and clears the current intention so the next revise() can
+ * produce a fresh one. Used to abandon a stale handoff-retry wait — a forced
+ * revision alone cannot replace an already-active wait.
+ */
+export function clearIntention() {
+    if (!currentIntention) return;
+    currentIntention.status = 'failed';
+    broadcastIntention(currentIntention);
+    currentIntention = null;
+}
+
 // Validity check.
 
 /**
@@ -281,7 +240,9 @@ function isIntentionStillValid(intention) {
             if (beliefs.me.x !== null && beliefs.me.y !== null) {
                 const myPos = { x: beliefs.me.x, y: beliefs.me.y };
                 if (shouldYieldParcel(intention.parcelId, myPos)) {
-                    console.log(`[intentionRevision] Parcel ${intention.parcelId} yielded to closer peer`);
+                    console.log(
+                        `[intentionRevision] Parcel ${intention.parcelId} yielded to closer peer`
+                    );
                     return false;
                 }
             }
@@ -307,7 +268,9 @@ function isIntentionStillValid(intention) {
             return true;
 
         default:
-            console.warn(`[intentionRevision] Unknown intention type: ${intention.type} — keeping active`);
+            console.warn(
+                `[intentionRevision] Unknown intention type: ${intention.type} — keeping active`
+            );
             return true;
     }
 }
@@ -373,7 +336,10 @@ export async function revise(force = false) {
             beliefs.me.y !== null
         ) {
             const localPickUp = findBestLocalPickUp({ x: beliefs.me.x, y: beliefs.me.y });
-            if (localPickUp && (!candidate || localPickUp.score > candidate.score || candidate.type === 'go_to')) {
+            if (
+                localPickUp &&
+                (!candidate || localPickUp.score > candidate.score || candidate.type === 'go_to')
+            ) {
                 candidate = localPickUp;
             }
         }
@@ -381,8 +347,7 @@ export async function revise(force = false) {
 
         // 'wait' is a last-resort intention with no progress to protect:
         // replace it with any non-wait candidate, bypassing the threshold.
-        const escapeWait =
-            currentIntention.type === 'wait' && candidate.type !== 'wait';
+        const escapeWait = currentIntention.type === 'wait' && candidate.type !== 'wait';
 
         // Safety net: a wait older than WAIT_MAX_AGE_MS forces a fresh deliberation.
         const waitExpired =
@@ -391,10 +356,8 @@ export async function revise(force = false) {
 
         const pickupBeatsLowValueRoaming =
             candidate.type === 'go_pick_up' &&
-            (
-                currentIntention.type === 'explore' ||
-                (currentIntention.type === 'go_to' && !currentIntention.parcelId)
-            ) &&
+            (currentIntention.type === 'explore' ||
+                (currentIntention.type === 'go_to' && !currentIntention.parcelId)) &&
             candidate.score > 0;
 
         // Don't let a zero-score explore/roam interrupt an active pickup, even if
@@ -403,8 +366,7 @@ export async function revise(force = false) {
         // go_pick_up → explore (completes instantly) → go_pick_up → ...
         const exploringBeatsPickup =
             currentIntention.type === 'go_pick_up' &&
-            (candidate.type === 'explore' ||
-             (candidate.type === 'go_to' && !candidate.parcelId)) &&
+            (candidate.type === 'explore' || (candidate.type === 'go_to' && !candidate.parcelId)) &&
             candidate.score <= 0;
 
         // Handoff intentions represent a bilateral commitment: A has already
@@ -416,14 +378,21 @@ export async function revise(force = false) {
             isHandoffRetryWait(currentIntention);
 
         const improvement = candidate.score - currentIntention.score;
-        if ( !exploringBeatsPickup && !handoffProtected && (escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD) ) {
+        if (
+            !exploringBeatsPickup &&
+            !handoffProtected &&
+            (escapeWait ||
+                waitExpired ||
+                pickupBeatsLowValueRoaming ||
+                improvement > IMPROVEMENT_THRESHOLD)
+        ) {
             const reason = escapeWait
                 ? 'escaping wait'
                 : waitExpired
-                    ? 'wait expired'
-                    : pickupBeatsLowValueRoaming
-                        ? 'pickup beats roaming'
-                        : `+${improvement}`;
+                  ? 'wait expired'
+                  : pickupBeatsLowValueRoaming
+                    ? 'pickup beats roaming'
+                    : `+${improvement}`;
             console.log(`[intentionRevision] Replacing intention (${reason})`);
             currentIntention.status = 'failed';
             broadcastIntention(currentIntention);
@@ -449,8 +418,8 @@ function checkStuck() {
     if (currentIntention.type === 'wait') return;
     if (!currentIntention.targetPos) return;
 
-    const x  = Number.isFinite(beliefs.me.x) ? Math.round(beliefs.me.x) : -1;
-    const y  = Number.isFinite(beliefs.me.y) ? Math.round(beliefs.me.y) : -1;
+    const x = Number.isFinite(beliefs.me.x) ? Math.round(beliefs.me.x) : -1;
+    const y = Number.isFinite(beliefs.me.y) ? Math.round(beliefs.me.y) : -1;
     const tx = currentIntention.targetPos.x;
     const ty = currentIntention.targetPos.y;
 
@@ -478,7 +447,7 @@ function checkStuck() {
     if (staleMs >= STUCK_TIMEOUT_MS) {
         console.log(
             `[intentionRevision] Stuck: no progress toward (${tx},${ty}) ` +
-            `for ${staleMs}ms (bestDist=${_stuckWatchdog.bestDist}) → forcing re-deliberation`
+                `for ${staleMs}ms (bestDist=${_stuckWatchdog.bestDist}) → forcing re-deliberation`
         );
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         if (currentIntention) {
@@ -494,118 +463,6 @@ function checkStuck() {
 export function onSensingRevise() {
     checkStuck();
     requestRevision(false);
-}
-
-/**
- * Registers the handler for incoming ZONE_ASSIGN messages.
- *
- * Converts a zone assignment into a go_to intention toward the zone center.
- * Accepted only if the assignment score exceeds the current intention score
- * by at least IMPROVEMENT_THRESHOLD, so the LLM cannot interrupt a
- * high-value pickup mid-execution.
- *
- * Call once from multiagent_a.js / multiagent_b.js after initCoordinator().
- */
-export function initZoneAssignHandler() {
-    onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {
-        const { targetId, center, score: payloadScore, totalReward } = envelope.payload ?? {};
-
-        // Ignore assignments meant for the other agent.
-        if (targetId !== beliefs.me.id) return;
-        if (!center) return;
-
-        const score = payloadScore ?? totalReward ?? 0;
-
-        const currentScore = currentIntention?.score ?? 0;
-        const currentType = currentIntention?.type ?? null;
-
-        const isLowValueIntention =
-            !currentIntention ||
-            currentType === 'wait' ||
-            currentType === 'explore' ||
-            (currentType === 'go_to' && currentScore <= 0);
-
-        const hasImportantIntention =
-            currentIntention &&
-            currentIntention.status === 'active' &&
-            !isLowValueIntention;
-
-        if (
-            currentIntention?.targetPos &&
-            manhattanDistance(currentIntention.targetPos, center) <= SAME_ZONE_TARGET_DISTANCE
-        ) {
-            console.log(
-                `[intentionRevision] Zone assign ignored: target already close ` +
-                `current=(${currentIntention.targetPos.x},${currentIntention.targetPos.y}) ` +
-                `assigned=(${center.x},${center.y})`
-            );
-            return;
-        }
-
-        const myPos =
-        beliefs.me.x !== null && beliefs.me.y !== null
-            ? { x: beliefs.me.x, y: beliefs.me.y }
-            : null;
-
-        // Resolve the navigation target: use the assigned centre if reachable,
-        // otherwise find the nearest reachable tile in the zone (spawner first,
-        // then the closest walkable tile to the geometric centre).
-        let target = center;
-        if (myPos && !aStar(myPos, target, { avoidAgents: false })) {
-            const zoneName = envelope.payload?.zone ?? null;
-            const alternative = zoneName
-                ? getNearestReachableZoneTarget(zoneName, myPos)
-                : null;
-            if (alternative && aStar(myPos, alternative, { avoidAgents: false })) {
-                console.log(
-                    `[intentionRevision] Zone centre unreachable (${center.x},${center.y})` +
-                    ` → nearest reachable (${alternative.x},${alternative.y})`
-                );
-                target = alternative;
-            } else {
-                console.log(
-                    `[intentionRevision] Zone assign ignored: no reachable target in zone` +
-                    ` (centre=(${center.x},${center.y}))`
-                );
-                return;
-            }
-        }
-
-        if (
-            hasImportantIntention &&
-            score - currentScore <= IMPROVEMENT_THRESHOLD
-        ) {
-            console.log(
-                `[intentionRevision] Zone assign ignored: ` +
-                `assignment=${score.toFixed(1)} ` +
-                `current=${currentScore.toFixed(1)} ` +
-                `threshold=${IMPROVEMENT_THRESHOLD}`
-            );
-            return;
-        }
-
-        // Persist the zone so every future deliberation cycle stays within it,
-        // not just the one-shot go_to waypoint.
-        if (envelope.payload?.zone) setZoneConstraint(envelope.payload.zone);
-
-        if (envelope.payload?.forceNavigation === false) {
-            console.log(
-                `[intentionRevision] Zone assign refreshed constraint only: ${envelope.payload.zone}`
-            );
-            return;
-        }
-
-        const intention = createIntention('go_to', null, target, score);
-        console.log(
-            `[intentionRevision] Zone assign accepted → go_to (${target.x},${target.y}) score=${score}`
-        );
-
-        if (currentIntention) {
-            currentIntention.status = 'failed';
-            broadcastIntention(currentIntention);
-        }
-        commitNewIntention(intention);
-    });
 }
 
 /**

@@ -27,10 +27,7 @@ import {
     getBestIntention,
 } from '../bdi/deliberation.js';
 import { llmClient, llmMemory } from './llmAgent.js';
-import {
-    pickupValue,
-    deliveryValue,
-} from '../bdi/scoring.js';
+import { pickupValue, deliveryValue } from '../bdi/scoring.js';
 
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 
@@ -246,11 +243,15 @@ export function buildStateSnapshot(me) {
                     : null;
                 const score = deliveryTile ? pickupValue(p, me, deliveryTile) : -Infinity;
                 const estimatedRewardAtDelivery = deliveryTile
-                    ? Math.max(0, p.reward - Math.floor(
-                        ((distanceToParcel + (distanceToDelivery ?? 0)) *
-                            (beliefs.config?.MS_PER_STEP ?? 500)) /
-                            (beliefs.config?.PARCEL_DECADING_INTERVAL ?? Infinity)
-                    ))
+                    ? Math.max(
+                          0,
+                          p.reward -
+                              Math.floor(
+                                  ((distanceToParcel + (distanceToDelivery ?? 0)) *
+                                      (beliefs.config?.MS_PER_STEP ?? 500)) /
+                                      (beliefs.config?.PARCEL_DECADING_INTERVAL ?? Infinity)
+                              )
+                      )
                     : 0;
                 return {
                     id: p.id,
@@ -297,9 +298,10 @@ export async function generateBestIntention() {
     const me = { x: beliefs.me.x, y: beliefs.me.y };
     const snapshot = buildStateSnapshot(me);
 
-    const constraintBlock = llmMemory.constraints.length > 0
-        ? `Constraints (NEVER violate these):\n${llmMemory.constraints.map((c) => `- ${c}`).join('\n')}\n\n`
-        : '';
+    const constraintBlock =
+        llmMemory.constraints.length > 0
+            ? `Constraints (NEVER violate these):\n${llmMemory.constraints.map((c) => `- ${c}`).join('\n')}\n\n`
+            : '';
 
     const userContent =
         constraintBlock +

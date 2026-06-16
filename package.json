@@ -13,6 +13,7 @@
 
     "single": "node src/single.js",
     "single:llm": "USE_LLM=true node src/single.js",
+    "single:llm:policy": "USE_LLM_POLICY=true node src/single.js",
     "pddl": "node src/pddl.js",
 
     "planner:build": "cd planning-as-a-service/server && DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t paas:latest .",
@@ -21,24 +22,8 @@
     "planner:logs": "docker compose -f docker-compose.planner.yml logs -f web worker",
 
     "format": "prettier --write \"**/*.js\"",
-    "format:check": "prettier --check \"**/*.js\"",
-    "test:scoring": "node scripts/test-scoring.mjs",
-    "analyze:logs": "node scripts/analyze-logs.mjs",
-    "trial": "node scripts/run-trial.mjs",
-    "trial:two": "node scripts/run-trial-two-agents.mjs",
-    "suite": "node scripts/run-map-suite.mjs",
-    "send-msg": "node scripts/send-msg.mjs",
-    "llm:check": "node scripts/check-llm.mjs",
+    "format:check": "prettier --check \"**/*.js\""
 
-    "test": "node --test test/01-core-bdi.test.mjs test/02-single-agent.test.mjs test/03-two-agents.test.mjs test/04-msg-protocol.test.mjs test/05-llm-mocked.test.mjs",
-    "test:l1": "node --test test/01-core-bdi.test.mjs",
-    "test:l2": "node --test test/02-single-agent.test.mjs",
-    "test:l3": "node --test test/03-two-agents.test.mjs",
-    "test:l4": "node --test test/04-msg-protocol.test.mjs",
-    "test:l5": "node --test test/05-llm-mocked.test.mjs",
-    "test:l6": "node --test test/06-llm-smoke.test.mjs",
-    "test:l7": "node --test test/07-integration.test.mjs",
-    "test:all": "node --test test/01-core-bdi.test.mjs test/02-single-agent.test.mjs test/03-two-agents.test.mjs test/04-msg-protocol.test.mjs test/05-llm-mocked.test.mjs test/06-llm-smoke.test.mjs test/07-integration.test.mjs"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "^1.3.5",
