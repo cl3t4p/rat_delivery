@@ -18,6 +18,7 @@ import {
     spawnersAreSparse,
     spawnerSparseness,
     createIntention,
+    setZoneConstraint,
 } from '../src/bdi/deliberation.js';
 import { revise, getCurrentIntention, notifyIntentionDone, notifyActionFailed } from '../src/bdi/intentionRevision.js';
 
@@ -89,6 +90,33 @@ test('getBestIntention – go_deliver when carrying parcels', () => {
     assert.deepEqual(intention.targetPos, { x: 4, y: 0 });
 });
 
+test('getBestIntention – skips carrying detour to parcel under another agent', () => {
+    makeGrid(5, 1, { '0,0': '1', '1,0': '3', '2,0': '3', '3,0': '3', '4,0': '2' });
+    setMe(1, 0);
+    beliefs.me.id = 'me';
+    beliefs.me.carrying = ['carried'];
+    beliefs.parcels.set('carried', {
+        id: 'carried',
+        x: 1,
+        y: 0,
+        reward: 20,
+        carriedBy: 'me',
+        lastSeen: Date.now(),
+    });
+    addParcel('blocked-detour', 0, 0, 50);
+    beliefs.agents.set('teammate', {
+        id: 'teammate',
+        x: 0,
+        y: 0,
+        lastSeen: Date.now(),
+        stale: false,
+    });
+
+    const intention = getBestIntention();
+    assert.equal(intention.type, 'go_deliver');
+    assert.deepEqual(intention.targetPos, { x: 4, y: 0 });
+});
+
 // ── getBestIntention – go_pick_up ─────────────────────────────────────────────
 
 test('getBestIntention – go_pick_up when free parcel available', () => {
@@ -112,6 +140,23 @@ test('getBestIntention – explore or wait when no parcels', () => {
         intention.type === 'explore' || intention.type === 'go_to' || intention.type === 'wait',
         `unexpected type: ${intention.type}`
     );
+});
+
+test('getBestIntention – steps off delivery tile when zone has no spawner (relay receiver)', () => {
+    const corridor = {
+        '0,0': '1',
+        '19,0': '2',
+    };
+    for (let x = 1; x < 19; x++) corridor[`${x},0`] = '3';
+    makeGrid(20, 1, corridor);
+    setMe(19, 0);
+    setZoneConstraint('topRight');
+
+    const intention = getBestIntention();
+    // Agent is on the delivery tile with no in-zone spawner: should step off to
+    // the nearest non-delivery in-zone tile (x=18) rather than crossing to x=0.
+    assert.equal(intention.type, 'go_to');
+    assert.deepEqual(intention.targetPos, { x: 18, y: 0 });
 });
 
 // ── getBestIntention – skips carried-by-others parcels ───────────────────────

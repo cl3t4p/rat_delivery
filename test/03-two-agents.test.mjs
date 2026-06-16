@@ -19,6 +19,7 @@ import {
     requestHandoff,
     resetCoordinatorForTests,
     getNearestReachableZoneTarget,
+    consumeYieldRequest,
 } from '../src/multi/coordinator.js';
 import { getCurrentIntention, forceIntention, resetIntentionForTests } from '../src/bdi/intentionRevision.js';
 import { createIntention } from '../src/bdi/deliberation.js';
@@ -172,6 +173,56 @@ test('shouldYieldParcel – false when we are closer to the parcel', () => {
     assert.equal(shouldYield, false);
 });
 
+test('right-of-way – empty agent does not retreat into delivery endpoint', () => {
+    const corridor = { '0,0': '1', '19,0': '2' };
+    for (let x = 1; x < 19; x++) corridor[`${x},0`] = '3';
+    makeGrid(20, 1, corridor);
+    setMe(18, 0);
+    beliefs.me.carrying = [];
+
+    mockSocket.simulateMsg('agent-b', 'Bob', {
+        from: 'agent-b',
+        to: 'broadcast',
+        type: MSG_TYPE.BLOCKED_AT,
+        ts: Date.now(),
+        payload: { x: 18, y: 0, direction: 'right' },
+    });
+
+    assert.equal(consumeYieldRequest(), null);
+});
+
+test('right-of-way – loaded agent keeps priority over empty requester', () => {
+    makeGrid(5, 1, { '0,0': '1', '4,0': '2' });
+    setMe(2, 0);
+    beliefs.me.carrying = ['p1'];
+
+    mockSocket.simulateMsg('agent-b', 'Bob', {
+        from: 'agent-b',
+        to: 'broadcast',
+        type: MSG_TYPE.BLOCKED_AT,
+        ts: Date.now(),
+        payload: { x: 2, y: 0, direction: 'right', carrying: 0 },
+    });
+
+    assert.equal(consumeYieldRequest(), null);
+});
+
+test('right-of-way – empty agent yields to loaded requester in a corridor', () => {
+    makeGrid(5, 1, { '0,0': '1', '4,0': '2' });
+    setMe(2, 0);
+    beliefs.me.carrying = [];
+
+    mockSocket.simulateMsg('agent-b', 'Bob', {
+        from: 'agent-b',
+        to: 'broadcast',
+        type: MSG_TYPE.BLOCKED_AT,
+        ts: Date.now(),
+        payload: { x: 2, y: 0, direction: 'right', carrying: 1 },
+    });
+
+    assert.equal(consumeYieldRequest(), 'right');
+});
+
 // ── evaluateHandoff ───────────────────────────────────────────────────────────
 
 test('evaluateHandoff – null when carrying 0 parcels', () => {
@@ -241,6 +292,7 @@ test('handoff request – receiver accepts and forces go_handoff_receive', async
     assert.equal(reply.msg.type, MSG_TYPE.RESPONSE);
     assert.equal(reply.msg.payload.requestId, 12345);
     assert.equal(reply.msg.payload.accepted, true);
+    assert.deepEqual(reply.msg.payload.stagingTile, { x: 3, y: 0 });
 
     const intention = getCurrentIntention();
     assert.equal(intention.type, 'go_handoff_receive');
@@ -308,11 +360,17 @@ test('requestHandoff – resolves when peer accepts correlated response', async 
             requestId: sent.msg.ts,
             accepted: true,
             reason: 'ok',
+            stagingTile: { x: 3, y: 0 },
         },
     });
 
     const result = await pending;
-    assert.deepEqual(result, { accepted: true, meetTile: { x: 2, y: 0 } });
+    assert.deepEqual(result, {
+        accepted: true,
+        reason: 'ok',
+        meetTile: { x: 2, y: 0 },
+        stagingTile: { x: 3, y: 0 },
+    });
 });
 
 // ── getNearestReachableZoneTarget ─────────────────────────────────────────────

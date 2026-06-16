@@ -20,6 +20,7 @@ import {
     unblacklistCell,
     isBlacklisted,
     suppressClaimedParcel,
+    suppressHandoffDrop,
 } from '../src/bdi/beliefs.js';
 import { isWalkable, canEnter } from '../src/bdi/grid.js';
 import { getZone, getMapBounds, invalidateBounds } from '../src/shared/zones.js';
@@ -176,6 +177,33 @@ test('suppressClaimedParcel – removes parcel from beliefs', () => {
     beliefs.parcels.set('s1', { id: 's1', x: 0, y: 0, reward: 5, carriedBy: null, lastSeen: Date.now() });
     suppressClaimedParcel('s1', 60000);
     assert.ok(!beliefs.parcels.has('s1'));
+});
+
+test('suppressHandoffDrop – ignores own dropped parcel while it is on the ground', () => {
+    beliefs.me.id = 'me';
+    suppressHandoffDrop('h1', 60000);
+
+    updateBeliefs(
+        [{ id: 'h1', x: 1, y: 0, reward: 30, carriedBy: null }],
+        [],
+        []
+    );
+
+    assert.ok(!beliefs.parcels.has('h1'));
+});
+
+test('suppressHandoffDrop – allows parcel again if I am carrying it', () => {
+    beliefs.me.id = 'me';
+    suppressHandoffDrop('h2', 60000);
+
+    updateBeliefs(
+        [{ id: 'h2', x: 1, y: 0, reward: 30, carriedBy: 'me' }],
+        [],
+        []
+    );
+
+    assert.ok(beliefs.parcels.has('h2'));
+    assert.deepEqual(beliefs.me.carrying, ['h2']);
 });
 
 // ── isWalkable / canEnter ─────────────────────────────────────────────────────

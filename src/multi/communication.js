@@ -124,18 +124,52 @@ export async function sendDirect(toId, type, payload) {
 }
 
 /**
+ * Prepares a directed envelope synchronously and returns its ts plus a send
+ * function. Use this when you need to register a response handler BEFORE the
+ * message is sent — calling sendDirect and registering in its .then() creates
+ * a race where a fast peer response can arrive before the handler is stored.
+ *
+ * @param {string} toId
+ * @param {MsgType} type
+ * @param {object} payload
+ * @returns {{ ts: number, send: () => Promise<number|null> }}
+ */
+export function prepareDirect(toId, type, payload) {
+    const envelope = makeEnvelope(type, payload, toId);
+    return {
+        ts: envelope.ts,
+        send: async () => {
+            if (!state.socket) {
+                console.warn('[comm] prepareDirect: socket not init; dropping', type);
+                return null;
+            }
+            logSend(envelope);
+            try {
+                await state.socket.emitSay(toId, envelope);
+                return envelope.ts;
+            } catch (err) {
+                logSendError(type, err);
+                return null;
+            }
+        },
+    };
+}
+
+/**
  * Sends a `response` envelope correlated to a previously received `request`.
  *
  * @param {Envelope} requestEnvelope - The envelope that triggered this reply.
  * @param {boolean} accepted
- * @param {'ok'|'already_carrying'|'out_of_range'|'unknown'} [reason]
+ * @param {'ok'|'already_carrying'|'out_of_range'|'unknown'|'busy'} [reason]
+ * @param {object} [extraPayload]
  * @returns {Promise<any>}
  */
-export async function replyTo(requestEnvelope, accepted, reason = 'ok') {
+export async function replyTo(requestEnvelope, accepted, reason = 'ok', extraPayload = {}) {
     const payload = {
         requestId: requestEnvelope.ts,
         accepted,
         reason,
+        ...extraPayload,
     };
     const targetId = requestEnvelope.from;
     if (targetId) {

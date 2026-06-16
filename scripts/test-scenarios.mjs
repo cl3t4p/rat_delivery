@@ -16,7 +16,13 @@
  */
 
 import assert from 'node:assert/strict';
-import { beliefs, suppressClaimedParcel, updateBeliefs } from '../src/bdi/beliefs.js';
+import {
+    beliefs,
+    clearParcelSuppressions,
+    suppressClaimedParcel,
+    suppressHandoffDrop,
+    updateBeliefs,
+} from '../src/bdi/beliefs.js';
 import { invalidateBounds } from '../src/shared/zones.js';
 import { getBestIntention, resetRoamTarget } from '../src/bdi/deliberation.js';
 import { aStar } from '../src/bdi/pathfinding.js';
@@ -102,6 +108,7 @@ function reset() {
     beliefs.config.MS_PER_STEP  = 500;
     beliefs.config.PARCEL_FORGET_MS           = 5000;
     beliefs.config._decayAccumulatedMs        = 0;
+    clearParcelSuppressions({ includeHandoffDrops: true });
     invalidateBounds();
     resetRoamTarget();
 }
@@ -367,7 +374,7 @@ test('handoff drop suppression → do not re-pick dropped parcel immediately', (
     beliefs.me.id = 'me';
     beliefs.config.PARCEL_DECADING_INTERVAL = null;
 
-    suppressClaimedParcel('handoff-dropped-test');
+    suppressHandoffDrop('handoff-dropped-test');
     updateBeliefs([
         {
             id: 'handoff-dropped-test',
