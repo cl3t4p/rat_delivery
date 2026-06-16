@@ -10,13 +10,29 @@
 import { beliefs, decayParcelsReward, clockEventToMs } from '../bdi/beliefs.js';
 import { getCurrentIntention } from '../bdi/intentionRevision.js';
 
+
+const BLACKLIST_LOG = (process.env.BLACKLIST_LOG ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+/** True if a console.log line should be suppressed (starts with a blacklisted prefix). */
+function isLogBlacklisted(...args) {
+    const first = args[0];
+    if (typeof first !== 'string') return false;
+    return BLACKLIST_LOG.some((prefix) => first.startsWith(prefix));
+}
+
 /** Prepend HH:MM:SS.mmm to every console line so logs can be correlated by time. */
 export function installTimestampedConsole() {
     const _log = console.log.bind(console);
     const _warn = console.warn.bind(console);
     const _error = console.error.bind(console);
     const ts = () => `[${new Date().toISOString().slice(11, 23)}]`;
-    console.log = (...a) => _log(ts(), ...a);
+    console.log = (...a) => {
+        if (isLogBlacklisted(...a)) return; // muted component
+        _log(ts(), ...a);
+    };
     console.warn = (...a) => _warn(ts(), ...a);
     console.error = (...a) => _error(ts(), ...a);
 }
