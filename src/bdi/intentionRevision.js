@@ -172,13 +172,29 @@ function proposeHandoffWithBusyRetry(handoff, attempt = 0) {
                 return;
             }
 
+            abandonHandoffRetryWait();
             requestRevision(true);
         })
-        .catch(() => requestRevision(true));
+        .catch(() => {
+            abandonHandoffRetryWait();
+            requestRevision(true);
+        });
 }
 
 function isHandoffRetryWait(intention) {
     return intention?.type === 'wait' && intention._handoffRetry === true;
+}
+
+// Clears a stuck _handoffRetry wait so revise() can produce a fresh intention.
+// Called when a handoff attempt fails or times out, since requestRevision(true)
+// alone cannot replace an already-active wait (revise skips the comparison block
+// when force=true and an active intention exists).
+function abandonHandoffRetryWait() {
+    if (isHandoffRetryWait(currentIntention)) {
+        currentIntention.status = 'failed';
+        broadcastIntention(currentIntention);
+        currentIntention = null;
+    }
 }
 
 // Helper used internally whenever currentIntention is replaced.

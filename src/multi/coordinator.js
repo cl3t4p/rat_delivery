@@ -13,7 +13,7 @@
  */
 
 import { beliefs, manhattanDistance, canEnter, isWalkable, suppressClaimedParcel, clearParcelSuppressions } from '../bdi/beliefs.js';
-import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast } from './communication.js';
+import { MSG_TYPE, onMessage, replyTo, sendDirect, sendBroadcast, prepareDirect } from './communication.js';
 import { findNearestDeliveryTile, createIntention, setZoneConstraint, findSpawnerTiles } from '../bdi/deliberation.js';
 import { deliveryValue, estimatedRewardAtDelivery } from '../bdi/scoring.js';
 import { aStar } from '../bdi/pathfinding.js';
@@ -1034,25 +1034,34 @@ export function requestTakeover(parcelId) {
 
     return new Promise((resolve, reject) => {
         const payload = { action: 'take_parcel', parcelId };
-        sendDirect(reservation.peerId, MSG_TYPE.REQUEST, payload)
-            .then((ts) => {
-                if (ts === null) { reject(new Error('send_failed')); return; }
-                const timer = setTimeout(() => {
-                    state.pendingRequests.delete(ts);
-                    reject(new Error('takeover_timeout'));
-                }, REQUEST_TIMEOUT_MS);
+        // Register the handler BEFORE sending so a fast peer response is never dropped.
+        const { ts, send } = prepareDirect(reservation.peerId, MSG_TYPE.REQUEST, payload);
+        const timer = setTimeout(() => {
+            state.pendingRequests.delete(ts);
+            reject(new Error('takeover_timeout'));
+        }, REQUEST_TIMEOUT_MS);
 
-                state.pendingRequests.set(ts, {
-                    resolve,
-                    reject,
-                    timer,
-                    parcelId,
-                    peerId: reservation.peerId,
-                });
+        state.pendingRequests.set(ts, {
+            resolve,
+            reject,
+            timer,
+            parcelId,
+            peerId: reservation.peerId,
+        });
 
-                console.log(`[coord] → request take_parcel ${parcelId} to=${reservation.peerId} ts=${ts}`);
-            })
-            .catch(reject);
+        console.log(`[coord] → request take_parcel ${parcelId} to=${reservation.peerId} ts=${ts}`);
+
+        send().then((result) => {
+            if (result === null) {
+                clearTimeout(timer);
+                state.pendingRequests.delete(ts);
+                reject(new Error('send_failed'));
+            }
+        }).catch((err) => {
+            clearTimeout(timer);
+            state.pendingRequests.delete(ts);
+            reject(err);
+        });
     });
 }
 
@@ -1068,30 +1077,42 @@ export function requestTakeover(parcelId) {
  */
 export function requestHandoff(meetTile, peerId) {
     return new Promise((resolve, reject) => {
-        sendDirect(peerId, MSG_TYPE.HANDOFF_REQUEST, { meetTile })
-            .then((ts) => {
-                if (ts === null) { reject(new Error('send_failed')); return; }
-                const timer = setTimeout(() => {
-                    state.pendingRequests.delete(ts);
-                    reject(new Error('handoff_timeout'));
-                }, REQUEST_TIMEOUT_MS);
+        // Register the handler BEFORE sending so a fast peer response is never
+        // dropped. The old pattern (register in sendDirect's .then) had a race:
+        // if the peer responded before the .then ran, handleResponse found no
+        // pending entry and silently discarded the reply, leaving the sender stuck.
+        const { ts, send } = prepareDirect(peerId, MSG_TYPE.HANDOFF_REQUEST, { meetTile });
+        const timer = setTimeout(() => {
+            state.pendingRequests.delete(ts);
+            reject(new Error('handoff_timeout'));
+        }, REQUEST_TIMEOUT_MS);
 
-                state.pendingRequests.set(ts, {
-                    resolve: (res) => {
-                        clearTimeout(timer);
-                        resolve({
-                            accepted: res.accepted,
-                            reason: res.reason ?? 'ok',
-                            meetTile,
-                            stagingTile: res.stagingTile ?? null,
-                        });
-                    },
-                    reject,
-                    timer,
-                    peerId,
+        state.pendingRequests.set(ts, {
+            resolve: (res) => {
+                clearTimeout(timer);
+                resolve({
+                    accepted: res.accepted,
+                    reason: res.reason ?? 'ok',
+                    meetTile,
+                    stagingTile: res.stagingTile ?? null,
                 });
-            })
-            .catch(reject);
+            },
+            reject,
+            timer,
+            peerId,
+        });
+
+        send().then((result) => {
+            if (result === null) {
+                clearTimeout(timer);
+                state.pendingRequests.delete(ts);
+                reject(new Error('send_failed'));
+            }
+        }).catch((err) => {
+            clearTimeout(timer);
+            state.pendingRequests.delete(ts);
+            reject(err);
+        });
     });
 }
 
