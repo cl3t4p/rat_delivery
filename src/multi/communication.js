@@ -39,6 +39,7 @@ const state = {
 };
 
 let _lastSendErrorLog = 0;
+let _msgSeq = 0;
 
 // Initialization
 
@@ -225,7 +226,7 @@ function makeEnvelope(type, payload, to) {
         from: state.selfIdProvider() ?? null,
         to,
         type,
-        ts: Date.now(),
+        ts: Date.now() + (++_msgSeq % 1000) / 1000,
         payload,
     };
 }

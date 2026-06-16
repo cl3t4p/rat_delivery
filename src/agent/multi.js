@@ -35,7 +35,7 @@ import {
     startZoneAssignmentLoop,
     setCoordinatorRole,
     initZoneAssignHandler,
-} from '../multi/coordinator.js';
+} from '../multi/coordination/coordinator.js';
 import { enableNotifier, tickBeliefDelta } from '../multi/notifier.js';
 import { installMultiAgent } from '../multi/helper.js';
 

@@ -17,13 +17,12 @@ import {
     requestTakeover,
     evaluateHandoff,
     proposeHandoff,
-    requestHandoff,
     tryBlockedDeliveryHandoff,
     runHandoff,
     getNearestReachableZoneTarget,
     consumeYieldRequest,
     getPeers,
-} from './coordinator.js';
+} from './coordination/coordinator.js';
 import { broadcastIntention } from './notifier.js';
 import { sendBroadcast, onMessage } from './communication.js';
 
@@ -37,7 +36,6 @@ export function installMultiAgent() {
         requestTakeover,
         evaluateHandoff,
         proposeHandoff,
-        requestHandoff,
         tryBlockedDeliveryHandoff,
         runHandoff,
         getNearestReachableZoneTarget,

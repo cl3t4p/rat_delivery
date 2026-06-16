@@ -16,10 +16,6 @@ import { MSG_TYPE, sendBroadcast } from './communication.js';
 /** @typedef {import('../shared/types.js').Intention} Intention */
 
 const snapshot = {
-    /** @type {Map<string, { x: number, y: number, reward: number, carriedBy: string|null }>} */
-    parcels: new Map(),
-    /** @type {Map<string, { x: number, y: number, stale: boolean }>} */
-    agents: new Map(),
     me: {
         x: null,
         y: null,
@@ -49,53 +45,6 @@ export function enableNotifier() {
 export function tickBeliefDelta() {
     if (!commsReady) return;
 
-    const parcelsDelta = [];
-    const seenParcelIds = new Set();
-    for (const p of beliefs.parcels.values()) {
-        seenParcelIds.add(p.id);
-        const prev = snapshot.parcels.get(p.id);
-        if (
-            !prev ||
-            prev.x !== p.x ||
-            prev.y !== p.y ||
-            prev.reward !== p.reward ||
-            prev.carriedBy !== (p.carriedBy ?? null)
-        ) {
-            parcelsDelta.push({
-                id: p.id,
-                x: p.x,
-                y: p.y,
-                reward: p.reward,
-                carriedBy: p.carriedBy ?? null,
-            });
-            snapshot.parcels.set(p.id, {
-                x: p.x,
-                y: p.y,
-                reward: p.reward,
-                carriedBy: p.carriedBy ?? null,
-            });
-        }
-    }
-    // Parcels we used to see but no longer do — emit them with reward 0
-    // so peers can drop their cached entry.
-    for (const id of snapshot.parcels.keys()) {
-        if (!seenParcelIds.has(id)) {
-            parcelsDelta.push({ id, x: -1, y: -1, reward: 0, carriedBy: null });
-            snapshot.parcels.delete(id);
-        }
-    }
-
-    const agentsDelta = [];
-    for (const a of beliefs.agents.values()) {
-        if (a.id === beliefs.me.id) continue;
-        const prev = snapshot.agents.get(a.id);
-        const stale = !!a.stale;
-        if (!prev || prev.x !== a.x || prev.y !== a.y || prev.stale !== stale) {
-            agentsDelta.push({ id: a.id, x: a.x, y: a.y, stale });
-            snapshot.agents.set(a.id, { x: a.x, y: a.y, stale });
-        }
-    }
-
     const me = {
         x: beliefs.me.x,
         y: beliefs.me.y,
@@ -107,19 +56,11 @@ export function tickBeliefDelta() {
         snapshot.me.y !== me.y ||
         snapshot.me.carrying !== me.carrying ||
         snapshot.me.score !== me.score;
-    if (meChanged) {
-        snapshot.me = { ...me };
-    }
 
-    if (parcelsDelta.length === 0 && agentsDelta.length === 0 && !meChanged) {
-        return;
-    }
+    if (!meChanged) return;
 
-    sendBroadcast(MSG_TYPE.BELIEF_UPDATE, {
-        parcels: parcelsDelta,
-        agents: agentsDelta,
-        me,
-    });
+    snapshot.me = { ...me };
+    sendBroadcast(MSG_TYPE.BELIEF_UPDATE, { me });
 }
 
 // Intention broadcast
