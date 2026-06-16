@@ -473,6 +473,10 @@ let _isCoordinator = false;
 /** @type {Record<string, string> | null} Last zone assignment sent by the LLM. */
 let _lastAssignment = null;
 let _lastAssignmentAppliedTs = 0;
+// True once any zone assignment has been applied. Before this, the agent has
+// never been coordinated, so a parcel it grabbed greedily while solo must not
+// block the very first zone split (see the selfBusy override below).
+let _hasEverAssigned = false;
 
 /** Timestamp of the last actual LLM call (ms). */
 let _lastLlmCallTs = 0;
@@ -684,9 +688,17 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
         liveIntention?.status === 'active' &&
         (liveIntention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
 
+    // On the very first assignment, override selfBusy as long as the agent is
+    // not yet carrying: a pickup it locked onto while solo (before any
+    // coordination existed) must not outrank the initial zone split, or the
+    // first-to-connect agent keeps chasing an out-of-zone parcel. An in-flight
+    // delivery (carrying > 0) is still respected.
+    const overrideFirstBusy = !_hasEverAssigned && beliefs.me.carrying.length === 0;
+
     const selfZoneName = assignment[selfId];
     if (!selfZoneName) return;
     _lastAssignmentAppliedTs = Date.now();
+    _hasEverAssigned = true;
 
     const selfCenter = getNearestReachableZoneTarget(selfZoneName, selfPos);
     const selfEffectiveScore = Math.max(
@@ -700,7 +712,7 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
     );
 
     setZoneConstraint(selfZoneName);
-    if (forceNavigation && !selfBusy) {
+    if (forceNavigation && (!selfBusy || overrideFirstBusy)) {
         _forceIntention(createIntention('go_to', null, selfCenter, selfEffectiveScore));
     }
 
@@ -766,11 +778,17 @@ async function runHeuristicZoneAssignment() {
         liveIntentionH?.status === 'active' &&
         (liveIntentionH.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
 
+    // First assignment: a parcel grabbed greedily while solo must not block the
+    // initial split (the first-to-connect agent would otherwise keep heading
+    // onto an out-of-zone parcel). An in-flight delivery is still respected.
+    const overrideFirstBusyH = !_hasEverAssigned && beliefs.me.carrying.length === 0;
+
     const selfCenter = getNearestReachableZoneTarget(selfZoneName, selfPos);
     setZoneConstraint(selfZoneName);
-    if (!selfBusyH) {
+    if (!selfBusyH || overrideFirstBusyH) {
         _forceIntention(createIntention('go_to', null, selfCenter, HEURISTIC_SCORE));
     }
+    _hasEverAssigned = true;
 
     const peerCenter = getNearestReachableZoneTarget(peerZoneName, peerPos);
     _lastAssignmentAppliedTs = Date.now();
