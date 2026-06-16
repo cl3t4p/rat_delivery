@@ -18,10 +18,7 @@ import {
     isBlacklisted,
     clearBlacklist,
 } from '../bdi/beliefs.js';
-import {
-    createIntention,
-    getBestIntention,
-} from '../bdi/deliberation.js';
+import { createIntention, getBestIntention } from '../bdi/deliberation.js';
 import {
     findNearestSpawnerTile,
     findNearestDeliveryTile,

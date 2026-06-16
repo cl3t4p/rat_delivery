@@ -19,10 +19,7 @@
  */
 
 import { beliefs, manhattanDistance, isWalkable } from '../bdi/beliefs.js';
-import {
-    createIntention,
-    getBestIntention,
-} from '../bdi/deliberation.js';
+import { createIntention, getBestIntention } from '../bdi/deliberation.js';
 import {
     findNearestSpawnerTile,
     findNearestDeliveryTile,
@@ -350,7 +347,9 @@ export async function generateBestIntention() {
 
         const intention = impl(args, me);
         if (!intention) {
-            console.log(`[intentionAgent] Tool "${name}" not applicable now, using heuristic fallback`);
+            console.log(
+                `[intentionAgent] Tool "${name}" not applicable now, using heuristic fallback`
+            );
             return getBestIntention();
         }
 

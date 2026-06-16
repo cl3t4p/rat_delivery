@@ -9,22 +9,20 @@ import { beliefs } from './beliefs.js';
 import { shouldYieldParcel } from './coordination.js';
 import { deliveryValue, detourValue, estimatedRewardAtDelivery } from './scoring.js';
 import { aStar } from './pathfinding.js';
-import {
-    getZone as _sharedGetZone,
-} from '../shared/zones.js';
+import { getZone as _sharedGetZone } from '../shared/zones.js';
 import {
     _zoneConstraint,
     setZoneConstraint,
     _isInZone,
-    _matchesZoneOpportunity
-} from './components/zone.js'
+    _matchesZoneOpportunity,
+} from './components/zone.js';
 import {
     USE_PDDL,
     sameTile,
     costToReachPath,
     manhattanDistance,
-    findBestReachable
-} from './helper.js'
+    findBestReachable,
+} from './helper.js';
 
 import {
     findSpawnerTiles,
@@ -36,17 +34,12 @@ import {
     findBestDeliveryTile,
     findBestDeliveryPathFrom,
     isTileOccupiedByOtherAgent,
-} from './components/tilesearch.js'
-
-
+} from './components/tilesearch.js';
 
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
 /** @typedef {import('../shared/types.js').IntentionType} IntentionType */
 /** @typedef {import('../shard/types.js').ZoneName} ZoneName*/
-
-
-
 
 // When parcels spawn at least this rarely, camping one spawner is wasteful, so
 // we roam between spawn points instead. Compared against the already-parsed
@@ -57,16 +50,12 @@ const SLOW_SPAWN_THRESHOLD_MS = Number(process.env.SLOW_SPAWN_MS) || 5000;
 // spawners caused by re-scoring the nearest target on every sensing tick.
 const SPAWNER_DWELL_MS = Number(process.env.SPAWNER_DWELL_MS) || 300;
 
-
-
 const DETOUR_NEAR_EXTRA_STEPS = 3;
 const DETOUR_MAX_EXTRA_STEPS = 8;
 const DETOUR_HIGH_EFFECTIVE_GAIN = 10;
 
-
 const MIN_PICKUP_SCORE =
     process.env.MIN_PICKUP_SCORE === undefined ? -Infinity : Number(process.env.MIN_PICKUP_SCORE);
-
 
 const LOCAL_PICKUP_MAX_DISTANCE = Number(process.env.LOCAL_PICKUP_MAX_DISTANCE ?? 3);
 const LOCAL_PICKUP_MIN_REWARD = Number(process.env.LOCAL_PICKUP_MIN_REWARD ?? 15);
@@ -96,8 +85,6 @@ function printLog(key, msg) {
     }
 }
 
-
-
 /** @type {Position|null} */
 let _roamTarget = null;
 let _roamTargetZone = null;
@@ -107,8 +94,6 @@ let _roamArrivalTs = 0;
 // an interruption (e.g. a pickup) instead of restarting at the nearest spawner,
 // which would let the agent double back and never cover the whole loop.
 let _roamIndex = null;
-
-
 
 export function resetRoamTarget() {
     _roamTarget = null;
@@ -177,14 +162,11 @@ export function getBestIntention() {
                     printLog(
                         `deliver:${target.x},${target.y}`,
                         `[deliberation] go_deliver (full) to (${target.x},${target.y}) ` +
-                        `estimatedReward=${dvScore.toFixed(1)}`
-                    )
+                            `estimatedReward=${dvScore.toFixed(1)}`
+                    );
                     return createIntention('go_deliver', null, target, dvScore);
                 }
             }
-
-
-
 
             // If not at full capacity, check whether a detour to pick up an extra parcel is worth more than delivering immediately.
             const target = findBestDeliveryTile(me);
@@ -194,7 +176,7 @@ export function getBestIntention() {
                 if (pickUp) {
                     const parcel = beliefs.parcels.get(pickUp.parcelId);
                     if (parcel) {
-                        //Other agent on the delivery tile 
+                        //Other agent on the delivery tile
                         if (isTileOccupiedByOtherAgent({ x: parcel.x, y: parcel.y })) {
                             printLog(
                                 `detour_occupied:${pickUp.parcelId}`,
@@ -259,9 +241,6 @@ export function getBestIntention() {
         return createIntention('wait', null, null, 0);
     }
 
-
-
-
     // ----------------------------------------------------------------
     // Case 2: free parcels are available, so pick one up.
     // ----------------------------------------------------------------
@@ -280,8 +259,6 @@ export function getBestIntention() {
     }
     if (pickUp) return pickUp;
 
-
-
     // ----------------------------------------------------------------
     // Case 3: nothing else to do, so head for the spawners.
     // ----------------------------------------------------------------
@@ -295,12 +272,10 @@ export function getBestIntention() {
     // has no spawner, stay near the delivery area as a relay receiver — do NOT
     // cross into the peer's zone to reach their spawner. This prevents the
     // deliverer from colliding with the picker on a shared corridor.
-    
-    
+
     const preferredSpawners = _zoneConstraint
         ? allSpawners.filter((s) => _isInZone(s))
         : allSpawners;
-
 
     if (_zoneConstraint && preferredSpawners.length === 0) {
         resetRoamTarget();
@@ -318,12 +293,12 @@ export function getBestIntention() {
                 return createIntention('go_to', null, stepOff, 0);
             }
         }
-        console.log(`[deliberation] No spawner in zone ${_zoneConstraint}, waiting (relay receiver)`);
+        console.log(
+            `[deliberation] No spawner in zone ${_zoneConstraint}, waiting (relay receiver)`
+        );
         return createIntention('wait', null, null, 0);
     }
 
-
-    
     const spawners = preferredSpawners;
 
     // With several spawners that fire rarely or are spread far apart, camping a
@@ -336,7 +311,6 @@ export function getBestIntention() {
         const mx = Math.round(me.x);
         const my = Math.round(me.y);
         const onIdx = spawners.findIndex((s) => s.x === mx && s.y === my);
-
 
         // Drop a stale roam target: it belonged to a different zone, or it is no
         // longer one of the spawners we're patrolling.
@@ -379,11 +353,7 @@ export function getBestIntention() {
             }
 
             // Dwell only while we're sitting on our actual patrol target, so we
-            // observe it for SPAWNER_DWELL_MS before rotating on. Once the advance
-            // section below has picked a different next target, _roamTarget no
-            // longer matches this tile — that means we're leaving, so we must NOT
-            // restart the dwell here, or we'd revert the target and re-dwell every
-            // tick we linger on the tile and never actually move on.
+            // observe it for SPAWNER_DWELL_MS before rotating on.
             if (sameTile(me, _roamTarget)) {
                 const now = Date.now();
                 if (!_roamArrivalTs) _roamArrivalTs = now;
@@ -395,20 +365,11 @@ export function getBestIntention() {
         }
 
         // Pick the next spawner to head for, advancing the rotation pointer.
-        //   - On a spawner (done dwelling): step the cycle one past it. Anchoring
-        //     on onIdx corrects any drift in the stored index.
-        //   - Off-spawner with a live pointer: resume the cycle from where we left
-        //     off, so an interruption (pickup, reset) doesn't snap us to the
-        //     nearest spawner and send us back the way we came.
-        //   - No pointer yet (fresh patrol): enter at the nearest reachable spawner
-        //     to minimise the initial trek.
         if (onIdx !== -1) {
             _roamIndex = nextReachableSpawnerIndex(me, spawners, onIdx + 1);
         } else if (_roamIndex !== null) {
             _roamIndex = nextReachableSpawnerIndex(me, spawners, _roamIndex);
         } else {
-            // findBestReachable returns the actual element from `spawners`, so
-            // indexOf recovers its position in the cycle.
             const best = findBestReachable(me, spawners);
             _roamIndex = best ? spawners.indexOf(best.tile) : -1;
         }
@@ -460,7 +421,6 @@ export function getBestIntention() {
     return createIntention('wait', null, null, 0);
 }
 
-
 function pickupValueByPath(parcel, stepsToParcel, stepsToDelivery) {
     const totalSteps = stepsToParcel + stepsToDelivery;
     const rewardAtDelivery = estimatedRewardAtDelivery(parcel.reward, totalSteps);
@@ -489,14 +449,12 @@ function nextReachableSpawnerIndex(from, spawners, start) {
     return -1;
 }
 
-
 /**
  * Decides whether grabbing an extra parcel on the way to a delivery tile is
  * worthwhile, comparing the direct delivery against the detour route
  * (me to parcel to delivery).
  *
- * Result is cached per parcel and invalidated whenever the agent moves to a new
- * tile, since all three path lengths depend on the current position.
+ * Result is cached per parcel
  *
  * @param {Position} myPos - Current position.
  * @param {{id: string, x: number, y: number}} parcel - Candidate parcel to grab on the way.
@@ -546,16 +504,11 @@ function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
     const effectiveGain = gain - extraSteps;
 
     // Accept a near detour as long as it nets any positive gain; accept a longer
-    // one only if the payoff is high enough to justify the extra travel.
     const accepted =
         (extraSteps <= DETOUR_NEAR_EXTRA_STEPS && effectiveGain > 0) ||
         (extraSteps <= DETOUR_MAX_EXTRA_STEPS && effectiveGain >= DETOUR_HIGH_EFFECTIVE_GAIN);
 
-    // Log only on first evaluation at this tile (cache miss) and only when the
-    // rejection is non-obvious: once extraSteps is way beyond the hard cap the
-    // parcel is clearly unreachable on a detour, and logging it every step
-    // produces hundreds of identical lines (e.g. delivering while a parcel sits
-    // on the opposite side of the map).
+    // Log only on first evaluation at this tile (cache miss)
     if (!accepted && extraSteps <= DETOUR_MAX_EXTRA_STEPS + 4) {
         console.log(
             `[deliberation] Detour rejected parcel=${parcel.id} ` +
@@ -598,7 +551,7 @@ export function findBestPickUp(myPos, options = {}) {
 
         let adjustedScore;
         if (USE_PDDL) {
-            // Old single-agent PDDL model: the planner owns pathing 
+            // Old single-agent PDDL model: the planner owns pathing
             adjustedScore = parcel.reward - manhattanDistance(myPos, parcelPos);
         } else {
             const stepsToParcel = costToReachPath(myPos, parcelPos);
@@ -623,9 +576,6 @@ export function findBestPickUp(myPos, options = {}) {
     }
 
     // Reject only if every candidate parcel would be worthless at delivery.
-    // A finite negative score means the trip is long but the parcel still
-    // delivers some value — better to pick it up than to idle.
-    //TODO WHY === -inf if te
     if (bestScore === -Infinity || bestScore <= minScore) return null;
 
     if (bestIntention && log) {

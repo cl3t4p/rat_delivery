@@ -81,5 +81,9 @@ export function startSingleAgent({ tag = 'single', token } = {}) {
     startDecayLoop();
     startExecutor(socket);
 
+    // Heartbeat re-deliberation (see REVISE_HEARTBEAT_MS): keeps time-based
+    // deliberation alive even when no sensing events arrive.
+    setInterval(() => onSensingRevise(), REVISE_HEARTBEAT_MS);
+
     return socket;
 }

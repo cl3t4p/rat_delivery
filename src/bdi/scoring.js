@@ -8,7 +8,7 @@
  */
 
 import { beliefs } from './beliefs.js';
-import {manhattanDistance} from './helper.js'
+import { manhattanDistance } from './helper.js';
 
 /**
  * Default milliseconds per step, used before dynamic measurement kicks in.

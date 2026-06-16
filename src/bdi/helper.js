@@ -4,18 +4,15 @@ import { aStar } from './pathfinding.js';
 
 export const USE_PDDL = process.env.USE_PDDL === 'true';
 
-
 /**
  * Return if a == b
- * @param {Tile} a 
- * @param {Tile} b 
+ * @param {Tile} a
+ * @param {Tile} b
  * @returns {boolean}
  */
 export function sameTile(a, b) {
     return !!a && !!b && Math.round(a.x) === Math.round(b.x) && Math.round(a.y) === Math.round(b.y);
 }
-
-
 
 /**
  * Pick the candidate with the shortest distance, returning the tile and its
@@ -71,7 +68,6 @@ export function nearestByManhattan(myPos, multiplePos) {
     return findBestReachableTile(myPos, multiplePos, { useManhattan: true });
 }
 
-
 /**
  * @param {Position} a
  * @param {Position} b
@@ -101,6 +97,3 @@ export function costToReachPath(from, to) {
     const result = aStar(from, to, { avoidAgents: false });
     return result ? result.moves.length : null;
 }
-
-
-

@@ -29,11 +29,10 @@ export function findNearestSpawnerTile(myPos) {
     return nearestByManhattan(myPos, findSpawnerTiles());
 }
 
-
 /**
  * Find the first reachable spawner
  *
- * @param {Position} myPos 
+ * @param {Position} myPos
  * @param {Position[]} spawners
  * @returns {Position}
  */
@@ -44,7 +43,6 @@ export function findFirstReachableSpawnerTile(myPos, spawners) {
 
     return null;
 }
-
 
 /**
  * Finds the reachable spawner with the shortest real path.
@@ -70,9 +68,6 @@ export function findBestReachableSpawnerTile(myPos, spawners = findSpawnerTiles(
     return best;
 }
 
-
-
-
 /**
  * Returns every spawner tile on the known map.
  *
@@ -87,8 +82,6 @@ export function findSpawnerTiles() {
     }
     return out;
 }
-
-
 
 /**
  * Finds the delivery tile nearest to the current position.
@@ -171,10 +164,9 @@ export function findNearestNonDeliveryInZoneTile(myPos) {
     return best;
 }
 
-
 /**
- * 
- * @param {Position[]} spawners 
+ *
+ * @param {Position[]} spawners
  * @returns {Number}
  */
 export function spawnerSparseness(spawners = findSpawnerTiles()) {
@@ -189,9 +181,6 @@ export function spawnerSparseness(spawners = findSpawnerTiles()) {
     return Math.min(1, meanRadius / halfExtent);
 }
 
-
-
-
 export function spawnerCanReachDelivery(spawner) {
     // A spawner that cannot reach any delivery tile creates parcels the agent
     // cannot score. Do not camp or patrol these pockets.
@@ -204,9 +193,6 @@ export function spawnerCanReachDelivery(spawner) {
     _spawnerDeliveryCache.set(key, result);
     return result;
 }
-
-
-
 
 /**
  * Decides whether the spawners are spread out enough to warrant roaming rather
@@ -231,8 +217,6 @@ export function spawnersAreSparse(spawners = findSpawnerTiles()) {
     // Unlimited vision: fall back to normalized geometric spread.
     return spawnerSparseness(spawners) >= SPARSE_THRESHOLD;
 }
-
-
 
 /**
  * Measures how spread out the spawner tiles are, normalised to [0, 1].

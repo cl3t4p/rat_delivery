@@ -16,7 +16,6 @@ import {
     proposeHandoff,
 } from './coordination.js';
 
-
 import { findNearestSpawnerTile } from './components/tilesearch.js';
 
 // Improvement threshold: replace the current intention only if the new one

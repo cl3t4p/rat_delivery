@@ -29,9 +29,7 @@ import {
     sendBroadcast,
     prepareDirect,
 } from './communication.js';
-import {
-    createIntention,
-} from '../bdi/deliberation.js';
+import { createIntention } from '../bdi/deliberation.js';
 import { setZoneConstraint } from '../bdi/components/zone.js';
 import {
     findSpawnerTiles,
@@ -1031,14 +1029,20 @@ async function runZoneAssignment() {
     // not a real imbalance, so a re-split here only flip-flops the roles. The
     // first assignment still proceeds (no handoff can have happened yet); the
     // freeze lifts once handoffs stop (e.g. a peer drops) and the window lapses.
-    const relayActive = _lastHandoffActivityTs > 0 && now - _lastHandoffActivityTs < RELAY_FREEZE_TTL_MS;
-    if (relayActive && _lastAssignment && (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS)) {
+    const relayActive =
+        _lastHandoffActivityTs > 0 && now - _lastHandoffActivityTs < RELAY_FREEZE_TTL_MS;
+    if (
+        relayActive &&
+        _lastAssignment &&
+        (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS)
+    ) {
         console.log('[coord] Zone re-split suppressed: relay active (assignment frozen)');
         isImbalanced = false;
     }
 
     const needsLlm =
-        !_lastAssignment || (!relayActive && (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS));
+        !_lastAssignment ||
+        (!relayActive && (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS));
 
     if (!needsLlm) {
         if (now - _lastAssignmentAppliedTs < ASSIGNMENT_REFRESH_GRACE_MS) {
@@ -1196,7 +1200,9 @@ export function requestTakeover(parcelId) {
             peerId: reservation.peerId,
         });
 
-        console.log(`[coord] sending request take_parcel ${parcelId} to=${reservation.peerId} ts=${ts}`);
+        console.log(
+            `[coord] sending request take_parcel ${parcelId} to=${reservation.peerId} ts=${ts}`
+        );
 
         send()
             .then((result) => {
@@ -1613,9 +1619,7 @@ async function executeHandoffReceive(socket, intention, execCtx) {
         if (!parcelReady) {
             intention._stagingWait = (intention._stagingWait ?? 0) + 1;
             if (intention._stagingWait >= HANDOFF_STAGING_MAX_WAIT) {
-                console.log(
-                    '[coord] Handoff receive: timed out waiting at staging tile, failing'
-                );
+                console.log('[coord] Handoff receive: timed out waiting at staging tile, failing');
                 notifyActionFailed('handoff_timeout');
                 return;
             }
@@ -1759,9 +1763,7 @@ export function initZoneAssignHandler() {
         }
 
         const intention = createIntention('go_to', null, target, score);
-        console.log(
-            `[coord] Zone assign accepted, go_to (${target.x},${target.y}) score=${score}`
-        );
+        console.log(`[coord] Zone assign accepted, go_to (${target.x},${target.y}) score=${score}`);
 
         // Replace the current intention (fails + broadcasts it, then commits).
         _forceIntention(intention);
