@@ -340,7 +340,38 @@ function markOperatorObjective(intention) {
 }
 
 function getSpecialObjectiveIntention(me) {
-    if (llmMemory.specialObjective?.type !== 'drop_leftmost') return null;
+    const type = llmMemory.specialObjective?.type;
+
+    if (type === 'red_light') {
+        const y = Math.round(me.y);
+        if (y % 2 === 0) {
+            if (isWalkable(me.x, y + 1)) {
+                console.log(`[intentionAgent] Red-light: move to odd row y=${y + 1}`);
+                return createIntention('go_to', null, { x: me.x, y: y + 1 }, 0);
+            }
+            if (isWalkable(me.x, y - 1)) {
+                console.log(`[intentionAgent] Red-light: move to odd row y=${y - 1}`);
+                return createIntention('go_to', null, { x: me.x, y: y - 1 }, 0);
+            }
+        }
+        console.log(`[intentionAgent] Red-light: on odd row y=${y}, waiting`);
+        const wait = createIntention('wait', null, null, 0);
+        wait._redLightWait = true;
+        return wait;
+    }
+
+    if (type === 'neighborhood_meet') {
+        const rule = llmMemory.specialObjective;
+        const dist = manhattanDistance(me, { x: rule.x, y: rule.y });
+        if (dist > rule.maxDist) {
+            console.log(`[intentionAgent] Neighborhood meet: go to (${rule.x},${rule.y}) dist=${dist}`);
+            return createIntention('go_to', null, { x: rule.x, y: rule.y }, 0);
+        }
+        console.log(`[intentionAgent] Neighborhood meet: at (${me.x},${me.y}) within range, waiting`);
+        return createIntention('wait', null, null, 0);
+    }
+
+    if (type !== 'drop_leftmost') return null;
 
     if (beliefs.me.carrying.length > 0) {
         const target = getLeftmostReachableTile(me);

@@ -160,6 +160,24 @@ export function createIntention(type, parcelId, targetPos, score = 0) {
     };
 }
 
+function getRedLightIntention(me) {
+    const y = Math.round(me.y);
+    if (y % 2 === 0) {
+        if (isWalkable(me.x, y + 1)) return createIntention('go_to', null, { x: me.x, y: y + 1 }, 0);
+        if (isWalkable(me.x, y - 1)) return createIntention('go_to', null, { x: me.x, y: y - 1 }, 0);
+    }
+    const wait = createIntention('wait', null, null, 0);
+    wait._redLightWait = true;
+    return wait;
+}
+
+function getNeighborhoodMeetIntention(me, rule) {
+    if (manhattanDistance(me, { x: rule.x, y: rule.y }) > rule.maxDist) {
+        return createIntention('go_to', null, { x: rule.x, y: rule.y }, 0);
+    }
+    return createIntention('wait', null, null, 0);
+}
+
 /**
  * Computes and returns the best possible Intention based on the current beliefs.
  *
@@ -178,6 +196,11 @@ export function getBestIntention() {
     }
 
     const me = { x: beliefs.me.x, y: beliefs.me.y };
+
+    // Special objectives override normal deliberation for all agents (LLM and BDI alike)
+    const specialObj = llmMemory.specialObjective;
+    if (specialObj?.type === 'red_light') return getRedLightIntention(me);
+    if (specialObj?.type === 'neighborhood_meet') return getNeighborhoodMeetIntention(me, specialObj);
 
     // Case 1: carrying parcels, so consider delivery.
     if (beliefs.me.carrying.length > 0) {
@@ -212,6 +235,20 @@ export function getBestIntention() {
                 if (target) {
                     const dvScore = deliveryValue(beliefs.me.carrying, me, target);
                     if (dvScore <= 0) {
+                        if (_wouldBeProfitableAfterDecay(beliefs.me.carrying, target)) {
+                            const dist = manhattanDistance(me, target);
+                            const key = `decay_wait:${target.x},${target.y}`;
+                            if (_lastDelibLog !== key) {
+                                _lastDelibLog = key;
+                                console.log(dist > 1
+                                    ? `[deliberation] Reward over cap — moving to (${target.x},${target.y}) to wait for decay`
+                                    : `[deliberation] Reward over cap — waiting at delivery for decay`
+                                );
+                            }
+                            return dist > 1
+                                ? createIntention('go_to', null, target, 0)
+                                : createIntention('wait', null, null, 0);
+                        }
                         const discard = findBestDiscardTile(me);
                         if (discard) {
                             console.log(
@@ -238,6 +275,20 @@ export function getBestIntention() {
             if (target) {
                 const dvScore = deliveryValue(beliefs.me.carrying, me, target);
                 if (dvScore <= 0) {
+                    if (_wouldBeProfitableAfterDecay(beliefs.me.carrying, target)) {
+                        const dist = manhattanDistance(me, target);
+                        const key = `decay_wait:${target.x},${target.y}`;
+                        if (_lastDelibLog !== key) {
+                            _lastDelibLog = key;
+                            console.log(dist > 1
+                                ? `[deliberation] Reward over cap — moving to (${target.x},${target.y}) to wait for decay`
+                                : `[deliberation] Reward over cap — waiting at delivery for decay`
+                            );
+                        }
+                        return dist > 1
+                            ? createIntention('go_to', null, target, 0)
+                            : createIntention('wait', null, null, 0);
+                    }
                     const discard = findBestDiscardTile(me);
                     if (discard) {
                         console.log(
@@ -541,6 +592,16 @@ function findBestDeliveryTileMatching(myPos, predicate) {
     }
 
     return best;
+}
+
+function _wouldBeProfitableAfterDecay(carriedIds, deliveryTile) {
+    const maxReward = llmMemory.rewardRules?.maxDeliveryReward;
+    if (maxReward === null || maxReward === undefined || maxReward <= 0) return false;
+    if (isForbiddenDeliveryTile(deliveryTile)) return false;
+    return carriedIds.some((id) => {
+        const p = beliefs.parcels.get(id);
+        return p && p.reward > 0;
+    });
 }
 
 export function findBestDiscardTile(myPos) {

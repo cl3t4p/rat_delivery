@@ -72,6 +72,7 @@ export const llmMemory = {
         deliveryMultipliers: [],
         forbiddenDeliveryTiles: [],
         maxDeliveryReward: null,
+        forceCrossDelivery: false,
     },
 };
 
@@ -116,6 +117,81 @@ function extractCells(text) {
 
 function isLeftmostTileObjective(text) {
     return /\bleft\s*most\b|\bleftmost\b/i.test(text) && /\btile\b/i.test(text);
+}
+
+function isCenterTileObjective(text) {
+    return /center\s+(?:of\s+the\s+)?map|tile\s+at\s+the\s+center/i.test(text);
+}
+
+function isRedLightRule(text) {
+    return /all agents must move to an odd.?numbered row and wait.*before moving again/i.test(text);
+}
+
+function parseNeighborhoodRule(text) {
+    const m = text.match(
+        /neighborhood of position\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s+within\s+a\s+maximum\s+distance\s+of\s+(\d+)/i
+    );
+    if (!m) return null;
+    return { x: parseInt(m[1]), y: parseInt(m[2]), maxDist: parseInt(m[3]) };
+}
+
+function getMapBounds() {
+    let maxX = 0, maxY = 0;
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type === '0') continue;
+        const [x, y] = key.split(',').map(Number);
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+    }
+    return { maxX, maxY };
+}
+
+function getCenterTile() {
+    const { maxX, maxY } = getMapBounds();
+    const cx = Math.round(maxX / 2);
+    const cy = Math.round(maxY / 2);
+    let closest = null, minDist = Infinity;
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type === '0') continue;
+        const [x, y] = key.split(',').map(Number);
+        const dist = Math.abs(x - cx) + Math.abs(y - cy);
+        if (dist < minDist) { minDist = dist; closest = { x, y }; }
+    }
+    return closest;
+}
+
+function blacklistCenterTile() {
+    const center = getCenterTile();
+    if (!center) return null;
+    blacklistCell(center.x, center.y);
+    return center;
+}
+
+function parseCornerName(text) {
+    const lower = text.toLowerCase();
+    if (/bottom[\s-]?right/.test(lower)) return 'bottomRight';
+    if (/bottom[\s-]?left/.test(lower)) return 'bottomLeft';
+    if (/top[\s-]?right/.test(lower)) return 'topRight';
+    if (/top[\s-]?left/.test(lower)) return 'topLeft';
+    return null;
+}
+
+function getDeliveryTileNearCorner(corner) {
+    if (!beliefs.deliveryTiles.length) return null;
+    const { maxX, maxY } = getMapBounds();
+    const target = {
+        topLeft:    { x: 0,    y: maxY },
+        topRight:   { x: maxX, y: maxY },
+        bottomLeft: { x: 0,    y: 0    },
+        bottomRight:{ x: maxX, y: 0    },
+    }[corner];
+    if (!target) return null;
+    let closest = null, minDist = Infinity;
+    for (const tile of beliefs.deliveryTiles) {
+        const dist = Math.abs(tile.x - target.x) + Math.abs(tile.y - target.y);
+        if (dist < minDist) { minDist = dist; closest = tile; }
+    }
+    return closest ? [{ x: closest.x, y: closest.y }] : null;
 }
 
 function blacklistLeftmostTiles() {
@@ -164,7 +240,10 @@ function hasNegativeReward(text) {
 function parseLevel2Rule(text) {
     const lower = text.toLowerCase();
 
-    const stackMatch = lower.match(/deliver\s+stacks?\s+of\s+exactly\s+(\d+)\s+parcels?\s+at\s+a\s+time\s+to\s+(?:get\s+)?(?:(double)|([0-9]+(?:\.[0-9]+)?)\s*(?:x|of))/i);
+    // Stack rule — handles both "stacks of exactly N at a time" and "exactly N at once"
+    const stackMatch = lower.match(
+        /deliver(?:ing)?\s+(?:stacks?\s+of\s+)?exactly\s+(\d+)\s+parcels?\s+(?:at\s+a\s+time|at\s+once)\s+(?:to\s+(?:get\s+)?|gives?\s+(?:only\s+)?)(?:(double)|([0-9]+(?:\.[0-9]+)?)\s*(?:x\b|of\b))/i
+    );
     if (stackMatch) {
         const exact = Number(stackMatch[1]);
         const multiplier = stackMatch[2] ? 2 : Number(stackMatch[3]);
@@ -173,6 +252,32 @@ function parseLevel2Rule(text) {
         }
     }
 
+    // Relative delivery zone multiplier: "deliver in the delivery zone closest to the X corner"
+    const cornerMultiplierMatch = text.match(
+        /deliver\s+in\s+the\s+delivery\s+zone\s+closest\s+to\s+the\s+([\w\s-]+?)\s+corner\s+of\s+the\s+map.*?(\d+(?:\.\d+)?)\s*x\s+pts?/i
+    );
+    if (cornerMultiplierMatch) {
+        const corner = parseCornerName(cornerMultiplierMatch[1]);
+        const multiplier = Number(cornerMultiplierMatch[2]);
+        if (corner && Number.isFinite(multiplier) && multiplier > 0) {
+            const cells = getDeliveryTileNearCorner(corner);
+            if (cells) return { type: 'delivery_multiplier', cells, multiplier };
+        }
+    }
+
+    // Relative forbidden delivery zone: "deliver in the delivery zone closest to the X corner...0 pts"
+    const cornerForbiddenMatch = text.match(
+        /deliver\s+in\s+the\s+delivery\s+zone\s+closest\s+to\s+the\s+([\w\s-]+?)\s+corner\s+of\s+the\s+map.*?(?:\b0\s*pts?\b|you\s+get\s+0\s+pts?)/i
+    );
+    if (cornerForbiddenMatch) {
+        const corner = parseCornerName(cornerForbiddenMatch[1]);
+        if (corner) {
+            const cells = getDeliveryTileNearCorner(corner);
+            if (cells) return { type: 'forbidden_delivery_tiles', cells };
+        }
+    }
+
+    // Coordinate-based delivery rules (backward compat)
     const deliverCells = extractCells(text);
     if (deliverCells.length > 0 && /\bdeliver\b/i.test(text)) {
         if (/regular\s+delivery\s+tile/i.test(text)) {
@@ -187,7 +292,10 @@ function parseLevel2Rule(text) {
         }
     }
 
-    const maxRewardMatch = lower.match(/deliver\s+parcels\s+with\s+a\s+score\s+higher\s+than\s+(\d+(?:\.\d+)?)\s*,?\s+you\s+get\s+no\s+reward/i);
+    // Max delivery reward — handles both "score higher than N" and "reward value exceeds N"
+    const maxRewardMatch = lower.match(
+        /(?:deliver\s+parcels\s+with\s+a\s+score\s+higher\s+than|current\s+reward\s+value\s+(?:of\s+a\s+parcel\s+)?(?:at\s+delivery\s+time\s+)?exceeds?)\s+(\d+(?:\.\d+)?)[^,]*(?:,\s*)?you\s+get\s+no\s+reward/i
+    );
     if (maxRewardMatch) {
         const max = Number(maxRewardMatch[1]);
         if (Number.isFinite(max)) return { type: 'max_delivery_reward', max };
@@ -382,6 +490,25 @@ export async function setObjective(objectiveText, { respond } = {}) {
         return;
     }
 
+    if (isRedLightRule(objectiveText)) {
+        llmMemory.specialObjective = { type: 'red_light' };
+        llmMemory.objective = objectiveText;
+        console.log('[llmAgent] Red-light rule: move to odd row and wait');
+        updateContext();
+        if (_onObjectiveChange) await _onObjectiveChange();
+        return;
+    }
+
+    const neighborhoodRule = parseNeighborhoodRule(objectiveText);
+    if (neighborhoodRule) {
+        llmMemory.specialObjective = { type: 'neighborhood_meet', ...neighborhoodRule };
+        llmMemory.objective = objectiveText;
+        console.log(`[llmAgent] Neighborhood meet: (${neighborhoodRule.x},${neighborhoodRule.y}) ±${neighborhoodRule.maxDist}`);
+        updateContext();
+        if (_onObjectiveChange) await _onObjectiveChange();
+        return;
+    }
+
     if (isConstraint(objectiveText)) {
         llmMemory.constraints.push(objectiveText);
         if (hasNegativeReward(objectiveText)) {
@@ -398,6 +525,10 @@ export async function setObjective(objectiveText, { respond } = {}) {
         if (isLeftmostTileObjective(objectiveText)) {
             const count = blacklistLeftmostTiles();
             console.log(`[llmAgent] Blacklisted ${count} leftmost tile(s)`);
+        }
+        if (isCenterTileObjective(objectiveText)) {
+            const center = blacklistCenterTile();
+            if (center) console.log(`[llmAgent] Blacklisted center tile (${center.x},${center.y})`);
         }
     } else {
         llmMemory.objective = objectiveText;

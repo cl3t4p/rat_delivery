@@ -21,7 +21,7 @@ import {
 } from './coordination.js';
 import { aStar } from './pathfinding.js';
 import { llmMemory } from '../llm/llmAgent.js';
-import { deliveryValue } from './scoring.js';
+import { deliveryValue, isForbiddenDeliveryTile } from './scoring.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
@@ -296,15 +296,28 @@ function isIntentionStillValid(intention) {
             if (
                 intention.targetPos &&
                 beliefs.me.x !== null &&
-                beliefs.me.y !== null &&
-                deliveryValue(
+                beliefs.me.y !== null
+            ) {
+                const dv = deliveryValue(
                     beliefs.me.carrying,
                     { x: beliefs.me.x, y: beliefs.me.y },
                     intention.targetPos
-                ) <= 0
-            ) {
-                console.log('[intentionRevision] Delivery target has zero value under reward rules');
-                return false;
+                );
+                if (dv <= 0) {
+                    const maxReward = llmMemory.rewardRules?.maxDeliveryReward;
+                    const willDecayBelowCap =
+                        maxReward != null &&
+                        maxReward > 0 &&
+                        !isForbiddenDeliveryTile(intention.targetPos) &&
+                        beliefs.me.carrying.some((id) => {
+                            const p = beliefs.parcels.get(id);
+                            return p && p.reward > 0;
+                        });
+                    if (!willDecayBelowCap) {
+                        console.log('[intentionRevision] Delivery target has zero value under reward rules');
+                        return false;
+                    }
+                }
             }
             return true;
         }
@@ -344,6 +357,17 @@ function isIntentionStillValid(intention) {
  *   - In forced mode after a failure or completion
  */
 export async function revise(force = false) {
+    // When a red_light wait is active but the special objective has changed
+    // (e.g. the operator sent a "green light" message), clear it immediately
+    // so the next deliberation resumes normal operation.
+    if (currentIntention?.type === 'wait' &&
+        currentIntention?._redLightWait === true &&
+        llmMemory.specialObjective?.type !== 'red_light') {
+        currentIntention.status = 'done';
+        broadcastIntention(currentIntention);
+        currentIntention = null;
+    }
+
     // Check if the current intention is still valid
     if (currentIntention && currentIntention.status === 'active') {
         if (!isIntentionStillValid(currentIntention)) {
@@ -408,9 +432,11 @@ export async function revise(force = false) {
             currentIntention.type === 'wait' && candidate.type !== 'wait';
 
         // Safety net: a wait older than WAIT_MAX_AGE_MS forces a fresh deliberation.
+        // Red-light waits are excluded — they must persist until the operator unblocks them.
         const waitExpired =
             currentIntention.type === 'wait' &&
-            Date.now() - currentIntention.createdAt > WAIT_MAX_AGE_MS;
+            Date.now() - currentIntention.createdAt > WAIT_MAX_AGE_MS &&
+            !currentIntention._redLightWait;
 
         const pickupBeatsLowValueRoaming =
             candidate.type === 'go_pick_up' &&

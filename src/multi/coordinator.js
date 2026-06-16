@@ -277,7 +277,7 @@ export function evaluateHandoff() {
             : null;
     const condition2 = peerTarget
         ? manhattanDistance(posB, peerTarget) > distBMeet + distMeetDel
-        : distBMeet + distMeetDel < distADel;
+        : distBMeet + distMeetDel <= distADel;
 
     // Condition 3: handoff should free A significantly before direct delivery,
     // without losing more than a tiny amount of parcel value. Handoff usually
