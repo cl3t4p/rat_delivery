@@ -134,7 +134,10 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         if (blocked.has(key)) continue;
         if (!pushCrates && crateKeys.has(key)) continue; // crate treated as a wall
         const [x, y] = key.split(',').map(Number);
-        if (!isWalkable(x, y)) continue;
+        // Crate-unaware: crate tiles must stay in the problem so that, when pushing
+        // is enabled, they can be emitted as pushable objects below. Whether crates
+        // act as walls is decided by the `pushCrates` check above, not here.
+        if (!isWalkable(x, y, false)) continue;
         tiles.add(key);
     }
 

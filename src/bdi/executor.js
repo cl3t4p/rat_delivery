@@ -26,22 +26,20 @@ import {
     notifyActionFailed,
 } from './intentionRevision.js';
 import { createIntention, findNearestDeliveryTile } from './deliberation.js';
-import { broadcastIntention } from '../multi/notifier.js';
-import { MSG_TYPE, sendBroadcast } from '../multi/communication.js';
-import { consumeYieldRequest, getPeers, requestHandoff } from '../multi/coordinator.js';
+import {
+    broadcastIntention,
+    MSG_TYPE,
+    sendBroadcast,
+    consumeYieldRequest,
+    getPeers,
+    requestHandoff,
+} from './coordination.js';
 
 // Planner selection:
 //
-// USE_PDDL=true
-// Uses only the PDDL planner.
-//
-// USE_PDDL=true and PDDL_FALLBACK=true
-// Uses the PDDL planner and falls back to A* if planning fails.
-//
-// Default (USE_PDDL not set)
-// Uses only the A* planner.
+// USE_PDDL=true        — uses only the PDDL planner (no A* fallback).
+// Default (unset)      — uses only the A* planner.
 const USE_PDDL = process.env.USE_PDDL === 'true';
-const PDDL_FALLBACK = process.env.PDDL_FALLBACK === 'true';
 const STUCK_FAILURE_THRESHOLD = 3;
 const STUCK_BLACKLIST_TTL_MS = 5000;
 const NO_PATH_RETRY_DELAY_MS = 400;
@@ -641,13 +639,8 @@ async function computePlan(intention) {
             console.log(`[executor] PDDL plan (${pddlMoves.length} moves)`);
             return pddlMoves;
         }
-        if (!PDDL_FALLBACK) {
-            console.log(
-                '[executor] PDDL unavailable, no fallback configured (set PDDL_FALLBACK=true to enable A*)'
-            );
-            return [];
-        }
-        console.log('[executor] PDDL unavailable → A* fallback');
+        console.log('[executor] PDDL planning produced no plan');
+        return [];
     }
     return planTo(intention.targetPos);
 }

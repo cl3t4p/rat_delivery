@@ -3,15 +3,17 @@
   "version": "1.0.0",
   "description": "Autonomous Software Agents project for the Deliveroo.js game.",
   "type": "module",
-  "main": "src/index_a.js",
+  "main": "src/single.js",
   "scripts": {
-    "start": "npm run agent:a",
+    "start": "npm run single",
 
-    "agent:a": "node src/index_a.js",
-    "agent:b": "node src/index_b.js",
-    "agent:b:llm": "USE_LLM=true node src/index_b.js",
+    "agent:a": "node src/multiagent_a.js",
+    "agent:b": "node src/multiagent_b.js",
+    "agent:b:llm": "USE_LLM=true node src/multiagent_b.js",
 
-    "pddl": "USE_PDDL=true node src/index_a.js",
+    "single": "node src/single.js",
+    "single:llm": "USE_LLM=true node src/single.js",
+    "pddl": "node src/pddl.js",
 
     "planner:build": "cd planning-as-a-service/server && DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t paas:latest .",
     "planner:up": "docker compose -f docker-compose.planner.yml up -d",
@@ -49,12 +51,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cl3t4p/asa_agent.git"
+    "url": "git+https://github.com/cl3t4p/rat_delivery.git"
   },
-  "bugs": {
-    "url": "https://github.com/cl3t4p/asa_agent/issues"
-  },
-  "homepage": "https://github.com/cl3t4p/asa_agent#readme",
   "keywords": [
     "autonomous-agents",
     "bdi",
