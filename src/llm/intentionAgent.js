@@ -21,11 +21,13 @@
 import { beliefs, manhattanDistance, isWalkable } from '../bdi/beliefs.js';
 import {
     createIntention,
-    findNearestDeliveryTile,
-    findBestDeliveryTile,
-    findNearestSpawnerTile,
     getBestIntention,
 } from '../bdi/deliberation.js';
+import {
+    findNearestSpawnerTile,
+    findNearestDeliveryTile,
+    findBestDeliveryTile,
+} from '../bdi/components/tilesearch.js';
 import { llmClient, llmMemory } from './llmAgent.js';
 import { pickupValue, deliveryValue } from '../bdi/scoring.js';
 
@@ -323,7 +325,7 @@ export async function generateBestIntention() {
 
         const toolCall = response.choices?.[0]?.message?.tool_calls?.[0];
         if (!toolCall) {
-            console.log('[intentionAgent] LLM returned no tool call → heuristic fallback');
+            console.log('[intentionAgent] LLM returned no tool call, using heuristic fallback');
             return getBestIntention();
         }
 
@@ -335,7 +337,7 @@ export async function generateBestIntention() {
         const name = toolCall.function?.name;
         const impl = TOOL_IMPL[name];
         if (!impl) {
-            console.log(`[intentionAgent] Unknown tool "${name}" → heuristic fallback`);
+            console.log(`[intentionAgent] Unknown tool "${name}", using heuristic fallback`);
             return getBestIntention();
         }
 
@@ -348,7 +350,7 @@ export async function generateBestIntention() {
 
         const intention = impl(args, me);
         if (!intention) {
-            console.log(`[intentionAgent] Tool "${name}" not applicable now → heuristic fallback`);
+            console.log(`[intentionAgent] Tool "${name}" not applicable now, using heuristic fallback`);
             return getBestIntention();
         }
 
@@ -359,7 +361,7 @@ export async function generateBestIntention() {
         );
         return intention;
     } catch (err) {
-        console.log(`[intentionAgent] LLM error (${err.message}) → heuristic fallback`);
+        console.log(`[intentionAgent] LLM error (${err.message}), using heuristic fallback`);
         return getBestIntention();
     }
 }

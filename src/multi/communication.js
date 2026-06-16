@@ -1,7 +1,7 @@
 /**
  * communication.js
  *
- * Transport layer for the BDI ↔ LLM message protocol.
+ * Transport layer for the message protocol between the BDI and LLM layers.
  *
  * Wraps the Deliveroo socket primitives:
  *   - socket.emitShout(msg)        — broadcast envelope to all agents
@@ -250,12 +250,12 @@ const QUIET_TYPES = new Set([MSG_TYPE.BELIEF_UPDATE, MSG_TYPE.INTENTION_UPDATE])
 function logSend(envelope) {
     if (!LOG_COMM_VERBOSE && QUIET_TYPES.has(envelope.type)) return;
     const dst = envelope.to === 'broadcast' ? '*' : envelope.to;
-    console.log(`[comm] → ${envelope.type} to=${dst}`);
+    console.log(`[comm] send ${envelope.type} to=${dst}`);
 }
 
 function logRecv(envelope, senderId) {
     if (!LOG_COMM_VERBOSE && QUIET_TYPES.has(envelope.type)) return;
-    console.log(`[comm] ← ${envelope.type} from=${senderId}`);
+    console.log(`[comm] recv ${envelope.type} from=${senderId}`);
 }
 
 function logSendError(type, err) {

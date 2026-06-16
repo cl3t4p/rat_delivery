@@ -1,5 +1,5 @@
 /**
- * coordination.js — single↔multi seam
+ * coordination.js — seam between single-agent and multi-agent modes
  *
  * The single-agent BDI core (deliberation, intentionRevision, executor) needs to
  * occasionally ask "is a peer handling this?" or "tell my peer what I'm doing".
@@ -8,12 +8,12 @@
  *
  * By default every hook is a single-agent no-op: no peers, nothing claimed, no
  * broadcasts, no handoffs. A solo agent (pddl.js) therefore behaves as if it owns
- * the whole map. The multi-agent layer (src/multi/helper.js → installMultiAgent())
+ * the whole map. The multi-agent layer (src/multi/helper.js calls installMultiAgent())
  * overrides these hooks at startup with the real coordinator/notifier/communication
  * implementations.
  *
- * Dependency direction: bdi → coordination (no import of multi). multi → bdi.
- * This breaks the previous bdi↔multi import cycle.
+ * Dependency direction: bdi depends on coordination (no import of multi); multi depends on bdi.
+ * This breaks the previous circular import between bdi and multi.
  */
 
 /**

@@ -14,7 +14,7 @@ const _boundsInvalidationListeners = [];
 /**
  * Registers a callback invoked whenever bounds are invalidated (i.e. on map reload).
  * Used by deliberation.js to clear its spawner-reachability cache without creating
- * a circular import (deliberation → beliefs → zones → deliberation).
+ * a circular import (deliberation to beliefs to zones back to deliberation).
  *
  * @param {() => void} fn
  */

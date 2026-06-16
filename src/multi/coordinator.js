@@ -30,11 +30,15 @@ import {
     prepareDirect,
 } from './communication.js';
 import {
-    findNearestDeliveryTile,
     createIntention,
-    setZoneConstraint,
-    findSpawnerTiles,
 } from '../bdi/deliberation.js';
+import { setZoneConstraint } from '../bdi/components/zone.js';
+import {
+    findSpawnerTiles,
+    findNearestSpawnerTile,
+    findNearestDeliveryTile,
+} from '../bdi/components/tilesearch.js';
+
 import { notifyIntentionDone, notifyActionFailed } from '../bdi/intentionRevision.js';
 import { deliveryValue, estimatedRewardAtDelivery } from '../bdi/scoring.js';
 import { aStar } from '../bdi/pathfinding.js';
@@ -163,7 +167,6 @@ async function computeZoneStats() {
 
     // Import scoring functions dynamically to avoid circular dependencies.
     const { pickupValue } = await import('../bdi/scoring.js');
-    const { findNearestDeliveryTile } = await import('../bdi/deliberation.js');
 
     const selfPos = { x: beliefs.me.x, y: beliefs.me.y };
     const selfKnown = hasKnownPosition(selfPos);
@@ -242,7 +245,7 @@ export function getNearestReachableZoneTarget(zoneName, fromPos) {
     const spawners = findSpawnerTiles().filter((s) => getZone(s, beliefs.grid) === zoneName);
     spawners.sort((a, b) => manhattanDistance(fromPos, a) - manhattanDistance(fromPos, b));
     for (const s of spawners) {
-        if (aStar(fromPos, s, { avoidAgents: false })) return s;
+        if (aStar(fromPos, s, { avoidAgents: true })) return s;
     }
 
     // 2. Nearest walkable tiles to geometric centre, checked in order.
@@ -256,7 +259,7 @@ export function getNearestReachableZoneTarget(zoneName, fromPos) {
     }
     candidates.sort((a, b) => manhattanDistance(center, a) - manhattanDistance(center, b));
     for (const tile of candidates.slice(0, 30)) {
-        if (aStar(fromPos, tile, { avoidAgents: false })) return tile;
+        if (aStar(fromPos, tile, { avoidAgents: true })) return tile;
     }
 
     // 3. Geometric centre (last resort).
@@ -292,8 +295,8 @@ function findNearestWalkableTile(target) {
  * Returns the meetTile if handoff is beneficial, null otherwise.
  *
  * Conditions (both must hold):
- *   1. dist(A→meet) + dist(B→meet) + dist(meet→delivery) < dist(A→delivery)
- *   2. dist(B→meet) + dist(meet→delivery) < dist(B→currentDelivery or nearestDelivery)
+ *   1. dist(A to meet) + dist(B to meet) + dist(meet to delivery) < dist(A to delivery)
+ *   2. dist(B to meet) + dist(meet to delivery) < dist(B to currentDelivery or nearestDelivery)
  *
  * @returns {{ meetTile: {x,y}, peerId: string } | null}
  */
@@ -343,8 +346,8 @@ export function evaluateHandoff() {
 
     // Condition 3: handoff should free A significantly before direct delivery,
     // without losing more than a tiny amount of parcel value. Handoff usually
-    // cannot improve parcel reward by itself (A→meet→delivery is not shorter
-    // than A→delivery), but it can improve team throughput by letting A resume
+    // cannot improve parcel reward by itself (A to meet to delivery is not shorter
+    // than A to delivery), but it can improve team throughput by letting A resume
     // pickup work while B finishes delivery.
     const valueAAlone = deliveryValue(beliefs.me.carrying, posA, delivery);
     const handoffSteps = distAMeet + distMeetDel;
@@ -610,7 +613,7 @@ function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
         if (bestZone && bestZone !== currentZone) {
             console.log(
                 `[coord] Zone assignment repaired for ${agentId}: ` +
-                    `${currentZone ?? 'none'} → ${bestZone} (no useful opportunity)`
+                    `${currentZone ?? 'none'} to ${bestZone} (no useful opportunity)`
             );
             repaired[agentId] = bestZone;
         }
@@ -635,7 +638,7 @@ function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
         if (bestZone && bestZone !== repaired[moveId]) {
             console.log(
                 `[coord] Zone assignment side-repaired for ${moveId}: ` +
-                    `${repaired[moveId]} → ${bestZone} (same side coverage)`
+                    `${repaired[moveId]} to ${bestZone} (same side coverage)`
             );
             repaired[moveId] = bestZone;
         }
@@ -661,7 +664,7 @@ function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
         if (bestZone !== repaired[laggingAgentId]) {
             console.log(
                 `[coord] Zone assignment force-repaired for lagging ${laggingAgentId}: ` +
-                    `${repaired[laggingAgentId]} → ${bestZone}`
+                    `${repaired[laggingAgentId]} to ${bestZone}`
             );
             repaired[laggingAgentId] = bestZone;
         }
@@ -727,7 +730,7 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
     );
 
     console.log(
-        `[coord] Zone assignment → self (${selfId}): ${selfZoneName} (${selfCenter.x},${selfCenter.y})`
+        `[coord] Zone assignment for self (${selfId}): ${selfZoneName} (${selfCenter.x},${selfCenter.y})`
     );
 
     setZoneConstraint(selfZoneName);
@@ -743,7 +746,7 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
             zoneStats[peerZoneName]?.totalReward ?? 0,
             (zoneStats[peerZoneName]?.spawnerCount ?? 0) * 2
         );
-        console.log(`[coord] Zone assignment → peer (${peerId}): ${peerZoneName}`);
+        console.log(`[coord] Zone assignment for peer (${peerId}): ${peerZoneName}`);
         sendDirect(peerId, MSG_TYPE.ZONE_ASSIGN, {
             targetId: peerId,
             zone: peerZoneName,
@@ -787,7 +790,7 @@ async function runHeuristicZoneAssignment() {
     const peerZoneName = repaired[peerId];
 
     console.log(
-        `[coord] Heuristic zone split: ${selfId}→${selfZoneName} ${peerId}→${peerZoneName}`
+        `[coord] Heuristic zone split: ${selfId}=${selfZoneName} ${peerId}=${peerZoneName}`
     );
 
     // For the heuristic split, also apply live-selfBusy so we never interrupt
@@ -872,7 +875,7 @@ function uncrossAssignment(assignment, selfId, selfPos, peerId, peerPos) {
         };
         console.log(
             `[coord] Zone assignment un-crossed: ` +
-                `${selfId}→${swapped[selfId]} ${peerId}→${swapped[peerId]}`
+                `${selfId}=${swapped[selfId]} ${peerId}=${swapped[peerId]}`
         );
         return swapped;
     }
@@ -908,7 +911,7 @@ async function runZoneAssignment() {
         (peer.intention.score ?? 0) > BOTH_BUSY_SCORE_THRESHOLD;
 
     if (selfBusy && peerBusy) {
-        console.log('[coord] Both agents busy with high-score intentions → skipping assignment');
+        console.log('[coord] Both agents busy with high-score intentions, skipping assignment');
         return;
     }
 
@@ -957,7 +960,7 @@ async function runZoneAssignment() {
                         _imbalanceCount = 0;
                         _imbalanceDirectionChanges = 0;
                         _imbalanceDirection = null;
-                        console.log('[coord] Imbalance confirmed → requesting LLM rebalance');
+                        console.log('[coord] Imbalance confirmed, requesting LLM rebalance');
                     }
                 }
             } else {
@@ -985,7 +988,7 @@ async function runZoneAssignment() {
             if (_gapImbalanceCount >= IMBALANCE_CONSECUTIVE_INTERVALS) {
                 isImbalanced = true;
                 _gapImbalanceCount = 0;
-                console.log('[coord] Persistent score gap → requesting LLM rebalance');
+                console.log('[coord] Persistent score gap, requesting LLM rebalance');
             }
         } else {
             _gapImbalanceCount = 0;
@@ -1193,7 +1196,7 @@ export function requestTakeover(parcelId) {
             peerId: reservation.peerId,
         });
 
-        console.log(`[coord] → request take_parcel ${parcelId} to=${reservation.peerId} ts=${ts}`);
+        console.log(`[coord] sending request take_parcel ${parcelId} to=${reservation.peerId} ts=${ts}`);
 
         send()
             .then((result) => {
@@ -1340,7 +1343,7 @@ export function proposeHandoff(handoff, attempt = 0) {
             if (res.accepted) {
                 const live = _getCurrentIntention();
                 if (live && !isHandoffRetryWait(live)) return;
-                console.log(`[coord] Handoff accepted → go_handoff`);
+                console.log(`[coord] Handoff accepted, go_handoff`);
                 const intention = createIntention('go_handoff', null, handoff.meetTile, 0);
                 intention._peerStagingTile = res.stagingTile ?? null;
                 intention._peerId = handoff.peerId;
@@ -1358,7 +1361,7 @@ export function proposeHandoff(handoff, attempt = 0) {
                         ? HANDOFF_BUSY_RETRY_MS
                         : HANDOFF_BUSY_SLOW_RETRY_MS;
                 console.log(
-                    `[coord] Handoff peer busy → retry ` +
+                    `[coord] Handoff peer busy, retry ` +
                         `${attempt + 1}${attempt >= HANDOFF_BUSY_FAST_RETRIES ? ' (slow)' : `/${HANDOFF_BUSY_FAST_RETRIES}`}`
                 );
                 setTimeout(() => proposeHandoff(handoff, attempt + 1), delay);
@@ -1477,8 +1480,8 @@ export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blocke
             y: Math.round(blockingAgent.y),
         };
         console.log(
-            `[coord] Blocked delivery handoff accepted by ${blockingAgent.id} ` +
-                `→ go_handoff at (${meetTile.x},${meetTile.y})`
+            `[coord] Blocked delivery handoff accepted by ${blockingAgent.id}, ` +
+                `go_handoff at (${meetTile.x},${meetTile.y})`
         );
         _forceIntention(handoff);
         return true;
@@ -1541,7 +1544,7 @@ async function executeHandoff(socket, intention, execCtx) {
         const ny = fy + dy;
         if (canEnter(fx, fy, nx, ny)) {
             await execCtx.safeSocketAction(`handoff vacate ${dir}`, () => socket.emitMove(dir));
-            console.log(`[coord] Handoff: vacated meet tile → moved ${dir}`);
+            console.log(`[coord] Handoff: vacated meet tile, moved ${dir}`);
             break;
         }
     }
@@ -1611,7 +1614,7 @@ async function executeHandoffReceive(socket, intention, execCtx) {
             intention._stagingWait = (intention._stagingWait ?? 0) + 1;
             if (intention._stagingWait >= HANDOFF_STAGING_MAX_WAIT) {
                 console.log(
-                    '[coord] Handoff receive: timed out waiting at staging tile → failing'
+                    '[coord] Handoff receive: timed out waiting at staging tile, failing'
                 );
                 notifyActionFailed('handoff_timeout');
                 return;
@@ -1639,7 +1642,7 @@ async function executeHandoffReceive(socket, intention, execCtx) {
 
     if (!picked || picked.length === 0) {
         if (intention._pickupAttempts >= HANDOFF_RECEIVE_MAX_PICKUP_ATTEMPTS) {
-            console.log('[coord] Handoff receive: no parcels after max attempts → failing');
+            console.log('[coord] Handoff receive: no parcels after max attempts, failing');
             notifyActionFailed('pickup_empty');
         } else {
             console.log(
@@ -1659,7 +1662,7 @@ async function executeHandoffReceive(socket, intention, execCtx) {
     }
 
     console.log(`[coord] Handoff receive OK: picked up ${picked.length} parcel(s)`);
-    notifyIntentionDone(); // triggers revise() → go_deliver
+    notifyIntentionDone(); // triggers revise(), then go_deliver
 }
 
 // Zone assignment (receiver side)
@@ -1723,8 +1726,8 @@ export function initZoneAssignHandler() {
             const alternative = zoneName ? getNearestReachableZoneTarget(zoneName, myPos) : null;
             if (alternative && aStar(myPos, alternative, { avoidAgents: false })) {
                 console.log(
-                    `[coord] Zone centre unreachable (${center.x},${center.y})` +
-                        ` → nearest reachable (${alternative.x},${alternative.y})`
+                    `[coord] Zone centre unreachable (${center.x},${center.y}),` +
+                        ` using nearest reachable (${alternative.x},${alternative.y})`
                 );
                 target = alternative;
             } else {
@@ -1757,7 +1760,7 @@ export function initZoneAssignHandler() {
 
         const intention = createIntention('go_to', null, target, score);
         console.log(
-            `[coord] Zone assign accepted → go_to (${target.x},${target.y}) score=${score}`
+            `[coord] Zone assign accepted, go_to (${target.x},${target.y}) score=${score}`
         );
 
         // Replace the current intention (fails + broadcasts it, then commits).
@@ -1811,7 +1814,7 @@ function handleIntentionUpdate(envelope, senderId, senderName) {
                 status: intention.status,
             });
         } else {
-            // done / failed → release the reservation if it was ours
+            // done or failed: release the reservation if it was ours
             const existing = state.reservations.get(intention.parcelId);
             if (existing?.peerId === senderId) {
                 state.reservations.delete(intention.parcelId);
@@ -1940,8 +1943,8 @@ function handleBlockedAt(envelope, senderId) {
             const target = getNearestReachableZoneTarget(zone, myPos);
             if (target && (target.x !== myX || target.y !== myY)) {
                 console.log(
-                    `[coord] Push-chain break (${PUSH_CHAIN_THRESHOLD}×${blockedDir}) ` +
-                        `→ go_to (${target.x},${target.y})`
+                    `[coord] Push-chain break (${PUSH_CHAIN_THRESHOLD}×${blockedDir}), ` +
+                        `go_to (${target.x},${target.y})`
                 );
                 _forceIntention(createIntention('go_to', null, target, 5));
             } else {
@@ -2037,7 +2040,7 @@ function touchPeer(id, name) {
             intention: null,
         };
         state.peers.set(id, peer);
-        console.log(`[coord] new peer ${id} (${name ?? '?'}) → scheduling zone assignment`);
+        console.log(`[coord] new peer ${id} (${name ?? '?'}), scheduling zone assignment`);
         // Trigger the first zone assignment as soon as the peer is discovered.
         // The short delay lets the peer's initial belief_update (which carries
         // its position) arrive before the LLM call is made.

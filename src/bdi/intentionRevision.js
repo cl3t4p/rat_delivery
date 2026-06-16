@@ -16,6 +16,9 @@ import {
     proposeHandoff,
 } from './coordination.js';
 
+
+import { findNearestSpawnerTile } from './components/tilesearch.js';
+
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
 const IMPROVEMENT_THRESHOLD = 5;
@@ -95,7 +98,7 @@ export function getCurrentIntention() {
  * @returns {void}
  */
 export function notifyActionFailed(reason) {
-    console.log(`[intentionRevision] Failed: ${reason} → re-evaluating`);
+    console.log(`[intentionRevision] Failed: ${reason}, re-evaluating`);
     if (currentIntention) {
         currentIntention.status = 'failed';
         broadcastIntention(currentIntention);
@@ -181,7 +184,7 @@ function commitNewIntention(intention) {
 // The handoff protocol (multi/coordinator.js) drives the intention lifecycle
 // from outside the BDI core. These small wrappers give it the exact operations
 // it needs without exposing the module-private `currentIntention` binding, and
-// keep the bdi → multi dependency from ever being created (multi receives them
+// keep the bdi-to-multi dependency from ever being created (multi receives them
 // via initCoordinator).
 
 /**
@@ -363,7 +366,7 @@ export async function revise(force = false) {
         // Don't let a zero-score explore/roam interrupt an active pickup, even if
         // the pickup has a negative score. Explore targets are often the spawner the
         // agent just stepped off, so replacing causes an infinite oscillation loop:
-        // go_pick_up → explore (completes instantly) → go_pick_up → ...
+        // go_pick_up, then explore (completes instantly), then go_pick_up, and so on...
         const exploringBeatsPickup =
             currentIntention.type === 'go_pick_up' &&
             (candidate.type === 'explore' || (candidate.type === 'go_to' && !candidate.parcelId)) &&
@@ -447,7 +450,7 @@ function checkStuck() {
     if (staleMs >= STUCK_TIMEOUT_MS) {
         console.log(
             `[intentionRevision] Stuck: no progress toward (${tx},${ty}) ` +
-                `for ${staleMs}ms (bestDist=${_stuckWatchdog.bestDist}) → forcing re-deliberation`
+                `for ${staleMs}ms (bestDist=${_stuckWatchdog.bestDist}), forcing re-deliberation`
         );
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         if (currentIntention) {

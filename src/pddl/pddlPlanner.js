@@ -71,14 +71,14 @@ async function solveProblem(intention, options) {
     const problem = buildProblem(intention, options);
     if (!problem) {
         console.log(
-            `[pddl] buildProblem returned null for ${intention.type} → ${intention.parcelId ?? ''} (pushCrates=${options.pushCrates})`
+            `[pddl] buildProblem returned null for ${intention.type}, target=${intention.parcelId ?? ''} (pushCrates=${options.pushCrates})`
         );
         return null;
     }
 
     try {
         console.log(
-            `[pddl] calling solver for ${intention.type} → (${intention.targetPos.x},${intention.targetPos.y}) (pushCrates=${options.pushCrates})`
+            `[pddl] calling solver for ${intention.type}, target=(${intention.targetPos.x},${intention.targetPos.y}) (pushCrates=${options.pushCrates})`
         );
         const plan = await withTimeout(onlineSolver(domainFile, problem), PDDL_TIMEOUT_MS);
         if (!plan || plan.length === 0) {

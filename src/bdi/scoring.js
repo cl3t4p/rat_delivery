@@ -7,7 +7,8 @@
  * Used by deliberation.js to evaluate pickup, delivery, and detour decisions.
  */
 
-import { beliefs, manhattanDistance } from './beliefs.js';
+import { beliefs } from './beliefs.js';
+import {manhattanDistance} from './helper.js'
 
 /**
  * Default milliseconds per step, used before dynamic measurement kicks in.
@@ -37,11 +38,11 @@ export function estimateDecay(steps) {
 /**
  * Estimates the reward a parcel will have when it reaches the delivery tile.
  *
- * Subtracts the expected decay over the full journey (me → parcel → delivery).
+ * Subtracts the expected decay over the full journey (me to parcel to delivery).
  * Returns at least 0 — a parcel cannot have negative reward.
  *
  * @param {number} currentReward - Current reward of the parcel.
- * @param {number} totalSteps - Total steps of the journey (me→parcel + parcel→delivery).
+ * @param {number} totalSteps - Total steps of the journey (me-to-parcel plus parcel-to-delivery).
  * @returns {number} Estimated reward at delivery time.
  */
 export function estimatedRewardAtDelivery(currentReward, totalSteps) {
@@ -51,7 +52,7 @@ export function estimatedRewardAtDelivery(currentReward, totalSteps) {
 /**
  * Computes the net value of picking up a parcel.
  *
- * Accounts for decay over the full journey (me → parcel → delivery)
+ * Accounts for decay over the full journey (me to parcel to delivery)
  * and subtracts the cost of reaching the parcel.
  *
  * Returns -Infinity if the parcel will be worth 0 at delivery time,

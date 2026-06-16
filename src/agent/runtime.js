@@ -1,8 +1,8 @@
 /**
  * agent/runtime.js
  *
- * Shared bootstrap for a single, standalone BDI agent: sense → revise beliefs →
- * revise intentions → execute, with NO multi-agent layer (no communication,
+ * Shared bootstrap for a single, standalone BDI agent: sense, then revise beliefs,
+ * then revise intentions, then execute, with NO multi-agent layer (no communication,
  * coordinator, or zone assignment). A solo agent owns the whole map and never
  * waits on a peer.
  *
@@ -16,6 +16,13 @@
  */
 
 import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk/client';
+
+// Sensing events stop firing when the agent is idle with an empty view, so the
+// time-based parts of deliberation (the spawner dwell, the wait-age safety net,
+// the stuck watchdog) would never be re-evaluated and the agent would just sit
+// until something moved into view. Re-deliberate on this fixed cadence so those
+// timers actually elapse. Kept below the dwell so a dwell resolves promptly.
+const REVISE_HEARTBEAT_MS = Number(process.env.REVISE_HEARTBEAT_MS) || 200;
 
 import { updateMap, updateMe, updateBeliefs } from '../bdi/beliefs.js';
 import { onSensingRevise } from '../bdi/intentionRevision.js';

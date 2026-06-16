@@ -272,7 +272,7 @@ async function stepTowardsTarget(socket, intention) {
     // Check if the next step is still valid
     const next = intention.plan[0];
     if (!isStepValid(next)) {
-        console.log(`[executor] Step ${next} no longer valid → replan`);
+        console.log(`[executor] Step ${next} no longer valid, replanning`);
         intention.plan = [];
         return;
     }

@@ -13,6 +13,7 @@
  */
 
 import { invalidateBounds } from '../shared/zones.js';
+import { manhattanDistance } from './helper.js';
 
 /** @typedef {import('../shared/types.js').Tile}        Tile */
 /** @typedef {import('../shared/types.js').Parcel}      Parcel */
@@ -233,7 +234,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     const meKnown = beliefs.me.x !== null && beliefs.me.y !== null;
     for (const [key, c] of beliefs.crates) {
         if (seenCrateKeys.has(key)) continue;
-        // Same crate id sensed on another tile this tick → this is a stale duplicate
+        // Same crate id sensed on another tile this tick, so this is a stale duplicate
         // of a crate that has since moved; drop it regardless of range.
         if (c.id != null && seenCrateIds.has(c.id)) {
             beliefs.crates.delete(key);
@@ -331,16 +332,7 @@ export function decayParcelsReward() {
     }
 }
 
-/**
- * @param {Position} a
- * @param {Position} b
- * @returns {number}
- */
-export function manhattanDistance(a, b) {
-    return (
-        Math.abs(Math.round(a.x) - Math.round(b.x)) + Math.abs(Math.round(a.y) - Math.round(b.y))
-    );
-}
+
 
 /**
  * Converts a Deliveroo clock-event value into milliseconds.
@@ -363,7 +355,7 @@ export function clockEventToMs(event) {
     if (!match) return null;
 
     const value = parseFloat(match[1]);
-    const unit = match[2] ?? 's'; // string without unit defaults to seconds (e.g. "5" → 5000ms)
+    const unit = match[2] ?? 's'; // string without unit defaults to seconds (e.g. "5" becomes 5000ms)
     const factor = unit === 'ms' ? 1 : unit === 'm' ? 60_000 : 1000;
     return value * factor;
 }
@@ -427,3 +419,5 @@ export function clearBlacklist() {
 }
 
 export { isWalkable, canEnter, canTraverse, canPush } from './grid.js';
+// Re-exported for the many call sites that historically imported it from here.
+export { manhattanDistance };

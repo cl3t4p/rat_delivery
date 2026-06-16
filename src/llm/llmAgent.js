@@ -414,13 +414,13 @@ export async function callZoneAssignment(
                 parsed[selfId] = pickBestRemainingZone(zoneStats, 'bestScoreForSelf', contested);
             }
             console.log(
-                `[llmAgent] Same zone for both (${contested}) → corrected: ` +
-                    `${selfId}→${parsed[selfId]} ${peerId}→${parsed[peerId]}`
+                `[llmAgent] Same zone for both (${contested}), corrected: ` +
+                    `${selfId}=${parsed[selfId]} ${peerId}=${parsed[peerId]}`
             );
         }
 
         console.log(
-            `[llmAgent] Zone assignment: ${selfId}→${parsed[selfId]} ${peerId}→${parsed[peerId]}`
+            `[llmAgent] Zone assignment: ${selfId}=${parsed[selfId]} ${peerId}=${parsed[peerId]}`
         );
         return parsed;
     } catch (err) {

@@ -8,6 +8,8 @@
 
 /** @typedef {'up'|'down'|'left'|'right'} Direction */
 
+/** @typedef {'topLeft'|'topRight'|'bottomLeft'|'bottomRight'|null} ZoneName */
+
 /** @typedef {'go_pick_up'|'go_deliver'|'explore'|'go_to'|'wait'|'go_handoff'|'go_handoff_receive'} IntentionType */
 
 /** @typedef {{ type: '0'|'1'|'2'|'3', delivery: boolean }} Tile */
@@ -85,7 +87,7 @@
 /** @typedef {'take_parcel'|'avoid_tile'|'status_check'} RequestAction */
 
 /**
- * Common message envelope used for every BDI ↔ LLM message.
+ * Common message envelope used for every message between the BDI and LLM layers.
  *
  * @template {object} [P=object]
  * @typedef {Object} Envelope
@@ -156,5 +158,6 @@
  * @property {boolean} accepted
  * @property {'ok'|'already_carrying'|'out_of_range'|'unknown'} reason
  */
+
 
 export {};

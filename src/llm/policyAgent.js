@@ -20,11 +20,13 @@ import {
 } from '../bdi/beliefs.js';
 import {
     createIntention,
-    findNearestDeliveryTile,
-    findBestDeliveryTile,
-    findNearestSpawnerTile,
     getBestIntention,
 } from '../bdi/deliberation.js';
+import {
+    findNearestSpawnerTile,
+    findNearestDeliveryTile,
+    findBestDeliveryTile,
+} from '../bdi/components/tilesearch.js';
 import { llmMemory } from './llmAgent.js';
 import { buildStateSnapshot } from './intentionAgent.js';
 import { pickupValue, deliveryValue } from '../bdi/scoring.js';
