@@ -27,7 +27,7 @@ import {
 } from '../bdi/intentionRevision.js';
 import { startExecutor } from '../bdi/executor.js';
 import { updateContext, setObjective, initLlmAgent } from '../llm/llmAgent.js';
-import { initCommunication, onFallbackMsg } from '../multi/communication.js';
+import { initCommunication, onFallbackMsg, MSG_TYPE, onMessage, sendBroadcast } from '../multi/communication.js';
 import { initCoordinator, startZoneAssignmentLoop, setCoordinatorRole } from '../multi/coordinator.js';
 import { enableNotifier, tickBeliefDelta } from '../multi/notifier.js';
 import { installMultiAgent } from '../multi/helper.js';
@@ -78,6 +78,16 @@ export function startMultiAgent({ role }) {
         startZoneAssignmentLoop();
     }
 
+    onMessage(MSG_TYPE.OPERATOR_MESSAGE, (envelope, senderId) => {
+        if (senderId && senderId === beliefs.me.id) return;
+        const text = envelope.payload?.text;
+        if (typeof text !== 'string' || text.trim() === '') return;
+        console.log(`[${tag}] Operator message from peer: ${text}`);
+        setObjective(text)
+            .then(() => requestRevision(true))
+            .catch((err) => console.error(`[${tag}] operator message failed: ${err?.message ?? err}`));
+    });
+
     const logState = makeLogState(`state_${role}`);
 
     socket.on('map', (width, height, tiles) => {
@@ -106,8 +116,14 @@ export function startMultiAgent({ role }) {
     // Agent B receives natural-language objectives over the fallback channel.
     if (isB) {
         onFallbackMsg((id, name, msg) => {
+            if (id && id === beliefs.me.id) return;
             console.log(`[${tag}] Message from ${name}: ${msg}`);
-            if (typeof msg === 'string' && msg.trim() !== '') setObjective(msg);
+            if (typeof msg === 'string' && msg.trim() !== '') {
+                setObjective(msg, {
+                    respond: (answer) => socket.emitShout(answer),
+                }).then(() => sendBroadcast(MSG_TYPE.OPERATOR_MESSAGE, { text: msg }))
+                    .catch((err) => console.error(`[${tag}] objective handling failed: ${err?.message ?? err}`));
+            }
         });
     }
 

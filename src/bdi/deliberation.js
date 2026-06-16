@@ -5,13 +5,16 @@
  *
  */
 
-import { beliefs, manhattanDistance } from './beliefs.js';
+import { beliefs, isWalkable, manhattanDistance } from './beliefs.js';
 import { shouldYieldParcel } from './coordination.js';
 import {
+    applyDeliveryRewardRules,
     deliveryValue,
     detourValue,
     estimatedRewardAtDelivery,
+    isForbiddenDeliveryTile,
 } from './scoring.js';
+import { llmMemory } from '../llm/llmAgent.js';
 import { aStar } from './pathfinding.js';
 import { getZone as _sharedGetZone, getMapBounds as _getMapBounds, onBoundsInvalidated } from '../shared/zones.js';
 
@@ -110,6 +113,7 @@ const LOCAL_PICKUP_MIN_SCORE = Number(process.env.LOCAL_PICKUP_MIN_SCORE ?? -25)
 // Cache for detour evaluations: invalidated whenever the agent moves to a new tile.
 // Eliminates redundant A* triples and "Detour rejected" log spam on every sensing tick.
 let _detourCachePos = { x: null, y: null };
+let _detourCacheRulesKey = '';
 const _detourCache = new Map(); // parcelId → result | null
 
 // Deliberation deduplication: suppress identical consecutive decisions so the
@@ -184,12 +188,39 @@ export function getBestIntention() {
         } else {
             // Maximum number of parcels the agent can carry.
             const capacity = beliefs.config?.MAX_PARCELS ?? 1;
+            const stackRule = llmMemory.rewardRules?.stackRule ?? null;
+            const shouldBuildBonusStack =
+                stackRule &&
+                stackRule.multiplier > 1 &&
+                beliefs.me.carrying.length < stackRule.exact &&
+                beliefs.me.carrying.length < capacity;
+
+            if (shouldBuildBonusStack) {
+                const pickUp = findBestPickUp(me, { allowOutOfZone: true, log: false });
+                if (pickUp) {
+                    console.log(
+                        `[deliberation] Stack rule ${stackRule.exact}x${stackRule.multiplier}: ` +
+                        `collecting ${beliefs.me.carrying.length + 1}/${stackRule.exact}`
+                    );
+                    return pickUp;
+                }
+            }
 
             // If at full capacity, deliver immediately.
             if (beliefs.me.carrying.length >= capacity) {
                 const target = findBestDeliveryTile(me);
                 if (target) {
                     const dvScore = deliveryValue(beliefs.me.carrying, me, target);
+                    if (dvScore <= 0) {
+                        const discard = findBestDiscardTile(me);
+                        if (discard) {
+                            console.log(
+                                `[deliberation] carried parcels have zero delivery value → putdown at ` +
+                                `(${discard.x},${discard.y})`
+                            );
+                            return createIntention('go_putdown', null, discard, 0);
+                        }
+                    }
                     const key = `deliver:${target.x},${target.y}`;
                     if (_lastDelibLog !== key) {
                         _lastDelibLog = key;
@@ -205,6 +236,18 @@ export function getBestIntention() {
             // If not at full capacity, check whether a detour to pick up an extra parcel is worth more than delivering immediately.
             const target = findBestDeliveryTile(me);
             if (target) {
+                const dvScore = deliveryValue(beliefs.me.carrying, me, target);
+                if (dvScore <= 0) {
+                    const discard = findBestDiscardTile(me);
+                    if (discard) {
+                        console.log(
+                            `[deliberation] carried parcels have zero delivery value → putdown at ` +
+                            `(${discard.x},${discard.y})`
+                        );
+                        return createIntention('go_putdown', null, discard, 0);
+                    }
+                }
+
                 const pickUp = findBestPickUp(me, { log: false });
                 if (pickUp) {
                     const parcel = beliefs.parcels.get(pickUp.parcelId);
@@ -242,7 +285,6 @@ export function getBestIntention() {
                     }
                 }
 
-                const dvScore = deliveryValue(beliefs.me.carrying, me, target);
                 const key = `deliver:${target.x},${target.y}`;
                 if (_lastDelibLog !== key) {
                     _lastDelibLog = key;
@@ -478,10 +520,42 @@ export function findBestDeliveryTile(myPos) {
 
 function findBestDeliveryTileMatching(myPos, predicate) {
     let best = null;
+    let bestScore = -Infinity;
     let bestLen = Infinity;
 
     for (const tile of beliefs.deliveryTiles) {
         if (!predicate(tile)) continue;
+        if (isForbiddenDeliveryTile(tile)) continue;
+        const result = reachPath(myPos, tile, { avoidAgents: false });
+        if (!result) continue;
+
+        const score = beliefs.me.carrying.length > 0
+            ? deliveryValue(beliefs.me.carrying, myPos, tile)
+            : -result.moves.length;
+
+        if (score > bestScore || (score === bestScore && result.moves.length < bestLen)) {
+            bestScore = score;
+            bestLen = result.moves.length;
+            best = tile;
+        }
+    }
+
+    return best;
+}
+
+export function findBestDiscardTile(myPos) {
+    const current = { x: Math.round(myPos.x), y: Math.round(myPos.y) };
+    if (isWalkable(current.x, current.y) && !isDeliveryCell(current)) return current;
+
+    let best = null;
+    let bestLen = Infinity;
+
+    for (const [key] of beliefs.grid) {
+        const [x, y] = key.split(',').map(Number);
+        if (!isWalkable(x, y)) continue;
+        const tile = { x, y };
+        if (isDeliveryCell(tile)) continue;
+
         const result = reachPath(myPos, tile, { avoidAgents: false });
         if (!result) continue;
 
@@ -492,6 +566,10 @@ function findBestDeliveryTileMatching(myPos, predicate) {
     }
 
     return best;
+}
+
+function isDeliveryCell(pos) {
+    return beliefs.deliveryTiles.some((tile) => tile.x === pos.x && tile.y === pos.y);
 }
 
 function isDeliveryOccupied(tile) {
@@ -512,34 +590,48 @@ function isTileOccupiedByOtherAgent(tile) {
     );
 }
 
-function pickupValueByPath(parcel, pathToParcel, pathToDelivery) {
+function pickupValueByPath(parcel, pathToParcel, pathToDelivery, deliveryTile) {
     const totalSteps = pathToParcel.moves.length + pathToDelivery.moves.length;
     const rewardAtDelivery = estimatedRewardAtDelivery(parcel.reward, totalSteps);
+    const adjustedReward = applyDeliveryRewardRules(rewardAtDelivery, 1, deliveryTile);
 
-    if (rewardAtDelivery <= 0) return -Infinity;
+    if (adjustedReward <= 0) return -Infinity;
 
-    return rewardAtDelivery - totalSteps;
+    return adjustedReward - totalSteps;
 }
 
-function findBestDeliveryPathFrom(pos) {
-    const bestFree = findBestDeliveryPathMatching(pos, (tile) => !isDeliveryOccupied(tile));
+function findBestDeliveryPathFrom(pos, parcel = null, pathToParcel = null) {
+    const bestFree = findBestDeliveryPathMatching(
+        pos,
+        (tile) => !isDeliveryOccupied(tile),
+        parcel,
+        pathToParcel
+    );
     if (bestFree) return bestFree;
 
-    return findBestDeliveryPathMatching(pos, () => true);
+    return findBestDeliveryPathMatching(pos, () => true, parcel, pathToParcel);
 }
 
-function findBestDeliveryPathMatching(pos, predicate) {
+function findBestDeliveryPathMatching(pos, predicate, parcel = null, pathToParcel = null) {
     let best = null;
+    let bestScore = -Infinity;
     let bestLen = Infinity;
 
     for (const tile of beliefs.deliveryTiles) {
         if (!predicate(tile)) continue;
+        if (isForbiddenDeliveryTile(tile)) continue;
         const result = reachPath(pos, tile, { avoidAgents: false });
         if (!result) continue;
 
-        if (result.moves.length < bestLen) {
+        const score = parcel && pathToParcel
+            ? pickupValueByPath(parcel, pathToParcel, result, tile)
+            : -result.moves.length;
+        if (score === -Infinity) continue;
+
+        if (score > bestScore || (score === bestScore && result.moves.length < bestLen)) {
+            bestScore = score;
             bestLen = result.moves.length;
-            best = { tile, path: result };
+            best = { tile, path: result, score };
         }
     }
 
@@ -550,10 +642,13 @@ function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
     const rx = Math.round(myPos.x);
     const ry = Math.round(myPos.y);
 
-    // Clear cache whenever the agent steps to a new tile.
-    if (_detourCachePos.x !== rx || _detourCachePos.y !== ry) {
+    const rulesKey = JSON.stringify(llmMemory.rewardRules ?? {});
+
+    // Clear cache whenever the agent steps to a new tile or reward rules change.
+    if (_detourCachePos.x !== rx || _detourCachePos.y !== ry || _detourCacheRulesKey !== rulesKey) {
         _detourCache.clear();
         _detourCachePos = { x: rx, y: ry };
+        _detourCacheRulesKey = rulesKey;
     }
 
     if (_detourCache.has(parcel.id)) {
@@ -637,11 +732,11 @@ export function findBestPickUp(myPos, options = {}) {
             const pathToParcel = reachPath(myPos, parcelPos, { avoidAgents: false });
             if (!pathToParcel) continue;
 
-            const delivery = findBestDeliveryPathFrom(parcelPos);
+            const delivery = findBestDeliveryPathFrom(parcelPos, parcel, pathToParcel);
             if (!delivery) continue;
             if (!allowOutOfZone && !_matchesZoneOpportunity(parcelPos, delivery.tile)) continue;
 
-            adjustedScore = pickupValueByPath(parcel, pathToParcel, delivery.path);
+            adjustedScore = delivery.score;
         }
 
         if (adjustedScore > bestScore) {
@@ -662,8 +757,11 @@ export function findBestPickUp(myPos, options = {}) {
 
     if (bestIntention && log) {
         const parcel = beliefs.parcels.get(bestIntention.parcelId);
-        const delivery = parcel
-            ? findBestDeliveryPathFrom({ x: parcel.x, y: parcel.y })
+        const pathToParcel = parcel
+            ? reachPath(myPos, { x: parcel.x, y: parcel.y }, { avoidAgents: false })
+            : null;
+        const delivery = parcel && pathToParcel
+            ? findBestDeliveryPathFrom({ x: parcel.x, y: parcel.y }, parcel, pathToParcel)
             : null;
         const deliveryTile = delivery?.tile ?? null;
 

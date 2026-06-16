@@ -31,6 +31,7 @@ export const MSG_TYPE = Object.freeze({
     HANDOFF_RESPONSE: 'handoff_response',
     BLOCKED_AT: 'blocked_at',
     PARCEL_CLAIMED: 'parcel_claimed',
+    OPERATOR_MESSAGE: 'operator_message',
 });
 
 // Single-agent defaults. Overridden by installMultiAgent() in multi mode.

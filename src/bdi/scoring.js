@@ -8,6 +8,7 @@
  */
 
 import { beliefs, manhattanDistance } from './beliefs.js';
+import { llmMemory } from '../llm/llmAgent.js';
 
 /**
  * Default milliseconds per step, used before dynamic measurement kicks in.
@@ -87,11 +88,59 @@ export function pickupValue(parcel, myPos, deliveryTile) {
 export function deliveryValue(carriedIds, myPos, deliveryTile) {
     const distToDelivery = manhattanDistance(myPos, deliveryTile);
 
-    return carriedIds.reduce((total, id) => {
+    const baseValue = carriedIds.reduce((total, id) => {
         const parcel = beliefs.parcels.get(id);
         if (!parcel) return total;
         return total + estimatedRewardAtDelivery(parcel.reward, distToDelivery);
     }, 0);
+
+    return applyDeliveryRewardRules(baseValue, carriedIds.length, deliveryTile);
+}
+
+export function applyDeliveryRewardRules(baseValue, stackSize, deliveryTile) {
+    if (!Number.isFinite(baseValue) || baseValue <= 0) return baseValue;
+
+    const rules = llmMemory.rewardRules;
+    if (!rules) return baseValue;
+
+    if (rules.forbiddenDeliveryTiles?.some((cell) => sameCell(cell, deliveryTile))) {
+        return 0;
+    }
+
+    if (rules.maxDeliveryReward !== null && baseValue > rules.maxDeliveryReward) {
+        return 0;
+    }
+
+    let value = baseValue;
+    if (rules.stackRule && stackSize === rules.stackRule.exact) {
+        value *= rules.stackRule.multiplier;
+    }
+
+    const tileMultiplier = deliveryTileMultiplier(deliveryTile);
+    if (tileMultiplier !== 1) value *= tileMultiplier;
+
+    return value;
+}
+
+export function deliveryTileMultiplier(deliveryTile) {
+    const rules = llmMemory.rewardRules;
+    if (!rules?.deliveryMultipliers) return 1;
+
+    let multiplier = 1;
+    for (const rule of rules.deliveryMultipliers) {
+        if (rule.cells?.some((cell) => sameCell(cell, deliveryTile))) {
+            multiplier = Math.max(multiplier, rule.multiplier);
+        }
+    }
+    return multiplier;
+}
+
+export function isForbiddenDeliveryTile(deliveryTile) {
+    return !!llmMemory.rewardRules?.forbiddenDeliveryTiles?.some((cell) => sameCell(cell, deliveryTile));
+}
+
+function sameCell(a, b) {
+    return a && b && Number(a.x) === Number(b.x) && Number(a.y) === Number(b.y);
 }
 
 /**
@@ -131,7 +180,11 @@ export function detourValue(parcel, myPos, carriedIds, deliveryTile) {
         stepsToParcel + stepsParcelToDelivery
     );
 
-    const valueWithDetour = rewardCarriedAfterDetour + rewardNewParcel;
+    const valueWithDetour = applyDeliveryRewardRules(
+        rewardCarriedAfterDetour + rewardNewParcel,
+        carriedIds.length + 1,
+        deliveryTile
+    );
 
     return valueWithDetour - valueDeliverNow;
 }

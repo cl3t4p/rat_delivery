@@ -34,6 +34,7 @@ import {
     getPeers,
     requestHandoff,
 } from './coordination.js';
+import { completeSpecialObjective } from '../llm/llmAgent.js';
 
 // Planner selection:
 //
@@ -239,6 +240,7 @@ export async function startExecutor(socket) {
             case 'go_to':
             case 'go_pick_up':
             case 'go_deliver':
+            case 'go_putdown':
                 await stepTowardsTarget(socket, intention);
                 continue;
             case 'go_handoff':
@@ -651,7 +653,7 @@ async function computePlan(intention) {
  * Finalizes the current intention.
  *
  * For go_pick_up, tries to pick up the parcel and updates the local beliefs.
- * For go_deliver, drops the carried parcels and removes them from the local beliefs.
+ * For go_deliver/go_putdown, drops the carried parcels and removes them from the local beliefs.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send actions.
  * @param {Intention} intention - Intention to finalize.
@@ -719,6 +721,34 @@ async function finalize(socket, intention) {
         console.log(`[executor] Delivery OK: ${actual} parcel(s) score=${beliefs.me.score}${cycleInfo}`);
         _cycleStart = null;
         _cyclePickupReward = 0;
+        notifyIntentionDone();
+        return;
+    }
+
+    if (intention.type === 'go_putdown') {
+        const dropped = await safeSocketAction('putdown', () => socket.emitPutdown());
+        if (dropped === null) return;
+
+        const droppedIds = [...beliefs.me.carrying];
+        beliefs.me.carrying = [];
+        for (const id of droppedIds) {
+            const parcel = beliefs.parcels.get(id);
+            if (parcel) parcel.carriedBy = null;
+        }
+        for (const p of dropped ?? []) {
+            if (p.id) {
+                const parcel = beliefs.parcels.get(p.id);
+                if (parcel) parcel.carriedBy = null;
+            }
+        }
+
+        console.log(
+            `[executor] Putdown OK: ${(dropped ?? []).length} parcel(s) at ` +
+            `(${intention.targetPos.x},${intention.targetPos.y})`
+        );
+        if (intention._operatorObjective) {
+            completeSpecialObjective('drop_leftmost');
+        }
         notifyIntentionDone();
         return;
     }

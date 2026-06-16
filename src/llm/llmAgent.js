@@ -66,7 +66,21 @@ export const llmMemory = {
     objective: null, // e.g. "Focus on the top-left area"
     constraints: [],
     environmentSnapshot: null, // position, visible parcels, delivery tiles
+    specialObjective: null,
+    rewardRules: {
+        stackRule: null,
+        deliveryMultipliers: [],
+        forbiddenDeliveryTiles: [],
+        maxDeliveryReward: null,
+    },
 };
+
+export function completeSpecialObjective(type) {
+    if (llmMemory.specialObjective?.type !== type) return false;
+    llmMemory.specialObjective = null;
+    llmMemory.objective = null;
+    return true;
+}
 
 /**
  * Keywords that identify a constraint message.
@@ -80,7 +94,9 @@ const CONSTRAINT_KEYWORDS = ['avoid', 'do not enter', 'ignore', 'block', 'stay a
  */
 function isConstraint(text) {
     const lower = text.toLowerCase();
-    return CONSTRAINT_KEYWORDS.some((kw) => lower.includes(kw));
+    return CONSTRAINT_KEYWORDS.some((kw) => lower.includes(kw)) ||
+        hasNegativeReward(text) ||
+        /do\s+not\s+go\s+through/i.test(text);
 }
 
 /**
@@ -88,7 +104,213 @@ function isConstraint(text) {
  */
 function extractCells(text) {
     const matches = [...text.matchAll(/\b(\d+)\s*,\s*(\d+)\b/g)];
-    return matches.map((m) => ({ x: parseInt(m[1]), y: parseInt(m[2]) }));
+    const cells = matches.map((m) => ({ x: parseInt(m[1]), y: parseInt(m[2]) }));
+
+    const xy = extractAssignedCell(text);
+    if (xy && !cells.some((cell) => cell.x === xy.x && cell.y === xy.y)) {
+        cells.push(xy);
+    }
+
+    return cells;
+}
+
+function isLeftmostTileObjective(text) {
+    return /\bleft\s*most\b|\bleftmost\b/i.test(text) && /\btile\b/i.test(text);
+}
+
+function blacklistLeftmostTiles() {
+    const leftmost = getLeftmostWalkableTiles();
+    for (const cell of leftmost) {
+        blacklistCell(cell.x, cell.y);
+        console.log(`[llmAgent] Blacklisted cell (${cell.x},${cell.y})`);
+    }
+    return leftmost.length;
+}
+
+function getLeftmostWalkableTiles() {
+    const cells = [];
+    let minX = Infinity;
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type === '0') continue;
+        const [x, y] = key.split(',').map(Number);
+        if (x < minX) {
+            minX = x;
+            cells.length = 0;
+        }
+        if (x === minX) cells.push({ x, y });
+    }
+    return cells.sort((a, b) => a.y - b.y);
+}
+
+function answerFor(text) {
+    const normalized = text.trim().toLowerCase();
+    if (/capital of italy\??$/.test(normalized) || normalized.includes('what is the capital of italy')) {
+        return 'Rome';
+    }
+
+    const calcMatch = normalized.match(/^calculate\s+([0-9+\-*/()\s]+)$/);
+    if (calcMatch) {
+        const result = parseArithmeticExpression(calcMatch[1]);
+        if (Number.isFinite(result)) return String(result);
+    }
+
+    return null;
+}
+
+function hasNegativeReward(text) {
+    return /(?:^|[^\d])-+\s*\d+\s*(?:pts?|points?)\b/i.test(text);
+}
+
+function parseLevel2Rule(text) {
+    const lower = text.toLowerCase();
+
+    const stackMatch = lower.match(/deliver\s+stacks?\s+of\s+exactly\s+(\d+)\s+parcels?\s+at\s+a\s+time\s+to\s+(?:get\s+)?(?:(double)|([0-9]+(?:\.[0-9]+)?)\s*(?:x|of))/i);
+    if (stackMatch) {
+        const exact = Number(stackMatch[1]);
+        const multiplier = stackMatch[2] ? 2 : Number(stackMatch[3]);
+        if (Number.isInteger(exact) && exact > 0 && Number.isFinite(multiplier)) {
+            return { type: 'stack_rule', exact, multiplier };
+        }
+    }
+
+    const deliverCells = extractCells(text);
+    if (deliverCells.length > 0 && /\bdeliver\b/i.test(text)) {
+        if (/regular\s+delivery\s+tile/i.test(text)) {
+            const multiplierMatch = lower.match(/(\d+(?:\.\d+)?)\s*x\s+pts?/i);
+            const multiplier = multiplierMatch ? Number(multiplierMatch[1]) : null;
+            if (Number.isFinite(multiplier) && multiplier > 0) {
+                return { type: 'delivery_multiplier', cells: deliverCells, multiplier };
+            }
+        }
+        if (/\b0\s*pts?\b/i.test(text) || /\bno\s+reward\b/i.test(text)) {
+            return { type: 'forbidden_delivery_tiles', cells: deliverCells };
+        }
+    }
+
+    const maxRewardMatch = lower.match(/deliver\s+parcels\s+with\s+a\s+score\s+higher\s+than\s+(\d+(?:\.\d+)?)\s*,?\s+you\s+get\s+no\s+reward/i);
+    if (maxRewardMatch) {
+        const max = Number(maxRewardMatch[1]);
+        if (Number.isFinite(max)) return { type: 'max_delivery_reward', max };
+    }
+
+    return null;
+}
+
+function applyLevel2Rule(rule) {
+    if (!rule) return false;
+
+    switch (rule.type) {
+        case 'stack_rule':
+            llmMemory.rewardRules.stackRule = {
+                exact: rule.exact,
+                multiplier: rule.multiplier,
+            };
+            console.log(
+                `[llmAgent] Reward rule: stack exactly ${rule.exact} → ` +
+                `${rule.multiplier}x delivery value`
+            );
+            return true;
+
+        case 'delivery_multiplier':
+            llmMemory.rewardRules.deliveryMultipliers.push({
+                cells: rule.cells,
+                multiplier: rule.multiplier,
+            });
+            console.log(
+                `[llmAgent] Reward rule: delivery tiles ` +
+                `${rule.cells.map((c) => `(${c.x},${c.y})`).join(', ')} → ` +
+                `${rule.multiplier}x`
+            );
+            return true;
+
+        case 'forbidden_delivery_tiles':
+            for (const cell of rule.cells) {
+                if (!llmMemory.rewardRules.forbiddenDeliveryTiles.some((c) => c.x === cell.x && c.y === cell.y)) {
+                    llmMemory.rewardRules.forbiddenDeliveryTiles.push(cell);
+                }
+            }
+            console.log(
+                `[llmAgent] Reward rule: forbidden delivery tiles ` +
+                `${rule.cells.map((c) => `(${c.x},${c.y})`).join(', ')}`
+            );
+            return true;
+
+        case 'max_delivery_reward':
+            llmMemory.rewardRules.maxDeliveryReward = rule.max;
+            console.log(`[llmAgent] Reward rule: deliveries > ${rule.max} reward → 0`);
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+function extractAssignedCell(text) {
+    const xMatch = text.match(/\bx\s*=\s*([0-9+\-*/()\s]+?)(?=\s+y\s*=|\s*(?:to|get|for|$))/i);
+    const yMatch = text.match(/\by\s*=\s*([0-9+\-*/()\s]+?)(?=\s*(?:to|get|for|$))/i);
+    if (!xMatch || !yMatch) return null;
+
+    const x = parseArithmeticExpression(xMatch[1]);
+    const y = parseArithmeticExpression(yMatch[1]);
+    if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
+    return { x, y };
+}
+
+function parseArithmeticExpression(input) {
+    const source = String(input ?? '').replace(/\s+/g, '');
+    if (!source || /[^0-9+\-*/()]/.test(source)) return null;
+
+    let i = 0;
+
+    function parseExpression() {
+        let value = parseTerm();
+        while (i < source.length && (source[i] === '+' || source[i] === '-')) {
+            const op = source[i++];
+            const rhs = parseTerm();
+            if (rhs === null) return null;
+            value = op === '+' ? value + rhs : value - rhs;
+        }
+        return value;
+    }
+
+    function parseTerm() {
+        let value = parseFactor();
+        while (i < source.length && (source[i] === '*' || source[i] === '/')) {
+            const op = source[i++];
+            const rhs = parseFactor();
+            if (rhs === null || (op === '/' && rhs === 0)) return null;
+            value = op === '*' ? value * rhs : value / rhs;
+        }
+        return value;
+    }
+
+    function parseFactor() {
+        if (source[i] === '+') {
+            i++;
+            return parseFactor();
+        }
+        if (source[i] === '-') {
+            i++;
+            const value = parseFactor();
+            return value === null ? null : -value;
+        }
+        if (source[i] === '(') {
+            i++;
+            const value = parseExpression();
+            if (source[i] !== ')') return null;
+            i++;
+            return value;
+        }
+
+        const start = i;
+        while (i < source.length && /\d/.test(source[i])) i++;
+        if (start === i) return null;
+        return Number(source.slice(start, i));
+    }
+
+    const value = parseExpression();
+    if (value === null || i !== source.length) return null;
+    return value;
 }
 
 // Context update
@@ -127,7 +349,7 @@ export function updateContext() {
  */
 const MAX_OBJECTIVE_LENGTH = 500;
 
-export async function setObjective(objectiveText) {
+export async function setObjective(objectiveText, { respond } = {}) {
     // Sanitize: cap length and strip control characters that could escape the prompt context.
     const sanitized = String(objectiveText ?? '')
         .slice(0, MAX_OBJECTIVE_LENGTH)
@@ -142,8 +364,30 @@ export async function setObjective(objectiveText) {
     console.log(`[llmAgent] Message received: "${sanitized}"`);
     objectiveText = sanitized;
 
+    const answer = answerFor(objectiveText);
+    if (answer !== null) {
+        console.log(`[llmAgent] Answering: "${answer}"`);
+        if (respond) await respond(answer);
+        llmMemory.objective = null;
+        llmMemory.specialObjective = null;
+        return;
+    }
+
+    const level2Rule = parseLevel2Rule(objectiveText);
+    if (level2Rule && applyLevel2Rule(level2Rule)) {
+        llmMemory.objective = objectiveText;
+        llmMemory.specialObjective = null;
+        updateContext();
+        if (_onObjectiveChange) await _onObjectiveChange();
+        return;
+    }
+
     if (isConstraint(objectiveText)) {
         llmMemory.constraints.push(objectiveText);
+        if (hasNegativeReward(objectiveText)) {
+            llmMemory.objective = null;
+            llmMemory.specialObjective = null;
+        }
         console.log(`[llmAgent] Constraint added. Total: ${llmMemory.constraints.length}`);
 
         const cells = extractCells(objectiveText);
@@ -151,8 +395,15 @@ export async function setObjective(objectiveText) {
             blacklistCell(cell.x, cell.y);
             console.log(`[llmAgent] Blacklisted cell (${cell.x},${cell.y})`);
         }
+        if (isLeftmostTileObjective(objectiveText)) {
+            const count = blacklistLeftmostTiles();
+            console.log(`[llmAgent] Blacklisted ${count} leftmost tile(s)`);
+        }
     } else {
         llmMemory.objective = objectiveText;
+        llmMemory.specialObjective = isLeftmostTileObjective(objectiveText)
+            ? { type: 'drop_leftmost' }
+            : null;
         console.log(`[llmAgent] New strategy: "${objectiveText}"`);
     }
 

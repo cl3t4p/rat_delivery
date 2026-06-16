@@ -20,6 +20,8 @@ import {
     onMessage,
 } from './coordination.js';
 import { aStar } from './pathfinding.js';
+import { llmMemory } from '../llm/llmAgent.js';
+import { deliveryValue } from './scoring.js';
 
 // Improvement threshold: replace the current intention only if the new one
 // is significantly better.
@@ -111,6 +113,7 @@ export function notifyActionFailed(reason) {
  */
 export function notifyIntentionDone() {
     console.log(`[intentionRevision] Completed: ${currentIntention?.type}`);
+    const completedIntention = currentIntention;
     if (currentIntention) {
         currentIntention.status = 'done';
         broadcastIntention(currentIntention);
@@ -118,7 +121,7 @@ export function notifyIntentionDone() {
     currentIntention = null;
 
     // After each pickup, check if a handoff to the peer is beneficial.
-    if (beliefs.me.carrying.length >= 1) {
+    if (beliefs.me.carrying.length >= 1 && completedIntention?._operatorObjective !== true) {
         const handoff = evaluateHandoff();
         if (handoff) {
             proposeHandoffWithBusyRetry(handoff);
@@ -289,7 +292,27 @@ function isIntentionStillValid(intention) {
         }
 
         case 'go_deliver': {
-            return beliefs.me.carrying.length > 0; // Valid only if i am carrying something
+            if (beliefs.me.carrying.length === 0) return false;
+            if (
+                intention.targetPos &&
+                beliefs.me.x !== null &&
+                beliefs.me.y !== null &&
+                deliveryValue(
+                    beliefs.me.carrying,
+                    { x: beliefs.me.x, y: beliefs.me.y },
+                    intention.targetPos
+                ) <= 0
+            ) {
+                console.log('[intentionRevision] Delivery target has zero value under reward rules');
+                return false;
+            }
+            return true;
+        }
+
+        case 'go_putdown': {
+            if (beliefs.me.carrying.length === 0) return false;
+            if (!intention.targetPos) return false;
+            return isWalkable(intention.targetPos.x, intention.targetPos.y);
         }
 
         case 'go_to': {
@@ -414,10 +437,22 @@ export async function revise(force = false) {
             currentIntention.type === 'go_handoff' ||
             currentIntention.type === 'go_handoff_receive' ||
             isHandoffRetryWait(currentIntention);
+        const stackRule = llmMemory.rewardRules?.stackRule ?? null;
+        const deliveryViolatesStackRule =
+            currentIntention.type === 'go_deliver' &&
+            stackRule &&
+            stackRule.multiplier > 1 &&
+            beliefs.me.carrying.length > 0 &&
+            beliefs.me.carrying.length < stackRule.exact &&
+            beliefs.me.carrying.length < (beliefs.config?.MAX_PARCELS ?? 1);
+        const operatorProtected =
+            currentIntention._operatorObjective === true && !deliveryViolatesStackRule;
 
         const improvement = candidate.score - currentIntention.score;
-        if ( !exploringBeatsPickup && !handoffProtected && (escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD) ) {
-            const reason = escapeWait
+        if ( !exploringBeatsPickup && !handoffProtected && !operatorProtected && (escapeWait || waitExpired || pickupBeatsLowValueRoaming || improvement > IMPROVEMENT_THRESHOLD) ) {
+            const reason = deliveryViolatesStackRule
+                ? `building stack ${beliefs.me.carrying.length}/${stackRule.exact}`
+                : escapeWait
                 ? 'escaping wait'
                 : waitExpired
                     ? 'wait expired'

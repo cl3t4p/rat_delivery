@@ -265,18 +265,19 @@ export function evaluateHandoff() {
     const savedASteps = distADel - distAMeet;
     const condition1 = savedASteps > HANDOFF_GAIN_THRESHOLD;
 
-    // Condition 2: B's detour to meetTile costs less than its current active path.
-    // If B is idle/roaming, treat it as available for the handoff.
+    // Condition 2: the handoff must not cost the team more steps than it saves.
+    // Break-even: B's total route (meet→delivery) must be shorter than A going
+    // directly to delivery. If B is actively heading somewhere, also check that
+    // the handoff detour is shorter than continuing to that target.
     const peerTarget =
         peer.intention?.status === 'active' &&
         (peer.intention.type === 'go_pick_up' || peer.intention.type === 'go_deliver') &&
         peer.intention.targetPos
             ? peer.intention.targetPos
             : null;
-    const distBCurrent = peerTarget
-        ? manhattanDistance(posB, peerTarget)
-        : Infinity;
-    const condition2 = distBMeet + distMeetDel < distBCurrent;
+    const condition2 = peerTarget
+        ? manhattanDistance(posB, peerTarget) > distBMeet + distMeetDel
+        : distBMeet + distMeetDel < distADel;
 
     // Condition 3: handoff should free A significantly before direct delivery,
     // without losing more than a tiny amount of parcel value. Handoff usually
@@ -295,8 +296,13 @@ export function evaluateHandoff() {
         valueHandoff + HANDOFF_MAX_REWARD_LOSS >= valueAAlone;
 
     if (!condition1 || !condition2 || !conditionValue) {
-        if (condition1 && condition2) {
-            // Route is shorter but reward does not improve — log and skip.
+        if (condition1 && !condition2) {
+            console.log(
+                `[coord] Handoff rejected (peer route not shorter): ` +
+                `distBMeet=${distBMeet}+distMeetDel=${distMeetDel}=${distBMeet+distMeetDel} ` +
+                `distADel=${distADel} peerActive=${!!peerTarget}`
+            );
+        } else if (condition1 && condition2) {
             console.log(
                 `[coord] Handoff rejected: Aalone=${valueAAlone.toFixed(1)} ` +
                 `handoff=${valueHandoff.toFixed(1)} savedA=${savedASteps}`
@@ -1342,8 +1348,13 @@ function handleHandoffRequest(envelope, senderId) {
         myIntention &&
         (myIntention.status === 'active' || myIntention.status === 'pending') &&
         (myIntention.type === 'go_handoff' || myIntention.type === 'go_handoff_receive');
+    const isOperatorObjective =
+        myIntention &&
+        myIntention.status === 'active' &&
+        myIntention._operatorObjective === true;
     const isBusy =
         isHandoffCommitted ||
+        isOperatorObjective ||
         (myIntention &&
             myIntention.status === 'active' &&
             (myIntention.type === 'go_pick_up' || myIntention.type === 'go_deliver'));

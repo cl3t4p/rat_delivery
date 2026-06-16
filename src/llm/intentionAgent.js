@@ -23,13 +23,17 @@ import {
     createIntention,
     findNearestDeliveryTile,
     findBestDeliveryTile,
+    findBestDiscardTile,
     findNearestSpawnerTile,
+    findBestPickUp,
     getBestIntention,
 } from '../bdi/deliberation.js';
+import { aStar } from '../bdi/pathfinding.js';
 import { llmClient, llmMemory } from './llmAgent.js';
 import {
-    pickupValue,
     deliveryValue,
+    estimatedRewardAtDelivery,
+    applyDeliveryRewardRules,
 } from '../bdi/scoring.js';
 
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
@@ -125,19 +129,37 @@ const TOOL_IMPL = {
     go_pick_up(args, me) {
         const parcel = args?.parcelId ? beliefs.parcels.get(args.parcelId) : null;
         if (!parcel || parcel.carriedBy || parcel.reward <= 0) return null;
-        const deliveryTile = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
-        if (!deliveryTile) return null;
-        const score = pickupValue(parcel, me, deliveryTile);
-        if (score <= 0) return null;
-        return createIntention('go_pick_up', parcel.id, { x: parcel.x, y: parcel.y }, score);
+        const bestPickUp = findBestPickUp(me, { allowOutOfZone: true, log: false });
+        if (!bestPickUp || bestPickUp.parcelId !== parcel.id || bestPickUp.score <= 0) return null;
+        return bestPickUp;
     },
 
     /** @returns {Intention|null} */
     go_deliver(_args, me) {
         if (beliefs.me.carrying.length === 0) return null;
+        const stackRule = llmMemory.rewardRules?.stackRule ?? null;
+        const capacity = beliefs.config?.MAX_PARCELS ?? 1;
+        if (
+            stackRule &&
+            stackRule.multiplier > 1 &&
+            beliefs.me.carrying.length < stackRule.exact &&
+            beliefs.me.carrying.length < capacity
+        ) {
+            return null;
+        }
+        if (carriedBaseReward() > (llmMemory.rewardRules?.maxDeliveryReward ?? Infinity)) {
+            const discard = findBestDiscardTile(me);
+            if (discard) return createIntention('go_putdown', null, discard, 0);
+            return null;
+        }
         const target = findBestDeliveryTile(me);
         if (!target) return null;
         const score = deliveryValue(beliefs.me.carrying, me, target);
+        if (score <= 0) {
+            const discard = findBestDiscardTile(me);
+            if (discard) return createIntention('go_putdown', null, discard, 0);
+            return null;
+        }
         return createIntention('go_deliver', null, target, score);
     },
 
@@ -166,6 +188,13 @@ const TOOL_IMPL = {
         return createIntention('wait', null, null, 0);
     },
 };
+
+function carriedBaseReward() {
+    return beliefs.me.carrying.reduce((total, id) => {
+        const parcel = beliefs.parcels.get(id);
+        return total + (parcel?.reward ?? 0);
+    }, 0);
+}
 
 const SYSTEM_PROMPT = `
 You are the deliberation agent of a Deliveroo.js player. You decide the single
@@ -244,14 +273,15 @@ export function buildStateSnapshot(me) {
                 const distanceToDelivery = deliveryTile
                     ? manhattanDistance({ x: p.x, y: p.y }, deliveryTile)
                     : null;
-                const score = deliveryTile ? pickupValue(p, me, deliveryTile) : -Infinity;
-                const estimatedRewardAtDelivery = deliveryTile
-                    ? Math.max(0, p.reward - Math.floor(
-                        ((distanceToParcel + (distanceToDelivery ?? 0)) *
-                            (beliefs.config?.MS_PER_STEP ?? 500)) /
-                            (beliefs.config?.PARCEL_DECADING_INTERVAL ?? Infinity)
-                    ))
+                const rawEstimatedRewardAtDelivery = deliveryTile
+                    ? estimatedRewardAtDelivery(p.reward, distanceToParcel + (distanceToDelivery ?? 0))
                     : 0;
+                const adjustedRewardAtDelivery = deliveryTile
+                    ? applyDeliveryRewardRules(rawEstimatedRewardAtDelivery, 1, deliveryTile)
+                    : 0;
+                const score = adjustedRewardAtDelivery > 0
+                    ? adjustedRewardAtDelivery - distanceToParcel - (distanceToDelivery ?? 0)
+                    : -Infinity;
                 return {
                     id: p.id,
                     x: p.x,
@@ -259,7 +289,7 @@ export function buildStateSnapshot(me) {
                     reward: p.reward,
                     distanceToParcel,
                     distanceToDelivery,
-                    estimatedRewardAtDelivery,
+                    estimatedRewardAtDelivery: adjustedRewardAtDelivery,
                     score,
                 };
             }),
@@ -272,11 +302,64 @@ export function buildStateSnapshot(me) {
             return { x, y };
         }),
         constraints: llmMemory.constraints,
+        rewardRules: llmMemory.rewardRules,
         world: {
             parcelGenerationMs: beliefs.config.PARCEL_GENERATION_INTERVAL,
             maxCarry: beliefs.config.MAX_PARCELS,
         },
     };
+}
+
+function getLeftmostReachableTile(me) {
+    let best = null;
+    let bestPathLength = Infinity;
+    let bestX = Infinity;
+
+    for (const [key, tile] of beliefs.grid) {
+        if (tile.type === '0') continue;
+        const [x, y] = key.split(',').map(Number);
+        if (x > bestX) continue;
+        if (!isWalkable(x, y)) continue;
+
+        const result = aStar(me, { x, y }, { avoidAgents: false });
+        if (!result) continue;
+
+        if (x < bestX || result.moves.length < bestPathLength) {
+            bestX = x;
+            bestPathLength = result.moves.length;
+            best = { x, y };
+        }
+    }
+
+    return best;
+}
+
+function markOperatorObjective(intention) {
+    if (intention) intention._operatorObjective = true;
+    return intention;
+}
+
+function getSpecialObjectiveIntention(me) {
+    if (llmMemory.specialObjective?.type !== 'drop_leftmost') return null;
+
+    if (beliefs.me.carrying.length > 0) {
+        const target = getLeftmostReachableTile(me);
+        if (!target) return null;
+        console.log(`[intentionAgent] Special objective drop_leftmost → go_putdown (${target.x},${target.y})`);
+        return markOperatorObjective(createIntention('go_putdown', null, target, 0));
+    }
+
+    const pickup = findBestPickUp(me, {
+        allowOutOfZone: true,
+        minScore: -Infinity,
+        log: false,
+    });
+    if (pickup) {
+        console.log(`[intentionAgent] Special objective drop_leftmost → ${pickup.type} (${pickup.parcelId})`);
+        return markOperatorObjective(pickup);
+    }
+
+    return null;
 }
 
 /**
@@ -296,6 +379,8 @@ export async function generateBestIntention() {
 
     const me = { x: beliefs.me.x, y: beliefs.me.y };
     const snapshot = buildStateSnapshot(me);
+    const specialIntention = getSpecialObjectiveIntention(me);
+    if (specialIntention) return specialIntention;
 
     const constraintBlock = llmMemory.constraints.length > 0
         ? `Constraints (NEVER violate these):\n${llmMemory.constraints.map((c) => `- ${c}`).join('\n')}\n\n`
@@ -348,6 +433,9 @@ export async function generateBestIntention() {
         if (!intention) {
             console.log(`[intentionAgent] Tool "${name}" not applicable now → heuristic fallback`);
             return getBestIntention();
+        }
+        if (llmMemory.objective || llmMemory.specialObjective) {
+            markOperatorObjective(intention);
         }
 
         console.log(
