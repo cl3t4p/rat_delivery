@@ -39,6 +39,9 @@ export function initMessageHandlers({ getCurrentIntention, forceIntention, reque
     _forceIntention = forceIntention;
     if (requestRevision) _requestRevision = requestRevision;
 
+    onMessage(MSG_TYPE.HELLO, (envelope, senderId, senderName) => {
+        touchPeer(senderId, senderName);
+    });
     onMessage(MSG_TYPE.BELIEF_UPDATE, handleBeliefUpdate);
     onMessage(MSG_TYPE.INTENTION_UPDATE, handleIntentionUpdate);
     onMessage(MSG_TYPE.REQUEST, handleRequest);

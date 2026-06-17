@@ -8,7 +8,7 @@
 
 /** @typedef {'up'|'down'|'left'|'right'} Direction */
 
-/** @typedef {'topLeft'|'topRight'|'bottomLeft'|'bottomRight'|null} ZoneName */
+/** @typedef {'left'|'right'|'top'|'bottom'|null} ZoneName */
 
 /** @typedef {'go_pick_up'|'go_deliver'|'explore'|'go_to'|'wait'|'go_handoff'|'go_handoff_receive'} IntentionType */
 

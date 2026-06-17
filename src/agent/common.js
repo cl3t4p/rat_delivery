@@ -10,6 +10,8 @@
 import { beliefs, decayParcelsReward, clockEventToMs } from '../bdi/beliefs.js';
 import { getCurrentIntention } from '../bdi/intentionRevision.js';
 
+export const REVISE_HEARTBEAT_MS = Number(process.env.REVISE_HEARTBEAT_MS) || 200;
+
 const BLACKLIST_LOG = (process.env.BLACKLIST_LOG ?? '')
     .split(',')
     .map((s) => s.trim())

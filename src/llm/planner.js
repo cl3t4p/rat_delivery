@@ -75,8 +75,8 @@ export async function createPlan(objective, environmentSnapshot) {
  * Il modello può includere testo di Chain-of-Thought prima del JSON.
  * quindi cerchiamo il blocco JSON dentro la risposta.
  *
- * @param {string} text 			output grezzo del modello
- * @returns {string[]|null} 		array di step o null se non parsabile
+ * @returns {string[]|null}        array di step o null se non parsabile
+ * @param text
  */
 
 function parsePlan(text) {

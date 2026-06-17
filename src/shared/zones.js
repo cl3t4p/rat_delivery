@@ -1,8 +1,12 @@
 /**
  * zones.js
  *
- * Shared zone utilities — splits the map into four quadrants and caches
- * map bounds so callers pay the O(|grid|) scan at most once per map load.
+ * Shared zone utilities. For two agents the map is split into TWO halves along
+ * its longer axis (a wide map → left/right, a tall map → top/bottom). If a half
+ * happens to contain no spawners, that agent simply parks at the map's half point
+ * (see deliberation.js) instead of patrolling — no special-casing here.
+ *
+ * Bounds are cached so callers pay the O(|grid|) scan at most once per map load.
  */
 
 /** @type {{ minX: number, maxX: number, minY: number, maxY: number } | null} */
@@ -55,21 +59,71 @@ export function getMapBounds(grid) {
 }
 
 /**
- * Returns the zone quadrant for a map position.
+ * Split axis: 'y' for a map taller than it is wide (split top/bottom), else 'x'
+ * (split left/right).
+ *
+ * @param {Map<string, any>} grid
+ * @returns {'x'|'y'}
+ */
+export function getSplitAxis(grid) {
+    if (grid.size === 0) {
+        return 'x';
+    }
+    const { minX, maxX, minY, maxY } = getMapBounds(grid);
+    if (maxY - minY > maxX - minX) {
+        return 'y';
+    }
+    return 'x';
+}
+
+/**
+ * Returns the half point of the map: the point on the split line, used as the
+ * parking spot for an agent whose half has no spawners.
+ *
+ * @param {Map<string, any>} grid
+ * @returns {{ x: number, y: number }}
+ */
+export function getHalfPoint(grid) {
+    const { minX, maxX, minY, maxY } = getMapBounds(grid);
+    return { x: Math.round((minX + maxX) / 2), y: Math.round((minY + maxY) / 2) };
+}
+
+/**
+ * Returns the two zone names, low coordinate first, or [] before the map loads.
+ *
+ * @param {Map<string, any>} grid
+ * @returns {[string, string] | []}
+ */
+export function getZones(grid) {
+    if (grid.size === 0) {
+        return [];
+    }
+    if (getSplitAxis(grid) === 'y') {
+        return ['bottom', 'top'];
+    }
+    return ['left', 'right'];
+}
+
+/**
+ * Returns the zone (map half) for a position, or null before the map loads.
  *
  * @param {{ x: number, y: number }} pos
- * @param {Map<string, any>} grid - beliefs.grid (used only to compute bounds once)
- * @returns {'topLeft'|'topRight'|'bottomLeft'|'bottomRight'}
+ * @param {Map<string, any>} grid
+ * @returns {'left'|'right'|'top'|'bottom'|null}
  */
 export function getZone(pos, grid) {
-    if (grid.size === 0) return 'bottomLeft';
+    if (grid.size === 0) {
+        return null;
+    }
     const { minX, maxX, minY, maxY } = getMapBounds(grid);
-    const midX = (minX + maxX) / 2;
-    const midY = (minY + maxY) / 2;
-    const top = pos.y >= midY;
-    const right = pos.x >= midX;
-    if (top && !right) return 'topLeft';
-    if (top && right) return 'topRight';
-    if (!top && !right) return 'bottomLeft';
-    return 'bottomRight';
+    if (getSplitAxis(grid) === 'y') {
+        if (pos.y >= (minY + maxY) / 2) {
+            return 'top';
+        }
+        return 'bottom';
+    }
+    if (pos.x >= (minX + maxX) / 2) {
+        return 'right';
+    }
+    return 'left';
 }

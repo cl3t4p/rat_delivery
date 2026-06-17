@@ -1,26 +1,36 @@
 /**
  * intentionAgent.js
  *
- * A standalone LLM deliberation agent, decoupled from the BDI heuristic.
+ * The LLM deliberation agent: every tick it chooses the single best next action
+ * for agent B by calling exactly one tool. The LLM is the sole decision-maker —
+ * there is no heuristic fallback; if the model errors or no tool applies, the
+ * agent waits and retries next tick.
  *
- * Idea:
- *   - The BDI asks "what should I do next?".
- *   - We hand the LLM the grid map, the current state and a set of *tools*
- *     (the intention-builders it is allowed to use).
- *   - The LLM answers by *calling one tool*. We run that tool locally and it
- *     produces the concrete Intention object the executor will carry out.
+ * The tools fall into three groups:
  *
- * In other words the LLM does not return free text: it picks the best
- * intention by invoking exactly one of the functions exposed to it.
+ *   1. ACTIONS — turn into a concrete Intention the executor runs
+ *      (go_pick_up, go_deliver, explore, go_to, wait).
  *
- * If anything goes wrong (no API, malformed answer, unknown tool) we fall
- * back to the deterministic heuristic in deliberation.js, so the agent keeps
- * playing even when the model is unavailable.
+ *   2. MISSIONS / CHAT — read and answer the special missions sent over the
+ *      Deliveroo chat (send_message, resolve_mission). These cover level-1
+ *      atomic missions: "move to (4,7)", "what is the capital of Italy?",
+ *      "calculate 5*5" — the model computes the answer itself and sends it.
+ *
+ *   3. RULES — install persistent strategy modifiers for level-2 missions
+ *      (set_delivery_stack_size, set_delivery_tile_reward, set_max_pickup_reward,
+ *      avoid_tile, add_constraint). A rule stays active for the rest of the
+ *      match and reshapes ordinary pick-up / delivery behaviour; the action
+ *      tools below read llmMemory.rules every tick and honour them.
+ *
+ * Level-3 missions (coordinating both agents) are intentionally NOT handled here
+ * yet. The hook for them is the chat channel (llmMemory.sendMessage) plus a
+ * future `send_cmd` tool that issues commands (e.g. freeze / unfreeze) to the
+ * BDI peer; see the note next to the RULE tools.
  */
 
-import { beliefs, manhattanDistance, isWalkable } from '../bdi/beliefs.js';
+import { beliefs, manhattanDistance, isWalkable, blacklistCell } from '../bdi/beliefs.js';
 import { costToReachPath } from '../bdi/helper.js';
-import { createIntention } from '../bdi/deliberation.js';
+import { createIntention, findBestPickUp } from '../bdi/deliberation.js';
 import {
     findNearestSpawnerTile,
     findNearestDeliveryTile,
@@ -34,38 +44,32 @@ const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
 
-// Returned by side-effect tools (send_message, resolve_mission) that perform an
-// action but produce no movement. It tells generateBestIntention to deliberate
-// again so the LLM still chooses a real intention this tick (no heuristic).
+// Returned by side-effect tools (send/resolve/rule installs) that change memory
+// but produce no movement. It tells the deliberation loop to ask the model again
+// this same tick, with the updated state, so it still ends on a real action.
 const CONTINUE = Symbol('continue');
 
-// Upper bound on LLM rounds per tick: side-effect tools and not-applicable
-// retries consume rounds, so allow a few to let the model recover within a tick.
-// After this many rounds we wait and try again next tick.
-const MAX_ROUNDS = 6;
+// Upper bound on model rounds per tick. Side-effect tools and not-applicable
+// retries each consume a round; a few rounds let the model recover within a tick
+// (e.g. install a rule, resolve the mission, then choose an action).
+const MAX_ROUNDS = 8;
 
-// Tools exposed to the LLM
-//
-// Each entry is an OpenAI function-calling tool definition. The LLM selects
-// one of these to express the best intention. The matching local
-// implementation lives in TOOL_IMPL below and turns the call into a real
-// Intention object.
+// Tool definitions exposed to the model (OpenAI function-calling format)
+
 const INTENTION_TOOLS = [
+    // ── Actions ──────────────────────────────────────────────────────────────
     {
         type: 'function',
         function: {
             name: 'go_pick_up',
             description:
-                'Walk to a free parcel and pick it up. Pick the parcel that maximises ' +
-                'expected delivered value considering distance to parcel, distance to delivery and decay. ' +
-                'Only choose a parcel listed in freeParcels with a positive score.',
+                'Walk to a free parcel and pick it up. Choose the parcel in freeParcels with the ' +
+                'highest score (it already accounts for distance and decay). Only parcels listed in ' +
+                'freeParcels are valid.',
             parameters: {
                 type: 'object',
                 properties: {
-                    parcelId: {
-                        type: 'string',
-                        description: 'The id of the free parcel to collect.',
-                    },
+                    parcelId: { type: 'string', description: 'Id of the free parcel to collect.' },
                 },
                 required: ['parcelId'],
             },
@@ -76,10 +80,17 @@ const INTENTION_TOOLS = [
         function: {
             name: 'go_deliver',
             description:
-                'Carry the parcels currently held to the nearest delivery tile and drop them. ' +
-                'Uses estimated reward at arrival accounting for decay. ' +
-                'Only valid when carrying at least one parcel.',
-            parameters: { type: 'object', properties: {} },
+                'Carry the held parcels to a delivery tile and drop them. With no argument it picks ' +
+                'the best-scoring delivery tile (honouring any reward multipliers). Pass x,y to drop ' +
+                'at a SPECIFIC delivery tile — use this for missions like "deliver in the leftmost ' +
+                'tile" or to hit a bonus tile. Only valid while carrying at least one parcel.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    x: { type: 'integer', description: 'Optional: x of a specific delivery tile.' },
+                    y: { type: 'integer', description: 'Optional: y of a specific delivery tile.' },
+                },
+            },
         },
     },
     {
@@ -87,8 +98,8 @@ const INTENTION_TOOLS = [
         function: {
             name: 'explore',
             description:
-                'Head to the nearest spawner tile to look for new parcels. Use this when there ' +
-                'is nothing worth picking up and nothing to deliver.',
+                'Head to the nearest spawner to look for new parcels. Use when there is nothing ' +
+                'worth picking up and nothing to deliver.',
             parameters: { type: 'object', properties: {} },
         },
     },
@@ -97,15 +108,14 @@ const INTENTION_TOOLS = [
         function: {
             name: 'go_to',
             description:
-                'Walk to a specific map cell (x,y) without picking up or delivering. Use this for ' +
-                'positioning: camping near a chosen spawner, repositioning toward a contested or ' +
-                'parcel-rich area, or moving to a better vantage point. The target must be a ' +
-                'known, walkable cell (not a wall and not outside the map).',
+                'Walk to a specific walkable cell (x,y) without picking up or delivering. Use it for ' +
+                'positioning, or for atomic missions like "move to coordinate (4,7)". If the cell is a ' +
+                'wall or off-map it is snapped to the nearest reachable walkable tile.',
             parameters: {
                 type: 'object',
                 properties: {
-                    x: { type: 'integer', description: 'Target cell x coordinate.' },
-                    y: { type: 'integer', description: 'Target cell y coordinate.' },
+                    x: { type: 'integer', description: 'Target cell x.' },
+                    y: { type: 'integer', description: 'Target cell y.' },
                 },
                 required: ['x', 'y'],
             },
@@ -115,16 +125,20 @@ const INTENTION_TOOLS = [
         type: 'function',
         function: {
             name: 'wait',
-            description:
-                'Stay in place for this turn. Last resort, when no other action is possible.',
+            description: 'Stay in place this turn. Last resort, when no other action is possible.',
             parameters: { type: 'object', properties: {} },
         },
     },
+
+    // ── Missions / chat ──────────────────────────────────────────────────────
     {
         type: 'function',
         function: {
             name: 'send_message',
-            description: 'Send a chat message to the other agent (or broadcast it).',
+            description:
+                'Send a chat message. Use it to ANSWER a special mission (e.g. a question or a ' +
+                'calculation): compute the answer yourself and send it. Pass resolveIndex to also ' +
+                'remove that mission once answered, and the reply is routed back to whoever sent it.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -132,13 +146,14 @@ const INTENTION_TOOLS = [
                     to: {
                         type: 'string',
                         enum: ['peer', 'all'],
-                        description: 'Send only to the teammate ("peer") or broadcast ("all").',
+                        description:
+                            'Send only to the teammate ("peer") or broadcast ("all"). ' +
+                            'Ignored when resolveIndex is given (reply goes to the sender).',
                     },
                     resolveIndex: {
                         type: 'integer',
                         description:
-                            'Index of the mission this message answers; it is removed from ' +
-                            'memory after sending. Omit when just coordinating with the peer.',
+                            'Index of the mission this answers; it is removed after sending.',
                     },
                 },
                 required: ['text'],
@@ -150,46 +165,154 @@ const INTENTION_TOOLS = [
         function: {
             name: 'resolve_mission',
             description:
-                'Remove a special mission from memory once it is done, not worth the points, ' +
-                'or just junk/noise. Use this to clean up after completing or answering a ' +
-                'mission, or to ignore one whose reward does not justify the cost.',
+                'Remove a special mission from memory once it is done, not worth the points, or ' +
+                'junk. NEVER carry out a mission whose reward is negative or zero — resolve it instead.',
             parameters: {
                 type: 'object',
                 properties: {
-                    index: {
-                        type: 'integer',
-                        description: 'Index of the mission in the Special missions list to remove.',
-                    },
+                    index: { type: 'integer', description: 'Index of the mission to remove.' },
                 },
                 required: ['index'],
             },
         },
     },
+
+    // ── Rules (level-2 persistent strategy) ──────────────────────────────────
+    {
+        type: 'function',
+        function: {
+            name: 'set_delivery_stack_size',
+            description:
+                'Persistent rule: deliver parcels only in stacks of exactly this many (e.g. ' +
+                '"deliver stacks of exactly 3"). The agent then keeps picking up until it holds that ' +
+                'many before delivering. Pass size 0 to clear the rule.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    size: { type: 'integer', description: 'Exact stack size, or 0 to clear.' },
+                },
+                required: ['size'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'set_delivery_tile_reward',
+            description:
+                'Persistent rule: set the reward multiplier of a delivery tile (x,y). Use multiplier ' +
+                '0 for a tile that scores nothing (never deliver there), a value > 1 for a bonus tile ' +
+                'to prefer (e.g. "delivering in (3,1) gives 5x" -> multiplier 5). Default for any tile ' +
+                'not set is 1.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    x: { type: 'integer', description: 'Delivery tile x.' },
+                    y: { type: 'integer', description: 'Delivery tile y.' },
+                    multiplier: {
+                        type: 'number',
+                        description: 'Reward multiplier (0 = no reward).',
+                    },
+                },
+                required: ['x', 'y', 'multiplier'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'set_max_pickup_reward',
+            description:
+                'Persistent rule: never pick up a parcel whose reward exceeds this value (e.g. ' +
+                '"parcels with score higher than 10 give no reward" -> 10). Pass a negative number ' +
+                'to clear the rule.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    reward: {
+                        type: 'integer',
+                        description: 'Max pickable reward, or < 0 to clear.',
+                    },
+                },
+                required: ['reward'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'avoid_tile',
+            description:
+                'Persistent rule: never walk through tile (x,y) (e.g. "do not go through (5,5) or ' +
+                'you lose 50 points"). The cell is blacklisted so all movement routes around it.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    x: { type: 'integer', description: 'Tile x to avoid.' },
+                    y: { type: 'integer', description: 'Tile y to avoid.' },
+                },
+                required: ['x', 'y'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'add_constraint',
+            description:
+                'Record a free-text hard rule that must never be violated, when no specific rule ' +
+                'tool fits. It is shown on every future tick as a reminder.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    text: { type: 'string', description: 'The constraint in plain language.' },
+                },
+                required: ['text'],
+            },
+        },
+    },
 ];
 
-// Local implementations of the tools
+// Local implementations
 //
-// Each builder receives the parsed arguments plus the current position and
-// returns an Intention, or null when the choice is not applicable (e.g. the
-// LLM asked to pick up a parcel that no longer exists).
+// Each builder receives the parsed args plus the current position. Action tools
+// return an Intention or null (not applicable → the model is asked again).
+// Side-effect tools mutate memory and return CONTINUE (or a wait when nothing
+// changed, to avoid the model repeating an impossible action at temperature 0).
+
 const TOOL_IMPL = {
+    // ── Actions ──────────────────────────────────────────────────────────────
+
     /** @returns {Intention|null} */
     go_pick_up(args, me) {
         const parcel = args?.parcelId ? beliefs.parcels.get(args.parcelId) : null;
-        // The LLM is the decision-maker: honour its choice as long as the parcel
-        // still exists and nobody is carrying it. Don't reject low-value pickups
-        // here (a score gate just makes the model loop on the same parcel). The
-        // score is computed only for logging/telemetry.
         if (!parcel || parcel.carriedBy) return null;
+
+        // Honor the level-2 reward cap: high-reward parcels are off-limits.
+        const cap = llmMemory.rules.maxPickupReward;
+        if (cap != null && parcel.reward > cap) return null;
+
         const deliveryTile = findNearestDeliveryTile({ x: parcel.x, y: parcel.y });
         const score = deliveryTile ? pickupValue(parcel, me, deliveryTile) : parcel.reward;
         return createIntention('go_pick_up', parcel.id, { x: parcel.x, y: parcel.y }, score);
     },
 
     /** @returns {Intention|null} */
-    go_deliver(_args, me) {
+    go_deliver(args, me) {
         if (beliefs.me.carrying.length === 0) return null;
-        const target = findBestDeliveryTile(me);
+
+        // Stacking rule: while below the required stack size (and still able to
+        // carry and pick up more), don't deliver yet — top up first.
+        const stack = llmMemory.rules.deliverStackSize;
+        if (stack && stack > 1) {
+            const carrying = beliefs.me.carrying.length;
+            const cap = beliefs.config?.MAX_PARCELS ?? 1;
+            if (carrying < stack && carrying < cap && findBestPickUp(me, { log: false })) {
+                return null; // not a full stack yet and a pickup is available
+            }
+        }
+
+        const target = chooseDeliveryTile(me, args);
         if (!target) return null;
         const score = deliveryValue(beliefs.me.carrying, me, target);
         return createIntention('go_deliver', null, target, score);
@@ -199,9 +322,7 @@ const TOOL_IMPL = {
     explore(_args, me) {
         const spawner = findNearestSpawnerTile(me);
         if (!spawner) return null;
-        if (manhattanDistance(me, spawner) === 0) {
-            return createIntention('wait', null, null, 0);
-        }
+        if (manhattanDistance(me, spawner) === 0) return createIntention('wait', null, null, 0);
         return createIntention('explore', null, spawner, 0);
     },
 
@@ -211,10 +332,6 @@ const TOOL_IMPL = {
         const y = Number(args?.y);
         if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
 
-        // The LLM often aims at an approximate spot (e.g. a map corner for
-        // "bottom-left") that turns out to be a wall or off-map. Snap to the
-        // nearest reachable walkable tile so the agent actually goes there,
-        // instead of looping forever on "not applicable".
         const target = isWalkable(x, y) ? { x, y } : nearestReachableWalkable(me, x, y);
         if (!target) return null;
         if (manhattanDistance(me, target) === 0) return null; // already there
@@ -226,43 +343,144 @@ const TOOL_IMPL = {
         return createIntention('wait', null, null, 0);
     },
 
+    // ── Missions / chat ──────────────────────────────────────────────────────
+
     /** @returns {Intention | typeof CONTINUE} */
     send_message(args) {
         const text = String(args?.text ?? '').trim();
+        const mission = missionAt(args?.resolveIndex);
+
         if (text && typeof llmMemory.sendMessage === 'function') {
-            llmMemory.sendMessage(text, args?.to === 'peer' ? 'peer' : 'all');
-            console.log(`[intentionAgent] send_message (${args?.to ?? 'all'}): "${text}"`);
+            // When answering a mission, route the reply back to whoever sent it;
+            // otherwise honour the requested 'peer' / 'all' target.
+            const to = mission?.from ?? (args?.to === 'peer' ? 'peer' : 'all');
+            llmMemory.sendMessage(text, to);
+            console.log(`[intentionAgent] send_message (${to}): "${text}"`);
         }
 
-        // Answering a mission removes it in the same step so it is never answered
-        // again. Only then is it safe to re-deliberate (state changed); otherwise
-        // re-deliberating with an unchanged prompt would just repeat this send at
-        // temperature 0, so we wait out the tick instead.
-        const resolved = removeMission(args?.resolveIndex);
-        return resolved ? CONTINUE : createIntention('wait', null, null, 0);
+        // Resolving in the same step prevents answering the same mission twice. We
+        // only re-deliberate when something actually changed (a mission removed);
+        // otherwise we wait, so a temperature-0 model doesn't repeat the send.
+        return removeMission(args?.resolveIndex)
+            ? CONTINUE
+            : createIntention('wait', null, null, 0);
     },
 
     /** @returns {Intention | typeof CONTINUE} */
     resolve_mission(args) {
-        console.log(
-            `[intentionAgent] resolved_mission idx:${args?.index} (${llmMemory.missions[args?.index]})`
-        );
-        const removed = removeMission(args?.index);
+        return removeMission(args?.index) ? CONTINUE : createIntention('wait', null, null, 0);
+    },
 
-        // Mission list changed: deliberate again for a real intention. If the
-        // index was invalid (nothing removed), don't loop on an unchanged prompt.
-        return removed ? CONTINUE : createIntention('wait', null, null, 0);
+    // ── Rules (level-2 persistent strategy) ──────────────────────────────────
+
+    /** @returns {typeof CONTINUE} */
+    set_delivery_stack_size(args) {
+        const size = Number(args?.size);
+        llmMemory.rules.deliverStackSize = Number.isInteger(size) && size > 0 ? size : null;
+        console.log(`[intentionAgent] rule deliverStackSize=${llmMemory.rules.deliverStackSize}`);
+        return CONTINUE;
+    },
+
+    /** @returns {typeof CONTINUE} */
+    set_delivery_tile_reward(args) {
+        const x = Number(args?.x);
+        const y = Number(args?.y);
+        const m = Number(args?.multiplier);
+        if (Number.isInteger(x) && Number.isInteger(y) && Number.isFinite(m)) {
+            llmMemory.rules.deliveryTileMultipliers[`${x},${y}`] = m;
+            console.log(`[intentionAgent] rule deliveryTile (${x},${y}) multiplier=${m}`);
+        }
+        return CONTINUE;
+    },
+
+    /** @returns {typeof CONTINUE} */
+    set_max_pickup_reward(args) {
+        const reward = Number(args?.reward);
+        llmMemory.rules.maxPickupReward = Number.isFinite(reward) && reward >= 0 ? reward : null;
+        console.log(`[intentionAgent] rule maxPickupReward=${llmMemory.rules.maxPickupReward}`);
+        return CONTINUE;
+    },
+
+    /** @returns {typeof CONTINUE} */
+    avoid_tile(args) {
+        const x = Number(args?.x);
+        const y = Number(args?.y);
+        if (Number.isInteger(x) && Number.isInteger(y)) {
+            const tiles = llmMemory.rules.avoidTiles;
+            if (!tiles.some((t) => t.x === x && t.y === y)) tiles.push({ x, y });
+            blacklistCell(x, y);
+            console.log(`[intentionAgent] rule avoid_tile (${x},${y})`);
+        }
+        return CONTINUE;
+    },
+
+    /** @returns {typeof CONTINUE} */
+    add_constraint(args) {
+        const text = String(args?.text ?? '').trim();
+        if (text && !llmMemory.constraints.includes(text)) {
+            llmMemory.constraints.push(text);
+            console.log(`[intentionAgent] constraint added: "${text}"`);
+        }
+        return CONTINUE;
     },
 };
 
 /**
- * Finds the nearest walkable, reachable tile to a requested (possibly
- * wall/off-map) target. Candidates are scanned closest-first by Manhattan
- * distance and the first one with a real path from `me` is returned.
+ * Picks the delivery tile to drop at, honouring the level-2 reward multipliers.
+ *
+ * With an explicit (x,y) the agent drops there as long as it is a real delivery
+ * tile that is not banned (multiplier <= 0). Otherwise the best tile is chosen by
+ * estimated reward times its multiplier, skipping banned and unreachable tiles.
+ * Falls back to the plain nearest/best delivery tile when no multipliers apply.
  *
  * @param {Position} me
- * @param {number} x - Requested x.
- * @param {number} y - Requested y.
+ * @param {{x?: number, y?: number}} args
+ * @returns {Position|null}
+ */
+function chooseDeliveryTile(me, args) {
+    const multipliers = llmMemory.rules.deliveryTileMultipliers;
+    const multiplierOf = (t) => {
+        const m = multipliers[`${t.x},${t.y}`];
+        return m === undefined ? 1 : m;
+    };
+
+    // Explicit target requested (e.g. "leftmost tile" or a bonus tile).
+    if (Number.isInteger(Number(args?.x)) && Number.isInteger(Number(args?.y))) {
+        const x = Number(args.x);
+        const y = Number(args.y);
+        const tile = beliefs.deliveryTiles.find((t) => t.x === x && t.y === y);
+        if (!tile) return null; // not a delivery tile → dropping there loses the parcels
+        if (multiplierOf(tile) <= 0) return null; // banned tile → refuse
+        return { x: tile.x, y: tile.y };
+    }
+
+    // No multipliers configured: keep the standard best-delivery-tile behaviour.
+    if (Object.keys(multipliers).length === 0) return findBestDeliveryTile(me);
+
+    // Choose the reachable, non-banned tile with the best multiplier-weighted value.
+    let best = null;
+    let bestScore = -Infinity;
+    for (const tile of beliefs.deliveryTiles) {
+        const mult = multiplierOf(tile);
+        if (mult <= 0) continue;
+        if (costToReachPath(me, tile) == null) continue;
+        const score = deliveryValue(beliefs.me.carrying, me, tile) * mult;
+        if (score > bestScore) {
+            bestScore = score;
+            best = { x: tile.x, y: tile.y };
+        }
+    }
+    return best ?? findBestDeliveryTile(me);
+}
+
+/**
+ * Finds the nearest walkable, reachable tile to a requested (possibly wall /
+ * off-map) target. Candidates are scanned closest-first and the first with a
+ * real path from `me` is returned.
+ *
+ * @param {Position} me
+ * @param {number} x
+ * @param {number} y
  * @returns {Position|null}
  */
 function nearestReachableWalkable(me, x, y) {
@@ -274,8 +492,6 @@ function nearestReachableWalkable(me, x, y) {
     }
     candidates.sort((a, b) => a.d - b.d);
 
-    // Cap reachability checks: the closest walkable tile is almost always
-    // reachable, so we rarely scan far.
     const MAX_CHECKS = 25;
     for (let i = 0; i < candidates.length && i < MAX_CHECKS; i++) {
         const c = candidates[i];
@@ -285,7 +501,19 @@ function nearestReachableWalkable(me, x, y) {
 }
 
 /**
- * Removes the mission at `index` from memory. Returns true if one was removed.
+ * Returns the mission at `index`, or null if the index is out of range.
+ *
+ * @param {unknown} index
+ * @returns {{text: string, from: string|null, ts: number}|null}
+ */
+function missionAt(index) {
+    const i = Number(index);
+    if (!Number.isInteger(i) || i < 0 || i >= llmMemory.missions.length) return null;
+    return llmMemory.missions[i];
+}
+
+/**
+ * Removes the mission at `index`. Returns true if one was removed.
  *
  * @param {unknown} index
  * @returns {boolean}
@@ -300,9 +528,9 @@ function removeMission(index) {
 
 const SYSTEM_PROMPT = `
 You are the deliberation module of an autonomous agent playing Deliveroo.js, a grid
-delivery game. Each tick you receive the current map and world state and must choose
-the single best next action. You act ONLY by calling exactly one of the tools provided
-to you. Never write prose, reasoning, or commentary — your entire reply is one tool call.
+delivery game. Each tick you receive the map and world state and choose the single best
+next action. You act ONLY by calling exactly one tool — never write prose or reasoning,
+your entire reply is one tool call.
 
 THE MAP
 Each cell has a type:
@@ -312,75 +540,59 @@ Each cell has a type:
   3 = floor     — walkable, nothing special
   . = unknown / outside the map — treat as not walkable
 Coordinates are (x, y): x is the column (0 = leftmost, increasing right); y is the row.
-The grid is printed with the highest y at the top and y=0 at the bottom, so it reads
-like the screen. Therefore "bottom-left" = low x, low y; "top-right" = high x, high y;
-"center" = the middle of the printed grid.
+The grid is printed with the highest y at the top and y=0 at the bottom, so "bottom-left"
+= low x, low y; "top-right" = high x, high y; "leftmost" = the smallest x.
 
 STATE FIELDS
 - me: your (x, y), how many parcels you carry, and their ids.
-- freeParcels: every pickable parcel, each with:
-    reward                    current point value
-    distanceToParcel          steps from you to it
-    distanceToDelivery        steps from it to the nearest delivery tile
-    estimatedRewardAtDelivery reward left after decay once delivered (0 = worthless)
-    score                     net value after travel; higher is better
-  These are precomputed. Do not recompute them — just compare them.
+- freeParcels: pickable parcels, each with reward, distanceToParcel, distanceToDelivery,
+  estimatedRewardAtDelivery, and score (net value; higher is better). These are precomputed.
 - deliveryTiles: all drop-off coordinates.
-- otherAgents: rival positions. A parcel an opponent is closer to is likely lost —
-  prefer parcels you can reach first.
-- blacklist: tiles to avoid (stuck/blocked). Never target a blacklisted cell.
-- constraints: hard rules you must obey.
-- world.maxCarry: the most parcels you may hold at once.
-- world.parcelGenerationMs: how often parcels spawn.
+- otherAgents, blacklist, constraints: rivals, cells to avoid, hard rules.
+- world.maxCarry: most parcels you may hold at once.
+- activeRules: the persistent strategy rules currently in force (see RULES). Read these so
+  you do not re-install a rule that is already set.
 
-DECISION ORDER (top to bottom; pick the first that applies)
-1. CONSTRAINTS. Every action must respect the listed Constraints. They override all.
-2. OPERATOR OBJECTIVE. If an "Operator objective" is given, treat it as the human's
-   standing intent and let it steer your choices (within constraints).
-3. SPECIAL MISSIONS. If the "Special missions" list is non-empty, handle the worthwhile
-   ones before ordinary parcel work, and clear the bad ones (see MISSIONS).
-4. DELIVER. If you carry one or more parcels, default to delivering. Top up with a
-   pickup first ONLY when you are below maxCarry AND some free parcel has a high score
-   and lies close to you or roughly on the way to a delivery tile. At maxCarry, always
-   deliver.
-5. PICK UP. If carrying nothing (or topping up), pick up the freeParcel with the HIGHEST
-   score. Never pick a parcel with score <= 0 or estimatedRewardAtDelivery == 0 — it
-   pays nothing by the time you arrive.
-6. EXPLORE. If nothing is worth carrying and nothing worth picking up, explore spawners
-   for new parcels.
-7. REPOSITION. Move to a specific walkable cell only for deliberate positioning — camp a
-   spawner, move toward a parcel-rich or contested area. For plain "find parcels",
-   prefer exploring.
-8. WAIT only when literally nothing else is possible; it wastes the tick.
+STANDARD BEHAVIOUR (pick the first that applies, AFTER missions and within constraints)
+1. DELIVER if you carry parcels (respecting any stack-size rule).
+2. PICK UP the highest-score free parcel if carrying nothing or topping up a stack.
+3. EXPLORE spawners when nothing is worth carrying or picking up.
+4. WAIT only when literally nothing else is possible.
 
-MISSIONS
-Each is "index: text" — a natural-language task with an associated point value that may
-be POSITIVE or NEGATIVE. Before doing anything, judge whether the mission is worth it:
-estimate its net value as its reward minus the effort to complete it.
-- A mission whose reward is NEGATIVE or zero, whose payoff does not justify the detour,
-  or whose text is junk/nonsense: clear it with resolve_mission and do NOT carry it out.
-  Completing a negative mission LOSES points — never act on one, just remove it.
-- Only pursue missions with a clearly worthwhile positive payoff.
-- A mission you already stand on / have already satisfied is done — resolve it.
-- IF a mission is not worthwhile clear it with resolve_mission
-- resolve_mission you need to call it 1 time
+SPECIAL MISSIONS  (the "missions" list — index: text — each worth POSITIVE or NEGATIVE points)
+Handle worthwhile missions before ordinary parcel work. First judge net value (reward minus
+effort):
+- A mission with negative or zero reward, or whose payoff does not justify the detour, or
+  that is junk: clear it with resolve_mission and do NOT carry it out. Acting on a negative
+  mission LOSES points.
+- Atomic missions you do directly: "move to (4,7)" -> go_to; "what is the capital of Italy?"
+  or "calculate 5*5" -> compute the answer yourself and send_message with resolveIndex.
+  When a mission gives coordinates as expressions (x=4*2), evaluate them yourself first.
+- Persistent missions that change strategy for the whole match -> install a RULE (below),
+  then resolve the mission once the matching rule is active.
+- Always answer a question before resolving it; never answer the same mission twice.
+
+RULES (persistent — install once, they stay active and reshape standard behaviour)
+- "deliver stacks of exactly N"            -> set_delivery_stack_size(N)
+- "delivering in (x,y) gives K times / 0"  -> set_delivery_tile_reward(x,y, K)   (0 = never deliver there)
+- "parcels with score > N give no reward"  -> set_max_pickup_reward(N)
+- "do not go through tile (x,y)"           -> avoid_tile(x,y)
+- any other hard rule                       -> add_constraint(text)
+Before installing a rule, check activeRules — if it is already set, just resolve the mission.
+To deliver at a specific tile (e.g. a bonus tile or "the leftmost tile"), call go_deliver
+with that tile's x,y.
 
 HARD RULES
 - Output exactly one tool call. No text.
+- Obey constraints and activeRules above everything else.
 - Never target a wall, a "." cell, a blacklisted cell, or an off-map coordinate.
-- Never pick up a parcel with score <= 0 or estimatedRewardAtDelivery == 0.
 - Never act on a mission with negative or zero reward — resolve it instead.
-- Never answer the same mission twice, and never resolve a question without answering.
-- Prefer acting over waiting; wait is the last resort.
-- ALWAYS AND ALWAYS RESOLVE A MISSION FIRST MISSIONS SHOULD BE CLEAR
 
 `.trim();
-
+//- Prefer acting over waiting; wait is the last resort.
 /**
- * Renders the known static map as an ASCII grid for the prompt.
- *
- * Rows are printed top (highest y) to bottom so they read like the in-game
- * board. Each row is prefixed with its y coordinate.
+ * Renders the known static map as an ASCII grid (top row = highest y) for the
+ * prompt, each row prefixed with its y coordinate.
  *
  * @returns {string}
  */
@@ -408,12 +620,17 @@ function buildGridMap() {
 }
 
 /**
- * Builds the dynamic state snapshot handed to the LLM alongside the map.
+ * Builds the dynamic state snapshot handed to the model alongside the map.
+ *
+ * Free parcels banned by the max-pickup-reward rule are filtered out so the
+ * model never proposes picking them up.
  *
  * @param {Position} me
  * @returns {object}
  */
 export function buildStateSnapshot(me) {
+    const cap = llmMemory.rules.maxPickupReward;
+
     return {
         me: {
             x: me.x,
@@ -422,7 +639,7 @@ export function buildStateSnapshot(me) {
             carryingIds: beliefs.me.carrying,
         },
         freeParcels: [...beliefs.parcels.values()]
-            .filter((p) => !p.carriedBy && p.reward > 0)
+            .filter((p) => !p.carriedBy && p.reward > 0 && (cap == null || p.reward <= cap))
             .map((p) => {
                 const deliveryTile = findNearestDeliveryTile({ x: p.x, y: p.y });
                 const distanceToParcel = manhattanDistance(me, { x: p.x, y: p.y });
@@ -461,6 +678,12 @@ export function buildStateSnapshot(me) {
             return { x, y };
         }),
         constraints: llmMemory.constraints,
+        activeRules: {
+            deliverStackSize: llmMemory.rules.deliverStackSize,
+            maxPickupReward: llmMemory.rules.maxPickupReward,
+            deliveryTileMultipliers: llmMemory.rules.deliveryTileMultipliers,
+            avoidTiles: llmMemory.rules.avoidTiles,
+        },
         world: {
             parcelGenerationMs: beliefs.config.PARCEL_GENERATION_INTERVAL,
             maxCarry: beliefs.config.MAX_PARCELS,
@@ -469,10 +692,8 @@ export function buildStateSnapshot(me) {
 }
 
 /**
- * Builds the user message handed to the LLM (constraints, missions, map, state).
- *
- * Rebuilt every round because side-effect tools (e.g. resolve_mission) can
- * change memory between rounds.
+ * Builds the user message (constraints, missions, map, state). Rebuilt every
+ * round because side-effect tools can change memory between rounds.
  *
  * @param {Position} me
  * @returns {string}
@@ -482,7 +703,9 @@ function buildUserContent(me) {
 
     const constraintBlock =
         llmMemory.constraints.length > 0
-            ? `Constraints (NEVER violate these):\n${llmMemory.constraints.map((c) => `- ${c}`).join('\n')}\n\n`
+            ? `Constraints (NEVER violate these):\n${llmMemory.constraints
+                  .map((c) => `- ${c}`)
+                  .join('\n')}\n\n`
             : '';
 
     const missionBlock =
@@ -502,34 +725,24 @@ function buildUserContent(me) {
 }
 
 /**
- * Asks the LLM for the best next intention.
- *
- * The LLM is given the map, the current state and the intention tools, and it
- * replies by calling one tool. That call is executed locally to produce the
- * Intention. The LLM is the sole decision-maker: there is no deterministic
- * heuristic fallback. When the model errors out or a tool cannot be applied,
- * the agent simply waits and tries again on the next tick.
+ * Asks the model for the best next intention. It calls one tool per round; for a
+ * side-effect tool or a not-applicable action we feed the outcome back and let it
+ * choose again (up to MAX_ROUNDS) so it never loops on an impossible action and
+ * never falls back to a heuristic.
  *
  * @returns {Promise<Intention>}
  */
 export async function generateBestIntention() {
-    // Position unknown: nothing the LLM can reason about yet.
     if (beliefs.me.x === null || beliefs.me.y === null) {
         return createIntention('wait', null, null, 0);
     }
 
     const me = { x: beliefs.me.x, y: beliefs.me.y };
-
     const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: buildUserContent(me) },
     ];
 
-    // The model picks one tool per round. When the chosen tool is a side effect
-    // (send_message/resolve_mission) or is genuinely not applicable, we feed the
-    // outcome back and let it choose again — up to MAX_ROUNDS. This way it never
-    // loops on the same impossible action (temperature 0 would repeat it) and
-    // never falls back to a heuristic.
     for (let round = 0; round < MAX_ROUNDS; round++) {
         let message;
         try {
@@ -553,7 +766,7 @@ export async function generateBestIntention() {
         }
 
         console.log(
-            `[intentionAgent] LLM function call: ${toolCall.function?.name}(${toolCall.function?.arguments ?? ''})`
+            `[intentionAgent] LLM call: ${toolCall.function?.name}(${toolCall.function?.arguments ?? ''})`
         );
 
         // Keep the assistant turn so the tool result that follows is correlated.
@@ -574,43 +787,41 @@ export async function generateBestIntention() {
             continue;
         }
 
-        const intention = impl(args, me);
+        const result = impl(args, me);
 
-        // Side-effect tool (message sent / mission resolved): report done and
-        // re-state the (now updated) situation so it picks a real next action.
-        if (intention === CONTINUE) {
+        // Side-effect tool (message sent / mission resolved / rule installed):
+        // report done and re-state the updated situation for the next round.
+        if (result === CONTINUE) {
             feedToolResult(messages, toolCall, 'Done.');
             messages.push({ role: 'user', content: buildUserContent(me) });
             continue;
         }
 
-        if (!intention) {
+        if (!result) {
             console.log(`[intentionAgent] Tool "${name}" not applicable, asking again`);
             feedToolResult(
                 messages,
                 toolCall,
-                `"${name}" cannot be executed now (target gone, already carried/there, or ` +
-                    `unreachable). Choose a DIFFERENT action or tool.`
+                `"${name}" cannot be executed now (target gone, already carried/there, blocked by a ` +
+                    `rule, or unreachable). Choose a DIFFERENT action or tool.`
             );
             continue;
         }
 
         console.log(
-            `[intentionAgent] LLM chose ${name}` +
-                (intention.parcelId ? ` (${intention.parcelId})` : '') +
-                ` score=${intention.score.toFixed(1)}`
+            `[intentionAgent] chose ${name}` +
+                (result.parcelId ? ` (${result.parcelId})` : '') +
+                ` score=${result.score.toFixed(1)}`
         );
-        return intention;
+        return result;
     }
 
-    // Exhausted the round budget without a usable intention: wait this tick.
     console.log(`[intentionAgent] Max rounds (${MAX_ROUNDS}) reached, waiting`);
     return createIntention('wait', null, null, 0);
 }
 
 /**
- * Appends a tool-result message correlated to a tool call, so the next round the
- * model sees the outcome of what it just tried.
+ * Appends a tool-result message correlated to a tool call.
  *
  * @param {object[]} messages
  * @param {{ id: string }} toolCall

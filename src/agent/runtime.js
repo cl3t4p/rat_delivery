@@ -22,7 +22,6 @@ import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk/client';
 // the stuck watchdog) would never be re-evaluated and the agent would just sit
 // until something moved into view. Re-deliberate on this fixed cadence so those
 // timers actually elapse. Kept below the dwell so a dwell resolves promptly.
-const REVISE_HEARTBEAT_MS = Number(process.env.REVISE_HEARTBEAT_MS) || 200;
 
 import { updateMap, updateMe, updateBeliefs } from '../bdi/beliefs.js';
 import { onSensingRevise, interruptForRevision } from '../bdi/intentionRevision.js';
@@ -39,6 +38,7 @@ import {
     startDecayLoop,
     logMapGrid,
     makeLogState,
+    REVISE_HEARTBEAT_MS,
 } from './common.js';
 
 /**
@@ -69,14 +69,20 @@ export function startSingleAgent({ tag = 'single', token } = {}) {
     if (USE_LLM) {
         import('../llm/llmAgent.js').then(({ initLlmAgent, llmMemory, setObjective }) => {
             initLlmAgent(interruptForRevision);
-            llmMemory.sendMessage = (text) => {
-                Promise.resolve(socket.emitShout(text)).catch((err) =>
+            // No peer in single-agent mode: broadcast, or say directly to a given
+            // agent id (used to answer a special-mission question to its sender).
+            llmMemory.sendMessage = (text, to = 'all') => {
+                const send =
+                    to && to !== 'all' && to !== 'peer'
+                        ? socket.emitSay(to, text)
+                        : socket.emitShout(text);
+                Promise.resolve(send).catch((err) =>
                     console.log(`[${tag}] sendMessage failed: ${err?.message ?? err}`)
                 );
             };
             // Receive natural-language objectives / special missions over chat.
             socket.onMsg((id, name, msg) => {
-                if (typeof msg === 'string' && msg.trim() !== '') setObjective(msg);
+                if (typeof msg === 'string' && msg.trim() !== '') setObjective(msg, id);
             });
         });
     }

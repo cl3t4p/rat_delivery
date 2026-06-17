@@ -5,11 +5,11 @@
  *
  */
 
-import { beliefs } from './beliefs.js';
+import { beliefs, isWalkable } from './beliefs.js';
 import { shouldYieldParcel } from './coordination.js';
 import { deliveryValue, detourValue, estimatedRewardAtDelivery } from './scoring.js';
 import { aStar } from './pathfinding.js';
-import { getZone as _sharedGetZone } from '../shared/zones.js';
+import { getHalfPoint } from '../shared/zones.js';
 import {
     _zoneConstraint,
     setZoneConstraint,
@@ -27,8 +27,6 @@ import {
 import {
     findSpawnerTiles,
     findBestReachableSpawnerTile,
-    findNearestNonDeliveryInZoneTile,
-    spawnerCanReachDelivery,
     spawnersAreSparse,
     findNearestDeliveryTile,
     findBestDeliveryTile,
@@ -100,6 +98,41 @@ export function resetRoamTarget() {
     _roamTargetZone = null;
     _roamArrivalTs = 0;
     _roamIndex = null;
+}
+
+/**
+ * Finds a reachable walkable tile at (or nearest to) the map's half point — the
+ * parking spot for an agent whose assigned half has no spawner.
+ *
+ * @param {Position} me
+ * @returns {Position|null}
+ */
+function halfPointTarget(me) {
+    const half = getHalfPoint(beliefs.grid);
+    if (isWalkable(half.x, half.y) && costToReachPath(me, half) != null) {
+        return half;
+    }
+
+    // Half point is a wall or unreachable: snap to the nearest reachable walkable
+    // tile, scanning closest-first and capping the path checks.
+    const candidates = [];
+    for (const key of beliefs.grid.keys()) {
+        const [x, y] = key.split(',').map(Number);
+        if (!isWalkable(x, y)) {
+            continue;
+        }
+        candidates.push({ x, y, d: Math.abs(x - half.x) + Math.abs(y - half.y) });
+    }
+    candidates.sort((a, b) => a.d - b.d);
+
+    const MAX_CHECKS = 25;
+    for (let i = 0; i < candidates.length && i < MAX_CHECKS; i++) {
+        const c = candidates[i];
+        if (costToReachPath(me, { x: c.x, y: c.y }) != null) {
+            return { x: c.x, y: c.y };
+        }
+    }
+    return null;
 }
 
 /**
@@ -245,6 +278,30 @@ export function getBestIntention() {
     // Case 2: free parcels are available, so pick one up.
     // ----------------------------------------------------------------
 
+    // A free parcel on the tile we're standing on is free to grab — take it
+    // immediately instead of letting the delivery-value gate make us hesitate
+    // (which matters with relay, where we only carry it partway, and would
+    // otherwise leave us waiting on the spawner on top of the parcel).
+    const mx = Math.round(me.x);
+    const my = Math.round(me.y);
+    for (const parcel of beliefs.parcels.values()) {
+        if (parcel.carriedBy || parcel.reward <= 0) {
+            continue;
+        }
+        if (Math.round(parcel.x) !== mx || Math.round(parcel.y) !== my) {
+            continue;
+        }
+        if (shouldYieldParcel(parcel.id, me)) {
+            continue;
+        }
+        return createIntention(
+            'go_pick_up',
+            parcel.id,
+            { x: parcel.x, y: parcel.y },
+            parcel.reward
+        );
+    }
+
     let pickUp = findBestPickUp(me);
     if (!pickUp && _zoneConstraint) {
         // Zone is empty — fall back to unclaimed parcels outside the zone rather
@@ -266,12 +323,10 @@ export function getBestIntention() {
     _lastDelibLog = null; // reset dedup when entering exploration path
     const genMs = beliefs.config?.PARCEL_GENERATION_INTERVAL ?? null;
     const spawnsAreRare = genMs !== null && genMs >= SLOW_SPAWN_THRESHOLD_MS;
-    const allSpawners = findSpawnerTiles().filter(spawnerCanReachDelivery);
+    const allSpawners = findSpawnerTiles();
 
     // Respect zone constraint: use only in-zone spawners. If the assigned zone
-    // has no spawner, stay near the delivery area as a relay receiver — do NOT
-    // cross into the peer's zone to reach their spawner. This prevents the
-    // deliverer from colliding with the picker on a shared corridor.
+    // has no spawner, stay near the delivery area as a relay receiver
 
     const preferredSpawners = _zoneConstraint
         ? allSpawners.filter((s) => _isInZone(s))
@@ -279,22 +334,21 @@ export function getBestIntention() {
 
     if (_zoneConstraint && preferredSpawners.length === 0) {
         resetRoamTarget();
-        // If standing on a delivery tile, step to the nearest non-delivery
-        // in-zone tile so the endpoint stays free for the peer to deliver.
-        const onDelivery = beliefs.deliveryTiles.some(
-            (t) => Math.round(me.x) === t.x && Math.round(me.y) === t.y
-        );
-        if (onDelivery) {
-            const stepOff = findNearestNonDeliveryInZoneTile(me);
-            if (stepOff) {
-                console.log(
-                    `[deliberation] No in-zone spawner, on delivery tile, relaying to (${stepOff.x},${stepOff.y})`
-                );
-                return createIntention('go_to', null, stepOff, 0);
-            }
+        // This half has no spawner to patrol: park at the map's half point and
+        // wait there, positioned to receive handoffs from the peer working the
+        // other half.
+        const parkSpot = halfPointTarget(me);
+        if (parkSpot && !sameTile(me, parkSpot)) {
+            printLog(
+                `relay_half:${parkSpot.x},${parkSpot.y}`,
+                `[deliberation] No spawner in zone ${_zoneConstraint}, ` +
+                    `going to half point (${parkSpot.x},${parkSpot.y})`
+            );
+            return createIntention('go_to', null, parkSpot, 0);
         }
-        console.log(
-            `[deliberation] No spawner in zone ${_zoneConstraint}, waiting (relay receiver)`
+        printLog(
+            'relay_half_wait',
+            `[deliberation] No spawner in zone ${_zoneConstraint}, waiting at half point`
         );
         return createIntention('wait', null, null, 0);
     }

@@ -16,6 +16,7 @@
  */
 
 import { beliefs } from '../bdi/beliefs.js';
+import { getPeers } from './coordination/peerState.js';
 
 /** @typedef {import('../shared/types.js').MsgType} MsgType */
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
@@ -79,25 +80,46 @@ export function initCommunication(socket, options = {}) {
 // Send
 
 /**
- * Broadcasts an envelope to every agent via `socket.emitShout`.
+ * Sends an envelope to the team via direct emitSay to each known teammate. While
+ * no teammate is known, only the hello ping is shouted; anything about ourselves
+ * is held back until a teammate is found.
  *
  * @param {MsgType} type
  * @param {object} payload
- * @returns {Promise<any>} Server acknowledgment.
+ * @returns {Promise<any>}
  */
 export async function sendBroadcast(type, payload) {
-    const envelope = makeEnvelope(type, payload, 'broadcast');
     if (!state.socket) {
         console.warn('[comm] sendBroadcast before init; dropping', type);
         return null;
     }
-    logSend(envelope);
-    try {
-        return await state.socket.emitShout(envelope);
-    } catch (err) {
-        logSendError(type, err);
-        return null;
+
+    const peers = getPeers();
+
+    if (peers.length === 0) {
+        if (type !== MSG_TYPE.HELLO) {
+            return null;
+        }
+        const envelope = makeEnvelope(type, payload, 'broadcast');
+        try {
+            return await state.socket.emitShout(envelope);
+        } catch (err) {
+            logSendError(type, err);
+            return null;
+        }
     }
+
+    let result = null;
+    for (const peer of peers) {
+        const envelope = makeEnvelope(type, payload, peer.id);
+        logSend(envelope);
+        try {
+            result = await state.socket.emitSay(peer.id, envelope);
+        } catch (err) {
+            logSendError(type, err);
+        }
+    }
+    return result;
 }
 
 /**

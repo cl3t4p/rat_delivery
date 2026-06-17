@@ -3,7 +3,7 @@ import { createIntention } from '../../bdi/deliberation.js';
 import { setZoneConstraint } from '../../bdi/components/zone.js';
 import { findSpawnerTiles, findNearestDeliveryTile } from '../../bdi/components/tilesearch.js';
 import { aStar } from '../../bdi/pathfinding.js';
-import { getZone, getMapBounds } from '../../shared/zones.js';
+import { getZone, getZones, getSplitAxis, getMapBounds } from '../../shared/zones.js';
 import { MSG_TYPE, onMessage, sendDirect } from '../communication.js';
 import { getPeers, hasKnownPosition } from './peerState.js';
 
@@ -11,51 +11,23 @@ import { getPeers, hasKnownPosition } from './peerState.js';
 const ZONE_ASSIGN_INTERVAL_MS = 15_000;
 // How long to wait after spotting a new peer before running the first assignment
 const PEER_DISCOVERY_ASSIGN_DELAY_MS = 500;
-// Skip a periodic refresh if the assignment was updated less than this ago
-const ASSIGNMENT_REFRESH_GRACE_MS = 3000;
-// Minimum time between two LLM calls; routine ticks reuse the last assignment
-const LLM_MIN_INTERVAL_MS = 90_000;
-// Minimum time between two LLM rebalance calls
-const REBALANCE_MIN_INTERVAL_MS = 60_000;
 // While a handoff happened within this window, freeze the zone assignment
 const RELAY_FREEZE_TTL_MS = 12_000;
 
-// Score rate ratio below which one agent is considered slower than the other
-const SCORE_IMBALANCE_THRESHOLD = 0.7;
-// How many consecutive imbalanced intervals before triggering a rebalance
-const IMBALANCE_CONSECUTIVE_INTERVALS = 3;
-// Absolute score ratio below which a persistent gap rebalance is triggered
-const SCORE_GAP_RATIO_THRESHOLD = 0.6;
-// Both agents must have scored at least this much before gap checks are reliable
-const SCORE_GAP_MIN_SCORE = 50;
-// Below this ratio the lagging agent is force-assigned the better zone
-const SCORE_GAP_FORCE_RATIO = 0.45;
-
 // Score above which an agent is considered busy with a high-value intention
 const BOTH_BUSY_SCORE_THRESHOLD = 10;
-// If enabled, runs a fast heuristic zone split on peer discovery before the LLM responds
+// If enabled, runs a fast heuristic zone split on peer discovery
 const USE_HEURISTIC_PREASSIGN = process.env.USE_HEURISTIC_PREASSIGN !== 'false';
 // A new zone assignment must beat the current intention score by at least this
 const IMPROVEMENT_THRESHOLD = 5;
 // Ignore a zone assignment if the target is already this close to the current one
 const SAME_ZONE_TARGET_DISTANCE = 3;
 
-/** @type {{ selfScore: number, peerScore: number, ts: number } | null} */
-let _scoreSnapshot = null;
-let _imbalanceCount = 0;
-/** @type {'self_slower'|'peer_slower'|null} */
-let _imbalanceDirection = null;
-let _imbalanceDirectionChanges = 0;
-let _gapImbalanceCount = 0;
-
 let _isCoordinator = false;
 
 /** @type {Record<string, string> | null} */
 let _lastAssignment = null;
-let _lastAssignmentAppliedTs = 0;
 let _hasEverAssigned = false;
-let _lastLlmCallTs = 0;
-let _lastRebalanceTs = 0;
 let _lastHandoffActivityTs = 0;
 let _zoneAssignPending = false;
 // Last zone actually sent to the peer — used to suppress redundant refreshes
@@ -83,41 +55,21 @@ export function setCoordinatorRole() {
 }
 
 /**
- * Scans all known parcels and spawner tiles to compute stats for each zone:
- * total reward, free parcel count, spawner count, and best pickup score for
- * self and peer
+ * Scans all known parcels and spawner tiles to compute stats for each of the two
+ * map halves: total reward, free parcel count, spawner count, and best pickup
+ * score for self and peer.
  */
 async function computeZoneStats() {
-    const zones = {
-        topLeft: {
+    const zones = {};
+    for (const z of getZones(beliefs.grid)) {
+        zones[z] = {
             totalReward: 0,
             freeParcels: 0,
             spawnerCount: 0,
             bestScoreForSelf: 0,
             bestScoreForPeer: 0,
-        },
-        topRight: {
-            totalReward: 0,
-            freeParcels: 0,
-            spawnerCount: 0,
-            bestScoreForSelf: 0,
-            bestScoreForPeer: 0,
-        },
-        bottomLeft: {
-            totalReward: 0,
-            freeParcels: 0,
-            spawnerCount: 0,
-            bestScoreForSelf: 0,
-            bestScoreForPeer: 0,
-        },
-        bottomRight: {
-            totalReward: 0,
-            freeParcels: 0,
-            spawnerCount: 0,
-            bestScoreForSelf: 0,
-            bestScoreForPeer: 0,
-        },
-    };
+        };
+    }
 
     const { pickupValue } = await import('../../bdi/scoring.js');
 
@@ -130,6 +82,7 @@ async function computeZoneStats() {
     for (const p of beliefs.parcels.values()) {
         if (p.carriedBy) continue;
         const zone = getZone({ x: p.x, y: p.y }, beliefs.grid);
+        if (!zones[zone]) continue;
         zones[zone].freeParcels++;
         zones[zone].totalReward += p.reward;
 
@@ -148,26 +101,33 @@ async function computeZoneStats() {
         if (tile.type !== '1') continue;
         const [x, y] = key.split(',').map(Number);
         const zone = getZone({ x, y }, beliefs.grid);
-        zones[zone].spawnerCount++;
+        if (zones[zone]) zones[zone].spawnerCount++;
     }
 
     return zones;
 }
 
-// Returns the geometric center tile of a zone quadrant
+// Returns the geometric center tile of a map half.
 function getZoneCenter(zoneName) {
-    const { maxX, maxY } = getMapBounds(beliefs.grid);
-    const midX = maxX / 2;
-    const midY = maxY / 2;
+    const { minX, maxX, minY, maxY } = getMapBounds(beliefs.grid);
+    const midX = (minX + maxX) / 2;
+    const midY = (minY + maxY) / 2;
+    const cx = Math.round(midX);
+    const cy = Math.round(midY);
 
-    const centers = {
-        topLeft: { x: Math.round(midX / 2), y: Math.round(midY + midY / 2) },
-        topRight: { x: Math.round(midX + midX / 2), y: Math.round(midY + midY / 2) },
-        bottomLeft: { x: Math.round(midX / 2), y: Math.round(midY / 2) },
-        bottomRight: { x: Math.round(midX + midX / 2), y: Math.round(midY / 2) },
-    };
-
-    return centers[zoneName];
+    if (zoneName === 'left') {
+        return { x: Math.round((minX + midX) / 2), y: cy };
+    }
+    if (zoneName === 'right') {
+        return { x: Math.round((midX + maxX) / 2), y: cy };
+    }
+    if (zoneName === 'bottom') {
+        return { x: cx, y: Math.round((minY + midY) / 2) };
+    }
+    if (zoneName === 'top') {
+        return { x: cx, y: Math.round((midY + maxY) / 2) };
+    }
+    return { x: cx, y: cy };
 }
 
 /**
@@ -215,164 +175,49 @@ export function findNearestWalkableTile(target) {
 }
 
 /**
- * Computes a fast zone split without an LLM call.
- * Each agent is assigned to the zone they are already in.
- * If both are in the same zone, splits them diagonally using ID order as tiebreak
+ * Splits the two agents across the two map halves.
+ *
+ * Returns null only before the map has loaded. If the agents are already in
+ * different halves, each keeps its own. If they are in the same half, each is
+ * given the half it is nearer to along the split axis so they separate without
+ * crossing; ties are broken by id for determinism. An agent whose half has no
+ * spawners parks at the half point (handled in deliberation.js).
+ *
+ * @returns {Record<string, string>|null}
  */
 function computeHeuristicAssignment(selfId, selfPos, peerId, peerPos) {
-    if (beliefs.grid.size === 0) return null;
+    const zones = getZones(beliefs.grid);
+    if (zones.length < 2) {
+        return null;
+    }
 
     const selfZone = getZone(selfPos, beliefs.grid);
     const peerZone = getZone(peerPos, beliefs.grid);
 
     if (selfZone !== peerZone) {
-        const selfHalf = selfZone.endsWith('Left') ? 'left' : 'right';
-        const peerHalf = peerZone.endsWith('Left') ? 'left' : 'right';
-        if (selfHalf === peerHalf) {
-            const peerVertical = peerZone.startsWith('top') ? 'top' : 'bottom';
-            const peerOpposite = `${peerVertical}${peerHalf === 'left' ? 'Right' : 'Left'}`;
-            return { [selfId]: selfZone, [peerId]: peerOpposite };
-        }
         return { [selfId]: selfZone, [peerId]: peerZone };
     }
 
-    const [first, second] = [selfId, peerId].sort();
-    return { [first]: 'topLeft', [second]: 'bottomRight' };
-}
-
-// Returns a combined opportunity score for an agent in a zone (best pickup score + total reward + spawner density)
-function zoneOpportunityForAgent(stats, agentKey) {
-    const bestScore = agentKey === 'self' ? stats.bestScoreForSelf : stats.bestScoreForPeer;
-    return Math.max(0, bestScore) + stats.totalReward + stats.spawnerCount * 5;
-}
-
-// Returns true if the zone has any opportunity for the given agent
-function zoneHasOpportunity(stats, agentKey) {
-    return zoneOpportunityForAgent(stats, agentKey) > 0;
-}
-
-// Returns 'left' or 'right' based on the zone name
-function zoneSide(zoneName) {
-    return zoneName?.endsWith('Left') ? 'left' : 'right';
-}
-
-// Returns the opposite side ('left' <-> 'right')
-function oppositeSide(zoneName) {
-    return zoneSide(zoneName) === 'left' ? 'right' : 'left';
-}
-
-// Returns the zone on the given side with the highest opportunity for an agent, skipping excludedZones
-function bestZoneOnSide(zoneStats, side, agentKey, excludedZones = new Set()) {
-    let bestZone = null;
-    let bestValue = -Infinity;
-    for (const zone of Object.keys(zoneStats)) {
-        if (zoneSide(zone) !== side || excludedZones.has(zone)) continue;
-        const value = zoneOpportunityForAgent(zoneStats[zone], agentKey);
-        if (value > bestValue) {
-            bestValue = value;
-            bestZone = zone;
-        }
-    }
-    return bestZone;
-}
-
-/**
- * Fixes a zone assignment that has problems:
- * - replaces zones with no useful opportunity
- * - prevents both agents from being assigned to the same map side
- * - gives the lagging agent the best available zone on the opposite side
- */
-function repairAssignment(assignment, zoneStats, selfId, peerId, options = {}) {
-    const { laggingAgentId = null } = options;
-    const zones = Object.keys(zoneStats);
-    const repaired = { ...assignment };
-
-    for (const [agentId, agentKey] of [
-        [selfId, 'self'],
-        [peerId, 'peer'],
-    ]) {
-        const currentZone = repaired[agentId];
-        const currentStats = currentZone ? zoneStats[currentZone] : null;
-        if (currentStats && zoneHasOpportunity(currentStats, agentKey)) continue;
-
-        const usedByOther = new Set(
-            Object.entries(repaired)
-                .filter(([id]) => id !== agentId)
-                .map(([, zone]) => zone)
-        );
-
-        let bestZone = null;
-        let bestValue = -Infinity;
-        for (const zone of zones) {
-            if (usedByOther.has(zone) && zones.length > usedByOther.size) continue;
-            const value = zoneOpportunityForAgent(zoneStats[zone], agentKey);
-            if (value > bestValue) {
-                bestValue = value;
-                bestZone = zone;
-            }
-        }
-
-        if (bestZone && bestZone !== currentZone) {
-            console.log(
-                `[coord] Zone assignment repaired for ${agentId}: ` +
-                    `${currentZone ?? 'none'} to ${bestZone} (no useful opportunity)`
-            );
-            repaired[agentId] = bestZone;
-        }
+    // Both agents are in the same half: give each the half it is nearer to along
+    // the split axis so they separate without crossing.
+    const axis = getSplitAxis(beliefs.grid);
+    let selfCoord = selfPos.x;
+    let peerCoord = peerPos.x;
+    if (axis === 'y') {
+        selfCoord = selfPos.y;
+        peerCoord = peerPos.y;
     }
 
-    if (
-        repaired[selfId] &&
-        repaired[peerId] &&
-        zoneSide(repaired[selfId]) === zoneSide(repaired[peerId])
-    ) {
-        const moveId = laggingAgentId ?? peerId;
-        const moveKey = moveId === selfId ? 'self' : 'peer';
-        const stayId = moveId === selfId ? peerId : selfId;
-        const targetSide = oppositeSide(repaired[stayId]);
-        const bestZone = bestZoneOnSide(
-            zoneStats,
-            targetSide,
-            moveKey,
-            new Set([repaired[stayId]])
-        );
-
-        if (bestZone && bestZone !== repaired[moveId]) {
-            console.log(
-                `[coord] Zone assignment side-repaired for ${moveId}: ` +
-                    `${repaired[moveId]} to ${bestZone} (same side coverage)`
-            );
-            repaired[moveId] = bestZone;
-        }
+    let selfTakesLow = selfCoord < peerCoord;
+    if (selfCoord === peerCoord) {
+        selfTakesLow = selfId < peerId; // deterministic tiebreak
     }
 
-    if (laggingAgentId && repaired[laggingAgentId]) {
-        const laggingKey = laggingAgentId === selfId ? 'self' : 'peer';
-        const otherId = laggingAgentId === selfId ? peerId : selfId;
-        const usedByOther = new Set([repaired[otherId]].filter(Boolean));
-        let bestZone = repaired[laggingAgentId];
-        let bestValue = zoneOpportunityForAgent(zoneStats[bestZone], laggingKey);
-
-        for (const zone of zones) {
-            if (usedByOther.has(zone)) continue;
-            if (repaired[otherId] && zoneSide(zone) === zoneSide(repaired[otherId])) continue;
-            const value = zoneOpportunityForAgent(zoneStats[zone], laggingKey);
-            if (value > bestValue) {
-                bestValue = value;
-                bestZone = zone;
-            }
-        }
-
-        if (bestZone !== repaired[laggingAgentId]) {
-            console.log(
-                `[coord] Zone assignment force-repaired for lagging ${laggingAgentId}: ` +
-                    `${repaired[laggingAgentId]} to ${bestZone}`
-            );
-            repaired[laggingAgentId] = bestZone;
-        }
+    const [low, high] = zones;
+    if (selfTakesLow) {
+        return { [selfId]: low, [peerId]: high };
     }
-
-    return repaired;
+    return { [selfId]: high, [peerId]: low };
 }
 
 /**
@@ -403,7 +248,6 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
 
     const selfZoneName = assignment[selfId];
     if (!selfZoneName) return;
-    _lastAssignmentAppliedTs = Date.now();
     _hasEverAssigned = true;
 
     const selfCenter = getNearestReachableZoneTarget(selfZoneName, selfPos);
@@ -467,13 +311,11 @@ export async function runHeuristicZoneAssignment() {
 
     const assignment = computeHeuristicAssignment(selfId, selfPos, peerId, peerPos);
     if (!assignment) return;
-    const zoneStats = await computeZoneStats();
-    const repaired = repairAssignment(assignment, zoneStats, selfId, peerId);
-    _lastAssignment = repaired;
+    _lastAssignment = assignment;
 
     const HEURISTIC_SCORE = 10;
-    const selfZoneName = repaired[selfId];
-    const peerZoneName = repaired[peerId];
+    const selfZoneName = assignment[selfId];
+    const peerZoneName = assignment[peerId];
 
     console.log(
         `[coord] Heuristic zone split: ${selfId}=${selfZoneName} ${peerId}=${peerZoneName}`
@@ -494,7 +336,6 @@ export async function runHeuristicZoneAssignment() {
     _hasEverAssigned = true;
 
     const peerCenter = getNearestReachableZoneTarget(peerZoneName, peerPos);
-    _lastAssignmentAppliedTs = Date.now();
     sendDirect(peerId, MSG_TYPE.ZONE_ASSIGN, {
         targetId: peerId,
         zone: peerZoneName,
@@ -520,63 +361,13 @@ export function scheduleZoneAssignment(delayMs = PEER_DISCOVERY_ASSIGN_DELAY_MS)
 }
 
 /**
- * If the assignment would send each agent to the other's current zone (crossing paths),
- * swaps them so each agent stays on their own side
- */
-function uncrossAssignment(assignment, selfId, selfPos, peerId, peerPos) {
-    const selfCurrentZone = getZone(selfPos, beliefs.grid);
-    const peerCurrentZone = getZone(peerPos, beliefs.grid);
-    if (
-        selfCurrentZone !== peerCurrentZone &&
-        assignment[selfId] === peerCurrentZone &&
-        assignment[peerId] === selfCurrentZone
-    ) {
-        const swapped = {
-            ...assignment,
-            [selfId]: assignment[peerId],
-            [peerId]: assignment[selfId],
-        };
-        console.log(
-            `[coord] Zone assignment un-crossed: ` +
-                `${selfId}=${swapped[selfId]} ${peerId}=${swapped[peerId]}`
-        );
-        return swapped;
-    }
-
-    // Path-crossing check by sign: if relative positions and relative targets point in
-    // opposite directions (on any axis), agents will have to cross each other.
-    // This catches the case where both agents are in the same zone but assigned to opposite sides.
-    const selfZone = assignment[selfId];
-    const peerZone = assignment[peerId];
-    if (selfZone && peerZone && selfZone !== peerZone) {
-        const selfCenter = getZoneCenter(selfZone);
-        const peerCenter = getZoneCenter(peerZone);
-        if (selfCenter && peerCenter) {
-            const xCross = (selfPos.x - peerPos.x) * (selfCenter.x - peerCenter.x) < 0;
-            const yCross = (selfPos.y - peerPos.y) * (selfCenter.y - peerCenter.y) < 0;
-            if (xCross || yCross) {
-                const swapped = {
-                    ...assignment,
-                    [selfId]: peerZone,
-                    [peerId]: selfZone,
-                };
-                console.log(
-                    `[coord] Zone assignment un-crossed (path-cross): ` +
-                        `${selfId}=${swapped[selfId]} ${peerId}=${swapped[peerId]}`
-                );
-                return swapped;
-            }
-        }
-    }
-
-    return assignment;
-}
-
-/**
- * Main zone assignment cycle.
- * Checks for score imbalance between agents, decides whether to call the LLM
- * or reuse the last assignment, then applies it.
- * Skips if both agents are busy or if no peer is known yet
+ * Main zone assignment cycle (heuristic, no LLM).
+ *
+ * Splits the two agents across the two map halves (see computeHeuristicAssignment)
+ * and applies it. Navigation is only forced when the split actually changes, so a
+ * stable split is just a cheap constraint refresh that never yanks an agent off
+ * its work. Skips when both agents are busy, no peer is known, or a relay is in
+ * progress.
  */
 async function runZoneAssignment() {
     if (beliefs.me.x === null) return;
@@ -600,81 +391,6 @@ async function runZoneAssignment() {
         return;
     }
 
-    const now = Date.now();
-    const selfScore = beliefs.me.score ?? 0;
-    const peerScore = peer.score ?? 0;
-    let selfRate = null,
-        peerRate = null;
-    let isImbalanced = false;
-    let laggingAgentId = null;
-
-    if (_scoreSnapshot) {
-        const elapsed = (now - _scoreSnapshot.ts) / 1000;
-        if (elapsed > 0) {
-            selfRate = Math.max(0, (selfScore - _scoreSnapshot.selfScore) / elapsed);
-            peerRate = Math.max(0, (peerScore - _scoreSnapshot.peerScore) / elapsed);
-            const maxRate = Math.max(selfRate, peerRate);
-            if (maxRate > 0 && Math.min(selfRate, peerRate) / maxRate < SCORE_IMBALANCE_THRESHOLD) {
-                const direction = selfRate < peerRate ? 'self_slower' : 'peer_slower';
-                const trailingDirection = selfScore <= peerScore ? 'self_slower' : 'peer_slower';
-                if (direction !== trailingDirection) {
-                    _imbalanceCount = 0;
-                    _imbalanceDirectionChanges = 0;
-                    _imbalanceDirection = null;
-                    console.log(
-                        `[coord] Score imbalance ignored: leader is slower ` +
-                            `self=${selfRate.toFixed(2)}/s peer=${peerRate.toFixed(2)}/s ` +
-                            `scores self=${selfScore} peer=${peerScore}`
-                    );
-                } else {
-                    if (_imbalanceDirection && _imbalanceDirection !== direction)
-                        _imbalanceDirectionChanges++;
-                    _imbalanceDirection = direction;
-                    _imbalanceCount++;
-                    console.log(
-                        `[coord] Score imbalance (${_imbalanceCount}/${IMBALANCE_CONSECUTIVE_INTERVALS}):` +
-                            ` self=${selfRate.toFixed(2)}/s peer=${peerRate.toFixed(2)}/s` +
-                            ` direction=${direction}` +
-                            (_imbalanceDirectionChanges
-                                ? ` changes=${_imbalanceDirectionChanges}`
-                                : '')
-                    );
-                    if (_imbalanceCount >= IMBALANCE_CONSECUTIVE_INTERVALS) {
-                        isImbalanced = true;
-                        _imbalanceCount = 0;
-                        _imbalanceDirectionChanges = 0;
-                        _imbalanceDirection = null;
-                        console.log('[coord] Imbalance confirmed, requesting LLM rebalance');
-                    }
-                }
-            } else {
-                _imbalanceCount = 0;
-                _imbalanceDirectionChanges = 0;
-                _imbalanceDirection = null;
-            }
-        }
-    }
-    _scoreSnapshot = { selfScore, peerScore, ts: now };
-
-    const maxScore = Math.max(selfScore, peerScore);
-    if (!isImbalanced && maxScore >= SCORE_GAP_MIN_SCORE) {
-        const ratio = Math.min(selfScore, peerScore) / maxScore;
-        if (ratio < SCORE_GAP_RATIO_THRESHOLD) {
-            _gapImbalanceCount++;
-            console.log(
-                `[coord] Score gap (${_gapImbalanceCount}/${IMBALANCE_CONSECUTIVE_INTERVALS}):` +
-                    ` self=${selfScore} peer=${peerScore} ratio=${ratio.toFixed(2)}`
-            );
-            if (_gapImbalanceCount >= IMBALANCE_CONSECUTIVE_INTERVALS) {
-                isImbalanced = true;
-                _gapImbalanceCount = 0;
-                console.log('[coord] Persistent score gap, requesting LLM rebalance');
-            }
-        } else {
-            _gapImbalanceCount = 0;
-        }
-    }
-
     const selfId = beliefs.me.id;
     const selfPos = { x: beliefs.me.x, y: beliefs.me.y };
     if (!selfId || !hasKnownPosition(selfPos)) {
@@ -686,64 +402,33 @@ async function runZoneAssignment() {
 
     const zoneStats = await computeZoneStats();
 
-    const scoreGapRatio =
-        Math.min(selfScore, peerScore) / Math.max(1, Math.max(selfScore, peerScore));
-    if (
-        Math.max(selfScore, peerScore) >= SCORE_GAP_MIN_SCORE &&
-        scoreGapRatio < SCORE_GAP_FORCE_RATIO
-    ) {
-        laggingAgentId = selfScore <= peerScore ? selfId : peerId;
-    }
-
-    const timeSinceLastLlm = now - _lastLlmCallTs;
-    const rebalanceCooldownReady = now - _lastRebalanceTs >= REBALANCE_MIN_INTERVAL_MS;
-    if (isImbalanced && !rebalanceCooldownReady) {
-        console.log('[coord] Rebalance skipped: recent LLM rebalance still cooling down');
-        isImbalanced = false;
-    }
-
+    // While a handoff just happened, freeze the split so the relay isn't disrupted:
+    // re-apply the last assignment without forcing any navigation.
+    const now = Date.now();
     const relayActive =
         _lastHandoffActivityTs > 0 && now - _lastHandoffActivityTs < RELAY_FREEZE_TTL_MS;
-    if (
-        relayActive &&
-        _lastAssignment &&
-        (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS)
-    ) {
+    if (relayActive && _lastAssignment) {
         console.log('[coord] Zone re-split suppressed: relay active (assignment frozen)');
-        isImbalanced = false;
-    }
-
-    const needsLlm =
-        !_lastAssignment ||
-        (!relayActive && (isImbalanced || timeSinceLastLlm >= LLM_MIN_INTERVAL_MS));
-
-    if (!needsLlm) {
-        if (now - _lastAssignmentAppliedTs < ASSIGNMENT_REFRESH_GRACE_MS) {
-            console.log('[coord] Periodic zone refresh skipped: assignment changed recently');
-            return;
-        }
-        console.log('[coord] Periodic zone refresh (re-applying last assignment, no LLM call)');
-        _lastAssignment = uncrossAssignment(_lastAssignment, selfId, selfPos, peerId, peerPos);
         applyAssignment(_lastAssignment, zoneStats, selfId, selfPos, peerId, peerPos, {
             forceNavigation: false,
         });
         return;
     }
 
-    const { callZoneAssignment } = await import('../../llm/llmAgent.js');
-    _lastLlmCallTs = now;
-    const assignment = await callZoneAssignment(zoneStats, selfId, selfPos, peerId, peerPos, {
-        selfRate,
-        peerRate,
-        isImbalanced,
-        currentAssignment: _lastAssignment,
-    });
+    const assignment = computeHeuristicAssignment(selfId, selfPos, peerId, peerPos);
     if (!assignment) return;
-    if (isImbalanced) _lastRebalanceTs = now;
-    _lastAssignment = repairAssignment(assignment, zoneStats, selfId, peerId, { laggingAgentId });
-    _lastAssignment = uncrossAssignment(_lastAssignment, selfId, selfPos, peerId, peerPos);
 
-    applyAssignment(_lastAssignment, zoneStats, selfId, selfPos, peerId, peerPos);
+    // Only force a go_to when the split changed; otherwise just refresh the
+    // constraint so neither agent is pulled away from its current intention.
+    const changed =
+        !_lastAssignment ||
+        _lastAssignment[selfId] !== assignment[selfId] ||
+        _lastAssignment[peerId] !== assignment[peerId];
+    _lastAssignment = assignment;
+
+    applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos, {
+        forceNavigation: changed,
+    });
 }
 
 /**

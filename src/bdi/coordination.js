@@ -22,6 +22,7 @@
  * multi layer; communication.js re-exports these for the rest of multi/.
  */
 export const MSG_TYPE = Object.freeze({
+    HELLO: 'hello',
     BELIEF_UPDATE: 'belief_update',
     INTENTION_UPDATE: 'intention_update',
     REQUEST: 'request',
