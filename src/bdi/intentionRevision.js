@@ -432,10 +432,18 @@ export async function revise(force = false) {
             currentIntention.type === 'go_handoff_receive' ||
             isHandoffRetryWait(currentIntention);
 
+        // A peer-commanded go_to must run to completion regardless of score:
+        // any replacement would abort the mission B explicitly assigned to A.
+        const peerGoToProtected =
+            currentIntention.type === 'go_to' &&
+            !currentIntention.parcelId &&
+            isPeerGoToLocked();
+
         const improvement = candidate.score - currentIntention.score;
         if (
             !exploringBeatsPickup &&
             !handoffProtected &&
+            !peerGoToProtected &&
             (escapeWait ||
                 waitExpired ||
                 pickupBeatsLowValueRoaming ||

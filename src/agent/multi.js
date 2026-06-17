@@ -53,6 +53,24 @@ import {
     REVISE_HEARTBEAT_MS,
 } from './common.js';
 
+// How often to send a keepalive HELLO to known peers. Must be well under
+// PEER_TIMEOUT_MS (8000ms) so a peer is never pruned just because the BDI
+// loop is idle (e.g. blocked on LLM network I/O).
+const PEER_HEARTBEAT_MS = 3000;
+
+/**
+ * Starts a periodic HELLO ping to all currently known peers.
+ * Runs as an independent setInterval so it fires even while an LLM await
+ * is in progress or the executor is paused, keeping peer lastSeen fresh.
+ */
+function startPeerHeartbeat() {
+    setInterval(() => {
+        if (getPeers().length > 0) {
+            sendBroadcast(MSG_TYPE.HELLO, null);
+        }
+    }, PEER_HEARTBEAT_MS);
+}
+
 /**
  * Connects and wires a multi-agent BDI agent for the given role.
  *
@@ -173,6 +191,8 @@ export function startMultiAgent({ role, token }) {
             sendBroadcast(MSG_TYPE.HELLO, 'YO BRO ARE YOU UP?');
         }
     }, 1000);
+
+    startPeerHeartbeat();
 
     return socket;
 }

@@ -34,6 +34,8 @@ export const beliefs = {
         y: null,
         score: 0,
         carrying: [],
+        handoffReceivedParcels: new Set(), // IDs of parcels received via handoff from the peer
+        handoffBonusActive: false,         // true only when the server has announced the +200 bonus rule
     },
     deliveryTiles: [],
     crates: new Map(),

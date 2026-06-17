@@ -278,9 +278,11 @@ const INTENTION_TOOLS = [
         function: {
             name: 'command_peer',
             description:
-                'Send a task command to the teammate agent (Agent A). Use this when the mission is ' +
-                'explicitly addressed to the other agent, not to you — e.g. "Agent A go to (x,y)". ' +
-                'DO NOT use go_to for these; use command_peer instead. Supported actions: go_to.',
+                'Send a task command to the teammate agent (Agent A). YOU are Agent B — only use ' +
+                'this when the mission is explicitly addressed to Agent A (your teammate, NOT you). ' +
+                'e.g. "Agent A go to (x,y)". DO NOT use go_to for these; use command_peer instead. ' +
+                'Supported actions: go_to. Set pauseAfter=true to keep Agent A paused at the ' +
+                'destination (use for "red light / green light" game so A stays on the odd row).',
             parameters: {
                 type: 'object',
                 properties: {
@@ -291,6 +293,12 @@ const INTENTION_TOOLS = [
                     },
                     x: { type: 'integer', description: 'Target x coordinate (required for go_to).' },
                     y: { type: 'integer', description: 'Target y coordinate (required for go_to).' },
+                    pauseAfter: {
+                        type: 'boolean',
+                        description:
+                            'If true, Agent A will re-pause at the destination instead of resuming ' +
+                            'normal play. Use for "red light" game to keep A on the odd row.',
+                    },
                 },
                 required: ['action', 'x', 'y'],
             },
@@ -374,6 +382,15 @@ const TOOL_IMPL = {
         else target = nearestReachableWalkable(me, x, y);
         if (!target) return null;
         if (manhattanDistance(me, target) === 0) return null; // already there
+
+        // If the target is permanently occupied by a paused peer, the executor will
+        // loop forever yielding to the blocker without ever reaching the cell.
+        // Return null so the model is forced to choose a different destination.
+        const blockedByPeer = [...beliefs.agents.values()].some(
+            (a) => !a.stale && Math.round(a.x) === target.x && Math.round(a.y) === target.y
+        );
+        if (blockedByPeer) return null;
+
         return createIntention('go_to', null, target, 0);
     },
 
@@ -466,8 +483,9 @@ const TOOL_IMPL = {
             if (!Number.isInteger(x) || !Number.isInteger(y)) {
                 return createIntention('wait', null, null, 0);
             }
-            sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'go_to', x, y }).catch(() => {});
-            console.log(`[intentionAgent] command_peer go_to (${x},${y})`);
+            const pauseAfter = !!args?.pauseAfter;
+            sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'go_to', x, y, pauseAfter }).catch(() => {});
+            console.log(`[intentionAgent] command_peer go_to (${x},${y}) pauseAfter=${pauseAfter}`);
         }
         return CONTINUE;
     },
@@ -590,11 +608,144 @@ function removeMission(index, reason) {
     return true;
 }
 
+/**
+ * Deterministic handler for the handoff-bonus mission.
+ *
+ * The server broadcasts a chat message explaining the +200 bonus for cross-agent
+ * pickup+delivery. This is a passive game rule — no action is required because the
+ * BDI already incorporates the bonus into handoff scoring. We resolve any matching
+ * mission immediately so the LLM never sees it (at temperature=0 it misclassifies
+ * it as "negative reward" or junk, which is harmless but confusing).
+ *
+ * Returns an Intention (from the BDI) when a match is found, null to fall through.
+ *
+ * @param {{ x: number, y: number }} me
+ * @returns {import('../shared/types.js').Intention|null}
+ */
+function handleHandoffBonusMission(me) {
+    const idx = llmMemory.missions.findIndex(
+        (m) =>
+            /initially picked up by one agent/i.test(m.text) ||
+            (/200\s*points?\s*bonus/i.test(m.text) && /deliver/i.test(m.text))
+    );
+    if (idx < 0) return null;
+
+    beliefs.me.handoffBonusActive = true;
+    sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'handoff_bonus_active' }).catch(() => {});
+    removeMission(idx, 'handled by BDI handoff scoring — +200 bonus now active');
+    console.log('[intentionAgent] Handoff bonus mission resolved; +200 bonus activated in BDI scoring and notified peer');
+    return llmMemory.missions.length === 0 ? getBestIntention() : null;
+}
+
+/**
+ * Deterministic handler for the STOP/GO ("red light / green light") game.
+ *
+ * The LLM at temperature=0 misclassifies short keyword messages ("red light",
+ * "green light") as junk. This function runs BEFORE the LLM call and handles
+ * the pattern with a simple regex, making the game reliable.
+ *
+ * STOP trigger: message contains "red light" OR ("odd row/numbered" + "wait")
+ * GO   trigger: message contains "green light" but NOT "red light" (to exclude
+ *               the challenge message that says "red light, green light game"),
+ *               or a simple go/resume/start keyword when a STOP is pending.
+ *
+ * Returns an Intention when a signal is found, null to fall through to the LLM.
+ *
+ * @param {{ x: number, y: number }} me
+ * @returns {import('../shared/types.js').Intention|null}
+ */
+function handleStopGoGame(me) {
+    const isOdd = (y) => Math.round(y) % 2 !== 0;
+
+    const stopIdx = llmMemory.missions.findIndex(
+        (m) =>
+            /red[\s_-]*light/i.test(m.text) ||
+            (/odd[\s-]*(row|numbered)/i.test(m.text) && /wait/i.test(m.text))
+    );
+
+    // GO matches green-light-only messages, or simple resume keywords when STOP is pending.
+    // Explicitly excludes the challenge message which contains both "red light" and "green light".
+    const goIdx = llmMemory.missions.findIndex(
+        (m, i) =>
+            i !== stopIdx &&
+            !/red[\s_-]*light/i.test(m.text) &&
+            (/green[\s_-]*light/i.test(m.text) ||
+                (stopIdx >= 0 && /\b(go|start|resume|continue|proceed)\b/i.test(m.text)))
+    );
+
+    if (goIdx >= 0) {
+        // Game resumed: clear both missions, unpause peer, hand back to BDI.
+        const toRemove = [goIdx, stopIdx >= 0 ? stopIdx : -1]
+            .filter((i) => i >= 0)
+            .sort((a, b) => b - a); // remove from the end so indices stay valid
+        for (const i of toRemove) removeMission(i, 'stop-go game resumed');
+        sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'resume' }).catch(() => {});
+        console.log('[intentionAgent] STOP/GO: game resumed, handing back to BDI');
+        return llmMemory.missions.length === 0 ? getBestIntention() : null;
+    }
+
+    if (stopIdx >= 0) {
+        const myY = Math.round(me.y);
+        const myX = Math.round(me.x);
+
+        if (isOdd(myY)) {
+            // Already frozen on an odd row — stay put.
+            return createIntention('wait', null, null, 0);
+        }
+
+        // Choose the nearest odd row for self, skipping peer-occupied cells.
+        const selfCandidates = [myY + 1, myY - 1].filter(
+            (y) => isOdd(y) && isWalkable(myX, y)
+        );
+        const myOddY =
+            selfCandidates.find(
+                (y) =>
+                    ![...beliefs.agents.values()].some(
+                        (a) => !a.stale && Math.round(a.x) === myX && Math.round(a.y) === y
+                    )
+            ) ?? selfCandidates[0];
+
+        if (myOddY == null) return createIntention('wait', null, null, 0);
+
+        // Command peer to move to its nearest odd row (only if not already on one).
+        const peers = [...beliefs.agents.values()].filter((a) => !a.stale);
+        if (peers.length > 0) {
+            const peerA = peers[0];
+            const peerX = Math.round(peerA.x);
+            const peerY = Math.round(peerA.y);
+            if (!isOdd(peerY)) {
+                const peerCandidates = [peerY + 1, peerY - 1].filter(
+                    (y) => isOdd(y) && isWalkable(peerX, y)
+                );
+                if (peerCandidates.length > 0) {
+                    sendBroadcast(MSG_TYPE.PEER_COMMAND, {
+                        action: 'go_to',
+                        x: peerX,
+                        y: peerCandidates[0],
+                        pauseAfter: true,
+                    }).catch(() => {});
+                    console.log(
+                        `[intentionAgent] STOP/GO: commanding peer to odd row (${peerX},${peerCandidates[0]})`
+                    );
+                }
+            }
+        }
+
+        console.log(`[intentionAgent] STOP/GO: moving self to odd row (${myX},${myOddY})`);
+        return createIntention('go_to', null, { x: myX, y: myOddY }, 0);
+    }
+
+    return null; // no STOP/GO signal found
+}
+
 const SYSTEM_PROMPT = `
 Deliveroo.js special-mission handler. Routine play — collecting, delivering and exploring parcels
 — is done automatically by another module. You are called ONLY to handle the special missions in
 the "missions" list. Do NOT play normally (no exploring, no routine delivering). Each tick call
 EXACTLY ONE tool, never prose.
+
+IDENTITY: YOU are Agent B (the coordinator). Agent A is your teammate (the peer). Never confuse
+the two: "Agent B" or "you" = yourself; "Agent A" or "teammate" = the other agent.
 
 MAP cells: 0=wall, 1=spawner, 2=delivery, 3=floor, .=unknown. (x,y): x=column (0=leftmost),
 y=row (0=bottom; grid printed top=highest y). maxX/maxY = largest x/y on the map.
@@ -603,7 +754,8 @@ STATE: me; freeParcels; deliveryTiles; spawners; blacklist; world.maxCarry; plus
 
 Handle ONE mission per tick: pick the single tool that satisfies it, then resolve_mission(index, reason).
 - "Agent A go to (x,y)" / mission targeting Agent A (your teammate, NOT you) -> command_peer(action='go_to', x, y), then resolve.
-- "move to (x,y)" / go to a coordinate (targeting YOU) -> go_to(x,y). Evaluate math (e.g. 4*2) yourself. Resolve once there.
+- "Agent B go to (x,y)" / mission targeting YOU (you are Agent B) -> go_to(x,y), resolve once there.
+- "move to (x,y)" / go to a coordinate with no agent named (targeting YOU) -> go_to(x,y). Evaluate math (e.g. 4*2) yourself. Resolve once there.
 - a question or calculation ("capital of Rome?", "25*25") -> send_message(answer, resolveIndex=index).
 - place/drop a parcel at a SPOT ("drop in the bottom left for 1000pts") -> if not carrying, go_pick_up
   first; once carrying, drop_at(x,y) at THAT spot — bottom-left=(0,0), bottom-right=(maxX,0),
@@ -613,7 +765,33 @@ Handle ONE mission per tick: pick the single tool that satisfies it, then resolv
 - "parcels with score/reward above N give no reward" -> set_max_pickup(N), then resolve.
 - "delivering in (x,y) gives Kx / 0 pts" -> set_delivery_reward(x,y,K) (0 = never deliver there), then resolve.
 - "never go through / avoid tile (x,y)" -> blacklist_tile(x,y), then resolve.
-- coordination ("both agents near (x,y) and wait") -> send_message(to:'peer') to coordinate.
+- coordination ("both agents near (x,y) and wait"):
+  • NOT yet at (x,y): command_peer(action='go_to', x, y) then go_to(x, y).
+  • ALREADY at (x,y) — go_to was not applicable: resolve_mission(index). Do NOT command_peer again.
+- STOP/GO game (a "red light / green light"-style challenge where agents must freeze on odd rows then
+  resume). Identify the type by keywords:
+  STOP keywords: "red light", "stop", "halt", "freeze", "pause" — and similar meanings.
+  GO   keywords: "green light", "go", "start", "resume", "continue", "proceed" — and similar meanings.
+  "red" and "stop" = STOP. "green" and "go" = GO. Never confuse the two directions.
+
+  When you see a STOP mission (and no GO mission alongside it):
+    ODD row = y%2==1 (e.g. y=1,3,5,7,...).
+    Step A — check your own row:
+      • me.y is ODD  → you are already frozen on an odd row. call wait. DO NOT resolve. Done for this tick.
+      • me.y is EVEN → you must move one row. my_odd_y = me.y+1 if walkable else me.y-1.
+        Step B — command Agent A (use A's OWN coordinates, NOT yours):
+          If otherAgents is non-empty: A = otherAgents[0].
+            A_odd_y = A.y+1 if walkable else A.y-1.
+            call command_peer(action='go_to', x=A.x, y=A_odd_y, pauseAfter=true).
+            NOTE: A.x ≠ me.x in general — A will go to its own nearest odd row, you go to yours.
+        Step C — move yourself: go_to(x=me.x, y=my_odd_y). This is your return action. DO NOT resolve.
+
+  When you see a GO mission:
+    • Also a STOP mission is in the list → the freeze ends. Resolve GO first, then STOP:
+        resolve_mission(<GO index>, "game resumed")
+        resolve_mission(<STOP index>, "game resumed")
+      Agents auto-resume normal play.
+    • No STOP mission in the list → GO arrived out of order or duplicated. resolve_mission(<GO index>, "junk — no stop pending").
 - negative/zero reward, or junk -> resolve_mission and nothing else.
 
 set_stack_rule, set_max_pickup, set_delivery_reward and blacklist_tile are INSTANT, free rule
@@ -745,6 +923,18 @@ export async function generateBestIntention() {
 
     const me = { x: beliefs.me.x, y: beliefs.me.y };
 
+    // Deterministic STOP/GO game handler — runs before the LLM to avoid
+    // unreliable keyword classification at temperature=0.
+    const stopGoResult = handleStopGoGame(me);
+    if (stopGoResult !== null) return stopGoResult;
+
+    // Deterministic handoff-bonus handler: the server sends a mission explaining the
+    // +200 bonus for cross-agent pickup+delivery. The BDI already accounts for this
+    // (evaluateHandoff includes the bonus, deliveryValue adds it for handoff parcels).
+    // Resolve immediately so the LLM never sees it and can't misclassify it.
+    const handoffBonusResult = handleHandoffBonusMission(me);
+    if (handoffBonusResult !== null) return handoffBonusResult;
+
     // If the agent has arrived at the cell its last go_to was heading to, note it
     // so the model is told the move completed (it has no memory across ticks).
     _reachedNote = '';
@@ -828,7 +1018,16 @@ export async function generateBestIntention() {
         if (!result) {
             console.log(`[intentionAgent] Tool "${name}" not applicable, asking again`);
             let hint = '';
-            if (name === 'drop_at' && beliefs.me.carrying.length === 0) {
+            if (name === 'go_to') {
+                const lastX = (() => { try { return JSON.parse(toolCall.function?.arguments ?? '{}').x; } catch { return null; } })();
+                const lastY = (() => { try { return JSON.parse(toolCall.function?.arguments ?? '{}').y; } catch { return null; } })();
+                const peerThere = [...beliefs.agents.values()].some(
+                    (a) => !a.stale && Math.round(a.x) === Number(lastX) && Math.round(a.y) === Number(lastY)
+                );
+                if (peerThere) {
+                    hint = ` Cell (${lastX},${lastY}) is permanently occupied by the peer agent. Choose a DIFFERENT odd-row cell — try (${Number(lastX) - 1},${Number(lastY)}), (${Number(lastX) + 1},${Number(lastY)}), or (${Number(lastX)},${Number(lastY) + 2}).`;
+                }
+            } else if (name === 'drop_at' && beliefs.me.carrying.length === 0) {
                 hint = ' You are not carrying any parcel — go_pick_up one first, then retry.';
             } else if (name === 'drop_at' && llmMemory.stackRules.size > 0) {
                 const cap = beliefs.config.MAX_PARCELS ?? 1;

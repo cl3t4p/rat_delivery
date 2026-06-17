@@ -9,6 +9,31 @@ import { handleHandoffRequest, DIR_DELTA_COORD } from './handoff.js';
 // Flag set when Agent B commands this agent to pause via PEER_COMMAND
 let _pausedByPeer = false;
 
+// Safety timeout: if B doesn't send any follow-up command within this window
+// after pausing, A auto-resumes. Guards against B crashing, timing out, or
+// losing track of the peer before it can send the resume.
+const PEER_PAUSE_SAFETY_MS = 60000;
+let _pauseSafetyTimer = null;
+
+function _clearPauseSafety() {
+    if (_pauseSafetyTimer !== null) {
+        clearTimeout(_pauseSafetyTimer);
+        _pauseSafetyTimer = null;
+    }
+}
+
+function _armPauseSafety() {
+    _clearPauseSafety();
+    _pauseSafetyTimer = setTimeout(() => {
+        _pauseSafetyTimer = null;
+        if (_pausedByPeer) {
+            console.log('[coord] Peer pause safety timeout — auto-resuming');
+            _pausedByPeer = false;
+            _requestRevision(true);
+        }
+    }, PEER_PAUSE_SAFETY_MS);
+}
+
 /** Returns true while Agent B has commanded this agent to pause. */
 export function isPausedByPeer() {
     return _pausedByPeer;
@@ -18,6 +43,11 @@ export function isPausedByPeer() {
 // from replacing the forced intention with a pickup until the move is done.
 let _peerGoToLocked = false;
 
+// When true, clearPeerGoToLock() will re-pause the agent after the commanded
+// go_to completes. Used by the "red light / green light" game so Agent A stays
+// on the odd row instead of resuming BDI play after arriving.
+let _pauseAfterGoTo = false;
+
 /** Returns true while a peer-commanded go_to has not yet completed. */
 export function isPeerGoToLocked() {
     return _peerGoToLocked;
@@ -26,6 +56,12 @@ export function isPeerGoToLocked() {
 /** Clears the peer go_to lock; called by intentionRevision on completion or stuck. */
 export function clearPeerGoToLock() {
     _peerGoToLocked = false;
+    if (_pauseAfterGoTo) {
+        _pauseAfterGoTo = false;
+        _pausedByPeer = true;
+        _armPauseSafety();
+        console.log('[coord] Re-pausing after peer-commanded go_to');
+    }
 }
 
 // Perpendicular directions to use when yielding right-of-way in a corridor
@@ -200,15 +236,24 @@ function handlePeerCommand(envelope, senderId) {
     const { action, x, y } = envelope.payload ?? {};
     if (action === 'pause') {
         _pausedByPeer = true;
+        _armPauseSafety();
         console.log(`[coord] Paused by peer command from ${senderId}`);
     } else if (action === 'resume') {
         _pausedByPeer = false;
+        _pauseAfterGoTo = false; // cancel any pending re-pause so completing an in-flight go_to doesn't re-freeze the agent
+        _clearPauseSafety();
         console.log(`[coord] Resumed by peer command from ${senderId}`);
+    } else if (action === 'handoff_bonus_active') {
+        beliefs.me.handoffBonusActive = true;
+        console.log('[coord] Handoff bonus activated by peer command');
     } else if (action === 'go_to') {
         const tx = Number(x);
         const ty = Number(y);
         if (Number.isInteger(tx) && Number.isInteger(ty)) {
-            console.log(`[coord] Peer commanded go_to (${tx},${ty})`);
+            _pausedByPeer = false;
+            _clearPauseSafety();
+            _pauseAfterGoTo = !!envelope.payload?.pauseAfter;
+            console.log(`[coord] Peer commanded go_to (${tx},${ty}) pauseAfter=${_pauseAfterGoTo}`);
             _peerGoToLocked = true;
             _forceIntention(createIntention('go_to', null, { x: tx, y: ty }, 0));
             _requestRevision(true);

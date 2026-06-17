@@ -15,6 +15,9 @@ import { manhattanDistance } from './helper.js';
  */
 const DEFAULT_MS_PER_STEP = 500;
 
+/** Bonus awarded by the server when the delivering agent ≠ the original picker. */
+export const HANDOFF_DELIVERY_BONUS = 200;
+
 /**
  * Estimates how many times a parcel will decay during a journey of `steps` tiles.
  *
@@ -87,7 +90,8 @@ export function deliveryValue(carriedIds, myPos, deliveryTile) {
     return carriedIds.reduce((total, id) => {
         const parcel = beliefs.parcels.get(id);
         if (!parcel) return total;
-        return total + estimatedRewardAtDelivery(parcel.reward, distToDelivery);
+        const bonus = beliefs.me.handoffBonusActive && beliefs.me.handoffReceivedParcels.has(id) ? HANDOFF_DELIVERY_BONUS : 0;
+        return total + estimatedRewardAtDelivery(parcel.reward, distToDelivery) + bonus;
     }, 0);
 }
 

@@ -8,7 +8,7 @@ import {
 } from '../../bdi/beliefs.js';
 import { createIntention } from '../../bdi/deliberation.js';
 import { notifyIntentionDone, notifyActionFailed } from '../../bdi/intentionRevision.js';
-import { deliveryValue, estimatedRewardAtDelivery } from '../../bdi/scoring.js';
+import { deliveryValue, estimatedRewardAtDelivery, HANDOFF_DELIVERY_BONUS } from '../../bdi/scoring.js';
 import { findNearestDeliveryTile } from '../../bdi/components/tilesearch.js';
 import { MSG_TYPE, prepareDirect, replyTo } from '../communication.js';
 import { getPeers, isPeerId, peerCarryingCount, state, touchPeer } from './peerState.js';
@@ -163,8 +163,12 @@ export function evaluateHandoff() {
     const distBMeet = manhattanDistance(posB, meetTile);
     const distMeetDel = manhattanDistance(meetTile, delivery);
 
-    // Fix 2: relative threshold — scales with map size
-    const gainThreshold = Math.max(HANDOFF_GAIN_MIN, Math.round(distADel * HANDOFF_GAIN_FRACTION));
+    // Fix 2: relative threshold — scales with map size.
+    // When the handoff bonus is active (+200 pts per parcel), the +200 bonus far
+    // outweighs any extra decay, so any positive step saving is sufficient.
+    const gainThreshold = beliefs.me.handoffBonusActive
+        ? 0
+        : Math.max(HANDOFF_GAIN_MIN, Math.round(distADel * HANDOFF_GAIN_FRACTION));
     const savedASteps = distADel - distAMeet;
     const condition1 = savedASteps > gainThreshold;
 
@@ -184,7 +188,7 @@ export function evaluateHandoff() {
     const valueHandoff = beliefs.me.carrying.reduce((total, id) => {
         const parcel = beliefs.parcels.get(id);
         if (!parcel) return total;
-        return total + estimatedRewardAtDelivery(parcel.reward, handoffSteps);
+        return total + estimatedRewardAtDelivery(parcel.reward, handoffSteps) + (beliefs.me.handoffBonusActive ? HANDOFF_DELIVERY_BONUS : 0);
     }, 0);
     const conditionValue =
         savedASteps > gainThreshold && valueHandoff + HANDOFF_MAX_REWARD_LOSS >= valueAAlone;
@@ -546,9 +550,10 @@ async function executeHandoffReceive(socket, intention, execCtx) {
         const parcel = beliefs.parcels.get(id);
         if (parcel) parcel.carriedBy = beliefs.me.id;
         if (id && !beliefs.me.carrying.includes(id)) beliefs.me.carrying.push(id);
+        if (id) beliefs.me.handoffReceivedParcels.add(id);
     }
 
-    console.log(`[coord] Handoff receive OK: picked up ${picked.length} parcel(s)`);
+    console.log(`[coord] Handoff receive OK: picked up ${picked.length} parcel(s), +${HANDOFF_DELIVERY_BONUS} bonus each at delivery`);
     notifyIntentionDone();
 }
 
