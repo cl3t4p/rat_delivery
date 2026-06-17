@@ -1,17 +1,11 @@
 /**
- * Il planner deve:
- * 		1. ricevere l'obiettivo + stato ambiente
- * 		2. ragionare con Chain-of-Tought
- * 		3. restituire un piano JSON con una lista di step
+ * Simple LLM planner that returns natural-language steps.
  */
 
 import { callLLM } from './llmAgent.js';
 
-// ── PROMPT DEL PLANNER ───────────────────────────────────────────────────
 /**
- * Il prompt definisce il comportamento del planner.
- * Tecnica: Chain-of-Tought -> il modello ragiona prima di produrre il piano.
- * Il piano deve essere JSON puro così il programm può parsarlo facilmente.
+ * System prompt for the planner.
  */
 
 const PLANNER_PROMPT = `
@@ -35,13 +29,12 @@ Return ONLY this JSON, no markdown, no extra text:
   ]
 }`.trim();
 
-// ── FUNZIONE PRINCIPALE ───────────────────────────────────────────────────
 /**
- * Crea un piano in linguaggio naturale per raggiungere l'obiettivo.
+ * Creates a natural-language plan for an objective.
  *
- * @param {string} objective				obiettivo in linguaggio naturale
- * @param {object} environmentSnapshot		snapshot corrente dei beliefs
- * @returns {Promise<string[]>}				array di step del piano
+ * @param {string} objective - Natural-language objective.
+ * @param {object} environmentSnapshot - Current belief snapshot.
+ * @returns {Promise<string[]>} Plan steps.
  */
 
 export async function createPlan(objective, environmentSnapshot) {
@@ -69,22 +62,19 @@ export async function createPlan(objective, environmentSnapshot) {
     return plan;
 }
 
-// ── PARSING DEL PIANO ────────────────────────────────────────────────────
 /**
- * Estrae il piano JSON dall'output del modello.
- * Il modello può includere testo di Chain-of-Thought prima del JSON.
- * quindi cerchiamo il blocco JSON dentro la risposta.
+ * Extracts JSON plan steps from model output.
  *
- * @returns {string[]|null}        array di step o null se non parsabile
- * @param text
+ * @param {string} text - Raw model output.
+ * @returns {string[]|null} Parsed steps or null.
  */
 
 function parsePlan(text) {
-    // cerca il blocco JSON nell'output (dopo il CoT)
+    // Find the JSON block in the model output.
     const jsonMatch = text.match(/\{[\s\S]*"steps"[\s\S]*\}/);
     if (!jsonMatch) return null;
 
-    // rimuove eventuali backtick markdown tipo ```json
+    // Remove optional markdown fences.
     const cleaned = jsonMatch[0]
         .replace(/```json/gi, '')
         .replace(/```/g, '')

@@ -8,17 +8,21 @@ import {
 } from '../../bdi/beliefs.js';
 import { createIntention } from '../../bdi/deliberation.js';
 import { notifyIntentionDone, notifyActionFailed } from '../../bdi/intentionRevision.js';
-import { deliveryValue, estimatedRewardAtDelivery, HANDOFF_DELIVERY_BONUS } from '../../bdi/scoring.js';
+import {
+    deliveryValue,
+    estimatedRewardAtDelivery,
+    HANDOFF_DELIVERY_BONUS,
+} from '../../bdi/scoring.js';
 import { findNearestDeliveryTile } from '../../bdi/components/tilesearch.js';
 import { MSG_TYPE, prepareDirect, replyTo } from '../communication.js';
 import { getPeers, isPeerId, peerCarryingCount, state, touchPeer } from './peerState.js';
 import { markHandoffActivity, findNearestWalkableTile } from './zoneAssignment.js';
 
-// Fraction of A's direct delivery distance that A must save (fix 2: relative threshold)
+// Required saving relative to A's direct delivery path.
 const HANDOFF_GAIN_FRACTION = 0.2;
-// Absolute minimum tiles A must save regardless of map size
+// Absolute minimum saving.
 const HANDOFF_GAIN_MIN = 3;
-// Maximum parcel reward we accept losing to make the handoff worthwhile
+// Maximum reward loss accepted for a handoff.
 const HANDOFF_MAX_REWARD_LOSS = 2;
 
 // Retry pacing when the peer is busy: fast retries first, then slower
@@ -26,11 +30,11 @@ const HANDOFF_BUSY_RETRY_MS = 300;
 const HANDOFF_BUSY_SLOW_RETRY_MS = 1000;
 const HANDOFF_BUSY_FAST_RETRIES = 6;
 
-// Max ticks B waits at the staging tile for A to drop the parcels
+// Receiver wait budget at the staging tile.
 const HANDOFF_STAGING_MAX_WAIT = 20;
-// How long A waits to confirm B picked up before releasing
+// Sender waits for pickup confirmation before releasing.
 const HANDOFF_SENDER_RELEASE_TIMEOUT_MS = 2000;
-// How many times B tries to pick up before giving up
+// Receiver pickup retry budget.
 const HANDOFF_RECEIVE_MAX_PICKUP_ATTEMPTS = 5;
 
 // Cooldown between reactive blocked-delivery handoff attempts
@@ -61,7 +65,6 @@ let _commitIntention = () => {};
 /** @type {() => void} */
 let _clearIntention = () => {};
 
-// Must be called once before using this module
 export function initHandoff({
     getCurrentIntention,
     forceIntention,
@@ -80,13 +83,11 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Returns true if the agent is standing on tile
 function isAtTile(tile) {
     if (!tile) return false;
     return Math.round(beliefs.me.x) === tile.x && Math.round(beliefs.me.y) === tile.y;
 }
 
-// Returns the cardinal direction from one tile to an orthogonally adjacent tile, or null
 function directionTo(from, to) {
     if (!from || !to) return null;
     const dx = Math.round(to.x) - Math.round(from.x);
@@ -95,18 +96,13 @@ function directionTo(from, to) {
 }
 
 /**
- * Finds the best meet tile for a handoff between posA and posB.
- * Picks the walkable tile between A and the nearest delivery that minimises
- * max(distA, distB), ensuring the rendezvous is close to a delivery zone and
- * equidistant for both agents regardless of map layout (fix 3).
+ * Chooses a reachable meet tile between sender, receiver, and delivery.
  */
 function findBestMeetTile(posA, posB) {
     const deliveryA = findNearestDeliveryTile(posA);
     if (!deliveryA) return null;
 
-    // Walk from A towards the delivery; at each step pick the candidate that
-    // minimises max(distFromA, distFromB) — this is the meeting point that
-    // best balances the two agents' travel costs.
+    // Balance both agents' travel cost along A's delivery path.
     const candidates = [];
     const steps = manhattanDistance(posA, deliveryA);
     for (let t = 0; t <= steps; t++) {
@@ -117,7 +113,7 @@ function findBestMeetTile(posA, posB) {
             candidates.push({ x: cx, y: cy });
         }
     }
-    // Also consider the raw midpoint as a fallback candidate
+    // Midpoint fallback for maps where the delivery line is awkward.
     const mid = {
         x: Math.round((posA.x + posB.x) / 2),
         y: Math.round((posA.y + posB.y) / 2),
@@ -138,8 +134,7 @@ function findBestMeetTile(posA, posB) {
 }
 
 /**
- * Evaluates whether handing off carried parcels to the peer is worthwhile.
- * Returns { meetTile, peerId } if the handoff is beneficial, null otherwise.
+ * Returns handoff data only when the route and score are worth it.
  */
 export function evaluateHandoff() {
     if (beliefs.me.carrying.length < 1) return null;
@@ -151,7 +146,6 @@ export function evaluateHandoff() {
     const posA = { x: beliefs.me.x, y: beliefs.me.y };
     const posB = { x: peer.x, y: peer.y };
 
-    // Fix 3: choose meet tile that balances travel cost for both agents
     const meetTile = findBestMeetTile(posA, posB);
     if (!meetTile) return null;
 
@@ -163,17 +157,14 @@ export function evaluateHandoff() {
     const distBMeet = manhattanDistance(posB, meetTile);
     const distMeetDel = manhattanDistance(meetTile, delivery);
 
-    // Fix 2: relative threshold — scales with map size.
-    // When the handoff bonus is active (+200 pts per parcel), the +200 bonus far
-    // outweighs any extra decay, so any positive step saving is sufficient.
+    // Bonus handoffs can accept smaller step savings.
     const gainThreshold = beliefs.me.handoffBonusActive
         ? 0
         : Math.max(HANDOFF_GAIN_MIN, Math.round(distADel * HANDOFF_GAIN_FRACTION));
     const savedASteps = distADel - distAMeet;
     const condition1 = savedASteps > gainThreshold;
 
-    // Fix 1: when B is idle use distADel as reference — handoff only makes
-    // sense if B can complete the delivery faster than A would alone
+    // If B is idle, compare against A delivering alone.
     const peerTarget =
         peer.intention?.status === 'active' &&
         (peer.intention.type === 'go_pick_up' || peer.intention.type === 'go_deliver') &&
@@ -188,7 +179,11 @@ export function evaluateHandoff() {
     const valueHandoff = beliefs.me.carrying.reduce((total, id) => {
         const parcel = beliefs.parcels.get(id);
         if (!parcel) return total;
-        return total + estimatedRewardAtDelivery(parcel.reward, handoffSteps) + (beliefs.me.handoffBonusActive ? HANDOFF_DELIVERY_BONUS : 0);
+        return (
+            total +
+            estimatedRewardAtDelivery(parcel.reward, handoffSteps) +
+            (beliefs.me.handoffBonusActive ? HANDOFF_DELIVERY_BONUS : 0)
+        );
     }, 0);
     const conditionValue =
         savedASteps > gainThreshold && valueHandoff + HANDOFF_MAX_REWARD_LOSS >= valueAAlone;
@@ -340,9 +335,7 @@ export function proposeHandoff(handoff, attempt = 0) {
 }
 
 /**
- * When the agent is delivering but an empty teammate blocks the path,
- * proposes handing the load to that teammate at the current tile.
- * Returns true if the situation was handled, false to fall through to normal blocked handling
+ * Offers the load to an empty teammate blocking a delivery path.
  */
 export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blockerCarryCount) {
     if (
@@ -553,7 +546,9 @@ async function executeHandoffReceive(socket, intention, execCtx) {
         if (id) beliefs.me.handoffReceivedParcels.add(id);
     }
 
-    console.log(`[coord] Handoff receive OK: picked up ${picked.length} parcel(s), +${HANDOFF_DELIVERY_BONUS} bonus each at delivery`);
+    console.log(
+        `[coord] Handoff receive OK: picked up ${picked.length} parcel(s), +${HANDOFF_DELIVERY_BONUS} bonus each at delivery`
+    );
     notifyIntentionDone();
 }
 

@@ -1,13 +1,7 @@
 /**
  * notifier.js
  *
- * Change-detection helper that turns local belief / intention updates
- * into outbound `belief_update` and `intention_update` messages.
- *
- * Kept separate from `beliefs.js` and `intentionRevision.js` so the BDI
- * modules don't gain a hard dependency on the multi-agent layer: they
- * simply call notifier functions, which silently no-op until
- * `initCommunication` has run.
+ * Change detection for outbound belief and intention updates.
  */
 
 import { beliefs } from '../bdi/beliefs.js';
@@ -28,19 +22,14 @@ const snapshot = {
 let commsReady = false;
 
 /**
- * Tells the notifier that the communication layer is wired up.
- * Until called, `tickBeliefDelta` and `broadcastIntention` short-circuit.
+ * Enables broadcasts once communication is ready.
  */
 export function enableNotifier() {
     commsReady = true;
 }
 
-// Belief delta
-
 /**
- * Computes the delta vs. the last snapshot of own beliefs and, if any,
- * broadcasts a `belief_update`. Called from `multiagent_a.js` / `multiagent_b.js` after every
- * `updateBeliefs(...)`.
+ * Broadcasts own-state changes.
  */
 export function tickBeliefDelta() {
     if (!commsReady) return;
@@ -63,14 +52,8 @@ export function tickBeliefDelta() {
     sendBroadcast(MSG_TYPE.BELIEF_UPDATE, { me });
 }
 
-// Intention broadcast
-
 /**
- * Broadcasts an `intention_update` describing the current intention.
- * Called from `intentionRevision.js` whenever the intention is replaced
- * or its status changes (active / done / failed).
- *
- * Deduplication: the same (parcelId, type, status) is not re-broadcast.
+ * Broadcasts intention changes, deduplicated by target and status.
  *
  * @param {Intention | null} intention
  */

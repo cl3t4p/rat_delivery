@@ -7,20 +7,20 @@ import { getZone, getZones, getSplitAxis, getMapBounds } from '../../shared/zone
 import { MSG_TYPE, onMessage, sendDirect } from '../communication.js';
 import { getPeers, hasKnownPosition } from './peerState.js';
 
-// How often the zone assignment loop re-runs
+// Periodic assignment cadence.
 const ZONE_ASSIGN_INTERVAL_MS = 15_000;
-// How long to wait after spotting a new peer before running the first assignment
+// Peer discovery debounce.
 const PEER_DISCOVERY_ASSIGN_DELAY_MS = 500;
-// While a handoff happened within this window, freeze the zone assignment
+// Relay freeze after handoff activity.
 const RELAY_FREEZE_TTL_MS = 12_000;
 
-// Score above which an agent is considered busy with a high-value intention
+// Score threshold for high-value active work.
 const BOTH_BUSY_SCORE_THRESHOLD = 10;
-// If enabled, runs a fast heuristic zone split on peer discovery
+// Fast split before the periodic loop starts.
 const USE_HEURISTIC_PREASSIGN = process.env.USE_HEURISTIC_PREASSIGN !== 'false';
-// A new zone assignment must beat the current intention score by at least this
+// Minimum score gain needed to override an active intention.
 const IMPROVEMENT_THRESHOLD = 5;
-// Ignore a zone assignment if the target is already this close to the current one
+// Ignore assignments already close to the current target.
 const SAME_ZONE_TARGET_DISTANCE = 3;
 
 let _isCoordinator = false;
@@ -30,7 +30,7 @@ let _lastAssignment = null;
 let _hasEverAssigned = false;
 let _lastHandoffActivityTs = 0;
 let _zoneAssignPending = false;
-// Last zone actually sent to the peer — used to suppress redundant refreshes
+// Last peer zone sent, used to suppress redundant refreshes.
 let _lastSentPeerZone = null;
 
 /** @type {() => (import('../../shared/types.js').Intention|null)} */
@@ -38,26 +38,21 @@ let _getCurrentIntention = () => null;
 /** @type {(intention: import('../../shared/types.js').Intention) => void} */
 let _forceIntention = () => {};
 
-// Must be called once before using this module
 export function initZoneAssignment({ getCurrentIntention, forceIntention }) {
     _getCurrentIntention = getCurrentIntention;
     _forceIntention = forceIntention;
 }
 
-// Called by handoff.js when a handoff is accepted, to reset the relay freeze timer
 export function markHandoffActivity() {
     _lastHandoffActivityTs = Date.now();
 }
 
-// Marks this agent as the LLM coordinator; only the coordinator runs zone assignments and LLM calls
 export function setCoordinatorRole() {
     _isCoordinator = true;
 }
 
 /**
- * Scans all known parcels and spawner tiles to compute stats for each of the two
- * map halves: total reward, free parcel count, spawner count, and best pickup
- * score for self and peer.
+ * Computes parcel and spawner stats for each map half.
  */
 async function computeZoneStats() {
     const zones = {};
@@ -107,7 +102,6 @@ async function computeZoneStats() {
     return zones;
 }
 
-// Returns the geometric center tile of a map half.
 function getZoneCenter(zoneName) {
     const { minX, maxX, minY, maxY } = getMapBounds(beliefs.grid);
     const midX = (minX + maxX) / 2;
@@ -131,9 +125,7 @@ function getZoneCenter(zoneName) {
 }
 
 /**
- * Finds the best reachable navigation target in a zone.
- * Tries spawner tiles first (nearest to fromPos), then walkable tiles near
- * the geometric center, then the center itself as last resort
+ * Finds a reachable navigation target inside a zone.
  */
 export function getNearestReachableZoneTarget(zoneName, fromPos) {
     const spawners = findSpawnerTiles().filter((s) => getZone(s, beliefs.grid) === zoneName);
@@ -158,7 +150,6 @@ export function getNearestReachableZoneTarget(zoneName, fromPos) {
     return center;
 }
 
-// Returns the walkable tile closest to target by Manhattan distance
 export function findNearestWalkableTile(target) {
     let best = null;
     let bestDist = Infinity;
@@ -175,13 +166,7 @@ export function findNearestWalkableTile(target) {
 }
 
 /**
- * Splits the two agents across the two map halves.
- *
- * Returns null only before the map has loaded. If the agents are already in
- * different halves, each keeps its own. If they are in the same half, each is
- * given the half it is nearer to along the split axis so they separate without
- * crossing; ties are broken by id for determinism. An agent whose half has no
- * spawners parks at the half point (handled in deliberation.js).
+ * Splits the two agents across the map halves.
  *
  * @returns {Record<string, string>|null}
  */
@@ -198,8 +183,7 @@ function computeHeuristicAssignment(selfId, selfPos, peerId, peerPos) {
         return { [selfId]: selfZone, [peerId]: peerZone };
     }
 
-    // Both agents are in the same half: give each the half it is nearer to along
-    // the split axis so they separate without crossing.
+    // Same half: separate along the split axis.
     const axis = getSplitAxis(beliefs.grid);
     let selfCoord = selfPos.x;
     let peerCoord = peerPos.x;
@@ -210,7 +194,7 @@ function computeHeuristicAssignment(selfId, selfPos, peerId, peerPos) {
 
     let selfTakesLow = selfCoord < peerCoord;
     if (selfCoord === peerCoord) {
-        selfTakesLow = selfId < peerId; // deterministic tiebreak
+        selfTakesLow = selfId < peerId;
     }
 
     const [low, high] = zones;
@@ -221,10 +205,7 @@ function computeHeuristicAssignment(selfId, selfPos, peerId, peerPos) {
 }
 
 /**
- * Applies the zone assignment to self and the peer.
- * Sets the zone constraint and forces a go_to navigation for self (unless busy),
- * then sends a ZONE_ASSIGN message to the peer.
- * Skips if a handoff is currently in progress
+ * Applies a zone assignment locally and sends the peer update.
  */
 function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos, options = {}) {
     const { forceNavigation = true } = options;
@@ -269,7 +250,7 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
     if (assignment[peerId]) {
         const peerZoneName = assignment[peerId];
 
-        // Skip redundant periodic refreshes when the peer zone hasn't changed
+        // Avoid redundant periodic refreshes.
         if (!forceNavigation && peerZoneName === _lastSentPeerZone) return;
 
         const peerCenter = getNearestReachableZoneTarget(peerZoneName, peerPos);
@@ -292,8 +273,7 @@ function applyAssignment(assignment, zoneStats, selfId, selfPos, peerId, peerPos
 }
 
 /**
- * Runs an immediate heuristic zone split as soon as the peer position is known,
- * before the LLM responds, so agents start covering different areas right away
+ * Runs an immediate heuristic split once the peer position is known.
  */
 export async function runHeuristicZoneAssignment() {
     if (!_isCoordinator) return;
@@ -347,8 +327,7 @@ export async function runHeuristicZoneAssignment() {
 }
 
 /**
- * Schedules a single zone assignment attempt after delayMs.
- * Debounced: multiple rapid calls collapse into one
+ * Schedules one debounced zone assignment attempt.
  */
 export function scheduleZoneAssignment(delayMs = PEER_DISCOVERY_ASSIGN_DELAY_MS) {
     if (!_isCoordinator) return;
@@ -361,13 +340,7 @@ export function scheduleZoneAssignment(delayMs = PEER_DISCOVERY_ASSIGN_DELAY_MS)
 }
 
 /**
- * Main zone assignment cycle (heuristic, no LLM).
- *
- * Splits the two agents across the two map halves (see computeHeuristicAssignment)
- * and applies it. Navigation is only forced when the split actually changes, so a
- * stable split is just a cheap constraint refresh that never yanks an agent off
- * its work. Skips when both agents are busy, no peer is known, or a relay is in
- * progress.
+ * Runs the periodic heuristic assignment cycle.
  */
 async function runZoneAssignment() {
     if (beliefs.me.x === null) return;
@@ -402,8 +375,7 @@ async function runZoneAssignment() {
 
     const zoneStats = await computeZoneStats();
 
-    // While a handoff just happened, freeze the split so the relay isn't disrupted:
-    // re-apply the last assignment without forcing any navigation.
+    // Freeze the split briefly after relay activity.
     const now = Date.now();
     const relayActive =
         _lastHandoffActivityTs > 0 && now - _lastHandoffActivityTs < RELAY_FREEZE_TTL_MS;
@@ -418,8 +390,7 @@ async function runZoneAssignment() {
     const assignment = computeHeuristicAssignment(selfId, selfPos, peerId, peerPos);
     if (!assignment) return;
 
-    // Only force a go_to when the split changed; otherwise just refresh the
-    // constraint so neither agent is pulled away from its current intention.
+    // Stable splits only refresh constraints.
     const changed =
         !_lastAssignment ||
         _lastAssignment[selfId] !== assignment[selfId] ||
@@ -432,9 +403,7 @@ async function runZoneAssignment() {
 }
 
 /**
- * Starts the periodic zone re-assignment loop.
- * The first assignment is triggered by peer discovery via scheduleZoneAssignment;
- * this loop handles periodic re-assignments to adapt to game-state changes
+ * Starts the periodic zone assignment loop.
  */
 export function startZoneAssignmentLoop() {
     if (!_isCoordinator) return;
@@ -447,9 +416,7 @@ export function startZoneAssignmentLoop() {
 }
 
 /**
- * Registers the handler for incoming ZONE_ASSIGN messages.
- * Converts a zone assignment into a go_to intention toward the zone center.
- * Ignores the assignment if the current intention is already high-value enough
+ * Registers the handler for incoming zone assignments.
  */
 export function initZoneAssignHandler() {
     onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {

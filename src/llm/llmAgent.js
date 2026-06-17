@@ -1,32 +1,19 @@
 /**
  * llmAgent.js
  *
- * Infrastructure for the LLM-driven agent (agent B). Three responsibilities:
- *   1. Own the connection to the LLM server (OpenAI-compatible LiteLLM gateway).
- *   2. Hold the LLM memory: the operator objective, the queue of special missions
- *      received over the Deliveroo chat, the freeze flag, and the latest
- *      environment snapshot.
- *   3. Expose the low-level model call (`callLLM`) with a circuit breaker so a
- *      flaky model never blocks the planner.
- *
- * The per-tick deliberation (reading and acting on missions, choosing the next
- * intention) lives in intentionAgent.js; this module only stores state and talks
- * to the model.
+ * LLM client and shared memory for the LLM-driven agent.
  */
 
 import 'dotenv/config';
 import OpenAI from 'openai';
 import { beliefs } from '../bdi/beliefs.js';
 
-// Config
-
 const baseURL = process.env.LITELLM_BASE_URL || 'https://llm.bears.disi.unitn.it/v1';
 const apiKey = process.env.LITELLM_API_KEY;
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 const LLM_FAILURE_THRESHOLD = Number(process.env.LLM_FAILURE_THRESHOLD) || 3;
 const LLM_COOLDOWN_MS = Number(process.env.LLM_COOLDOWN_MS) || 120000;
-// The LLM is allowed to be slow: we'd rather wait for a good decision than skip
-// the tick. A generous timeout matters more than call frequency here.
+// Prefer a slow answer over skipping the mission tick too early.
 const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 60000;
 const LLM_MAX_RETRIES = Number(process.env.LLM_MAX_RETRIES) || 1;
 
@@ -39,7 +26,7 @@ let llmClient = null;
 /** @type {(() => Promise<void>)|null} */
 let _onObjectiveChange = null;
 
-// Circuit breaker state for the model call (callLLM).
+// Circuit breaker state.
 let _llmFailures = 0;
 let _llmDisabledUntil = 0;
 let _lastUnavailableLog = 0;
@@ -47,12 +34,9 @@ let _lastUnavailableLog = 0;
 export { llmClient };
 
 /**
- * Initializes the LLM client. Must be called once, only by the LLM agent
- * (agent B / single-agent USE_LLM). Agent A never calls this, so it keeps the
- * LLM modules effectively unused.
+ * Initializes the LLM client.
  *
- * @param {() => Promise<void>} onObjectiveChange - Invoked after a new mission or
- *   objective arrives so the BDI loop can re-deliberate immediately.
+ * @param {() => Promise<void>} onObjectiveChange - Triggered after a new mission.
  */
 export function initLlmAgent(onObjectiveChange) {
     _onObjectiveChange = onObjectiveChange;
@@ -71,30 +55,19 @@ export function initLlmAgent(onObjectiveChange) {
     console.log(`[llmAgent] init ok model=${MODEL} baseURL=${baseURL}`);
 }
 
-// LLM memory
-
 /**
- * Memory shared between the infrastructure here and the intention agent.
- *
- * - objective: standing operator intent in natural language (replaced wholesale).
- * - missions: special missions received over the chat, stored verbatim with the
- *   id of the sender so an answer can be routed back. The LLM reads them, decides
- *   whether each is worth doing, acts, and clears them.
- * - paused: when true the agent is frozen — it only waits until resumed.
- * - environmentSnapshot: latest sensed world state (set by updateContext).
- * - sendMessage: wired by the entrypoint; sends a chat message to the peer or
- *   broadcasts. null in contexts with no chat channel.
+ * Shared state read by intentionAgent.js.
  */
 export const llmMemory = {
     /** @type {string|null} */
     objective: null,
     /** @type {{text: string, from: string|null, ts: number}[]} */
     missions: [],
-    /** @type {Map<number, number>} - Stack rules: size → multiplier. Agent targets the most profitable size. */
+    /** @type {Map<number, number>} Stack size -> reward multiplier. */
     stackRules: new Map(),
-    /** @type {number|null} - Never pick up a parcel whose reward exceeds this. null = no cap. */
+    /** @type {number|null} */
     maxPickupReward: null,
-    /** @type {Record<string, number>} - Per delivery-tile reward multiplier keyed "x,y" (0 = never deliver there). */
+    /** @type {Record<string, number>} */
     deliveryRewards: {},
     /** @type {object|null} */
     environmentSnapshot: null,
@@ -105,11 +78,7 @@ export const llmMemory = {
 };
 
 /**
- * Records a special mission for the LLM to interpret on its next deliberation.
- *
- * Everything that arrives over the chat is stored verbatim — classification
- * (mission vs. junk) and all decisions are the model's job, done with its tools
- * in intentionAgent.js. We only sanitise and cap the queue here.
+ * Stores a chat mission for the next LLM deliberation.
  *
  * @param {string} text - Raw message text.
  * @param {string|null} [from] - Sender id, so a reply can be routed back to them.
@@ -136,8 +105,7 @@ export async function setObjective(text, from = null) {
 }
 
 /**
- * Refreshes the environment snapshot from the current beliefs. Called on every
- * sensing tick so the model always reasons over up-to-date state.
+ * Refreshes the compact world snapshot sent to the model.
  */
 export function updateContext() {
     llmMemory.environmentSnapshot = {
@@ -154,11 +122,8 @@ export function updateContext() {
     };
 }
 
-// Stack rule helpers — exported so deliberation.js and intentionAgent.js can use them
-
 /**
- * Returns the reward multiplier for the given carrying count from stackRules.
- * If no rule exists for that count, returns 1 (no change).
+ * Reward multiplier for the current carried-parcel count.
  *
  * @param {number} carryingCount
  * @returns {number}
@@ -169,8 +134,7 @@ export function getStackMultiplier(carryingCount) {
 }
 
 /**
- * Returns the stack size with the highest expected value (size × multiplier)
- * among rules that fit within `capacity`. Returns null when no rules are set.
+ * Best stack size that fits the current carry capacity.
  *
  * @param {number} [capacity=Infinity]
  * @returns {number|null}
@@ -190,8 +154,7 @@ export function getBestStackTarget(capacity = Infinity) {
 }
 
 /**
- * Fires the onMissionsChanged hook when the missions list size changes.
- * Called from setObjective (here) and removeMission (intentionAgent.js).
+ * Fires the mission-queue hook when its size changes.
  *
  * @param {number} prevLen
  * @param {number} newLen
@@ -202,12 +165,8 @@ export function notifyMissionsChanged(prevLen, newLen) {
     }
 }
 
-// Model call + circuit breaker
-
 /**
- * Sends a plain chat request to the model (no tools). Used by the planner.
- * Throws when the client is missing, the breaker is open, or the call fails, so
- * the caller can fall back to its heuristic. Failures feed the circuit breaker.
+ * Sends a plain chat request to the model.
  *
  * @param {object[]} messages - Messages in OpenAI format.
  * @param {{ temperature?: number }} [opts]
@@ -233,7 +192,7 @@ export async function callLLM(messages, { temperature = 0 } = {}) {
     }
 }
 
-/** @returns {boolean} true while the breaker is open (model calls suppressed). */
+/** @returns {boolean} true while model calls are suppressed. */
 function isLlmCircuitOpen() {
     if (_llmDisabledUntil === 0) return false;
     if (Date.now() < _llmDisabledUntil) return true;
@@ -254,8 +213,7 @@ function recordLlmSuccess() {
 }
 
 /**
- * Records a failed model call. After LLM_FAILURE_THRESHOLD consecutive failures
- * the breaker opens for LLM_COOLDOWN_MS, during which callers use their heuristic.
+ * Records a failed model call and opens the circuit if needed.
  *
  * @param {unknown} err
  * @param {string} context - Short label for the log (e.g. "LLM call").

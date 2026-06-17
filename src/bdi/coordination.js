@@ -1,25 +1,9 @@
 /**
- * coordination.js — seam between single-agent and multi-agent modes
- *
- * The single-agent BDI core (deliberation, intentionRevision, executor) needs to
- * occasionally ask "is a peer handling this?" or "tell my peer what I'm doing".
- * To keep the BDI core free of any dependency on the multi-agent layer, those
- * calls go through this seam instead of importing `../multi/*` directly.
- *
- * By default every hook is a single-agent no-op: no peers, nothing claimed, no
- * broadcasts, no handoffs. A solo agent (pddl.js) therefore behaves as if it owns
- * the whole map. The multi-agent layer (src/multi/helper.js calls installMultiAgent())
- * overrides these hooks at startup with the real coordinator/notifier/communication
- * implementations.
- *
- * Dependency direction: bdi depends on coordination (no import of multi); multi depends on bdi.
- * This breaks the previous circular import between bdi and multi.
+ * Seam between the BDI core and the optional multi-agent layer.
  */
 
 /**
- * Message-type constants for the multi-agent protocol. Defined here (not in
- * multi/communication.js) so the BDI core can reference them without importing the
- * multi layer; communication.js re-exports these for the rest of multi/.
+ * Message-type constants shared by BDI and multi-agent code.
  */
 export const MSG_TYPE = Object.freeze({
     HELLO: 'hello',
@@ -35,17 +19,15 @@ export const MSG_TYPE = Object.freeze({
     PEER_COMMAND: 'peer_command',
 });
 
-// Single-agent defaults. Overridden by installMultiAgent() in multi mode.
+// Solo defaults. installMultiAgent() replaces these in multi-agent mode.
 const defaults = {
-    // coordinator
     shouldYieldParcel: () => false,
     isParcelClaimedByPeer: () => false,
     requestTakeover: () => Promise.resolve({ accepted: true, reason: 'solo' }),
     evaluateHandoff: () => null,
     proposeHandoff: () => {},
     requestHandoff: () => Promise.resolve({ accepted: false }),
-    // Handoff execution lives in the multi layer; in solo mode no go_handoff
-    // intention is ever produced, so these stay inert no-ops.
+    // Handoff intentions are never produced in solo mode.
     tryBlockedDeliveryHandoff: () => Promise.resolve(false),
     runHandoff: () => Promise.resolve(),
     getNearestReachableZoneTarget: () => null,
@@ -54,10 +36,8 @@ const defaults = {
     isPausedByPeer: () => false,
     isPeerGoToLocked: () => false,
     clearPeerGoToLock: () => {},
-    // notifier
     broadcastIntention: () => {},
-    // communication. sendBroadcast must return a Promise: callers do
-    // `sendBroadcast(...).catch(...)`, so a bare value would throw in solo mode.
+    // Callers expect sendBroadcast(...).catch(...).
     sendBroadcast: () => Promise.resolve(null),
     onMessage: () => {},
 };
@@ -65,9 +45,7 @@ const defaults = {
 let impl = { ...defaults };
 
 /**
- * Installs real multi-agent implementations. Called once at startup by the
- * multi-agent entrypoints (via multi/helper.js). Unlisted hooks keep their
- * single-agent default.
+ * Installs multi-agent implementations.
  *
  * @param {Partial<typeof defaults>} overrides
  */
@@ -75,13 +53,12 @@ export function registerCoordination(overrides) {
     impl = { ...defaults, ...overrides };
 }
 
-/** Restores single-agent no-op behaviour (used by tests). */
+/** Restores solo no-op behaviour. */
 export function resetCoordination() {
     impl = { ...defaults };
 }
 
-// Delegating named exports: the BDI core imports these exactly as it used to
-// import the multi functions, but they now route through the seam.
+// Delegating exports used by the BDI core.
 export const shouldYieldParcel = (...a) => impl.shouldYieldParcel(...a);
 export const isParcelClaimedByPeer = (...a) => impl.isParcelClaimedByPeer(...a);
 export const requestTakeover = (...a) => impl.requestTakeover(...a);

@@ -1,20 +1,16 @@
-/** @typedef {import('../../shared/types.js').ZoneName} ZoneName*/
+/** @typedef {import('../../shared/types.js').ZoneName} ZoneName */
 
 import { beliefs } from '../beliefs.js';
 import { getZone as _sharedGetZone } from '../../shared/zones.js';
 import { resetRoamTarget } from '../deliberation.js';
 
-// ── Zone constraint ──────────────────────────────────────────────────────────
-// Set by intentionRevision when a ZONE_ASSIGN message is accepted.
-// Persists across deliberation cycles so the agent stays in its zone even
-// after the one-shot go_to waypoint has been consumed.
+// Current zone preference for deliberation.
 
 /** @type {ZoneName} */
 export let _zoneConstraint = null;
 
 /**
- * Persists the zone the agent should prefer for roaming and pickup.
- * Pass null to restore full-map behaviour (no zone preference).
+ * Sets the preferred zone for roaming and pickup.
  *
  * @param {ZoneName} zoneName
  */

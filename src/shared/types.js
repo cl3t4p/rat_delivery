@@ -1,8 +1,8 @@
 /**
- * types.js — Shared JSDoc type definitions for all project modules.
+ * Shared JSDoc type definitions.
  */
 
-// Single Objects
+// Core objects.
 
 /** @typedef {{ x: number, y: number }} Position */
 
@@ -94,7 +94,7 @@
  * @property {string|null} from - Sender id (`beliefs.me.id`), or `null` if unknown at send time.
  * @property {string|'broadcast'} to - Recipient id, or the literal `'broadcast'` for shouts.
  * @property {MsgType} type
- * @property {number} ts - `Date.now()` — also used as the message id for request/response correlation.
+ * @property {number} ts - `Date.now()`, also used as the request/response message id.
  * @property {P} payload
  */
 

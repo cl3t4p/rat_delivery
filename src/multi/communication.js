@@ -1,18 +1,7 @@
 /**
  * communication.js
  *
- * Transport layer for the message protocol between the BDI and LLM layers.
- *
- * Wraps the Deliveroo socket primitives:
- *   - socket.emitShout(msg)        — broadcast envelope to all agents
- *   - socket.emitSay(toId, msg)    — directed envelope
- *   - socket.onMsg((id, name, msg, reply)) — single inbound stream
- *
- * The same `onMsg` stream carries both structured envelopes and the
- * plain-string LLM objectives accepted by `llmAgent.setObjective`. We
- * differentiate at parse time: envelopes match `isEnvelope(msg)`,
- * everything else is forwarded to a fallback listener so the existing
- * objective flow keeps working.
+ * Envelope transport over the Deliveroo chat socket.
  */
 
 import { beliefs } from '../bdi/beliefs.js';
@@ -21,8 +10,7 @@ import { getPeers } from './coordination/peerState.js';
 /** @typedef {import('../shared/types.js').MsgType} MsgType */
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
 
-// Defined in the BDI seam so the BDI core can reference message types without
-// importing the multi layer; re-exported here for the rest of multi/.
+// Re-exported here for the multi-agent modules.
 export { MSG_TYPE } from '../bdi/coordination.js';
 import { MSG_TYPE } from '../bdi/coordination.js';
 
@@ -42,12 +30,8 @@ const state = {
 let _lastSendErrorLog = 0;
 let _msgSeq = 0;
 
-// Initialization
-
 /**
- * Wires the communication layer to the active Deliveroo socket.
- *
- * Must be called exactly once, right after `DjsConnect()`.
+ * Wires communication to the active Deliveroo socket.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket
  * @param {{ selfIdProvider?: () => (string|null) }} [options]
@@ -77,12 +61,8 @@ export function initCommunication(socket, options = {}) {
     console.log('[comm] init ok');
 }
 
-// Send
-
 /**
- * Sends an envelope to the team via direct emitSay to each known teammate. While
- * no teammate is known, only the hello ping is shouted; anything about ourselves
- * is held back until a teammate is found.
+ * Sends an envelope to known teammates.
  *
  * @param {MsgType} type
  * @param {object} payload
@@ -123,7 +103,7 @@ export async function sendBroadcast(type, payload) {
 }
 
 /**
- * Sends a directed envelope to a single agent via `socket.emitSay`.
+ * Sends one envelope to one agent.
  *
  * @param {string} toId
  * @param {MsgType} type
@@ -147,10 +127,7 @@ export async function sendDirect(toId, type, payload) {
 }
 
 /**
- * Prepares a directed envelope synchronously and returns its ts plus a send
- * function. Use this when you need to register a response handler BEFORE the
- * message is sent — calling sendDirect and registering in its .then() creates
- * a race where a fast peer response can arrive before the handler is stored.
+ * Builds a request before sending, so the reply handler can be registered first.
  *
  * @param {string} toId
  * @param {MsgType} type
@@ -179,7 +156,7 @@ export function prepareDirect(toId, type, payload) {
 }
 
 /**
- * Sends a `response` envelope correlated to a previously received `request`.
+ * Replies to a request envelope.
  *
  * @param {Envelope} requestEnvelope - The envelope that triggered this reply.
  * @param {boolean} accepted
@@ -201,10 +178,8 @@ export async function replyTo(requestEnvelope, accepted, reason = 'ok', extraPay
     return sendBroadcast(MSG_TYPE.RESPONSE, payload);
 }
 
-// Receive
-
 /**
- * Registers a callback for envelopes of the given type.
+ * Registers a callback for one envelope type.
  *
  * @param {MsgType} type
  * @param {(envelope: Envelope, senderId: string, senderName: string, reply?: Function) => void} cb
@@ -217,8 +192,7 @@ export function onMessage(type, cb) {
 }
 
 /**
- * Registers a callback for non-envelope messages (e.g., natural-language
- * objectives received over the Deliveroo chat).
+ * Registers a callback for non-envelope chat messages.
  *
  * @param {(senderId: string, senderName: string, msg: any, reply?: Function) => void} cb
  * @returns {() => void} Unsubscribe function.
@@ -227,8 +201,6 @@ export function onFallbackMsg(cb) {
     state.fallbackListeners.add(cb);
     return () => state.fallbackListeners.delete(cb);
 }
-
-// Internals
 
 function dispatchEnvelope(envelope, senderId, senderName, reply) {
     logRecv(envelope, senderId);
@@ -264,9 +236,7 @@ function isEnvelope(msg) {
     );
 }
 
-// belief_update and intention_update fire on every sensing tick and create
-// thousands of log lines that bury the interesting events.
-// Set LOG_COMM=true in the environment to restore full verbosity for debugging.
+// Keep high-frequency sync traffic out of normal logs.
 const LOG_COMM_VERBOSE = process.env.LOG_COMM === 'true';
 const QUIET_TYPES = new Set([MSG_TYPE.BELIEF_UPDATE, MSG_TYPE.INTENTION_UPDATE]);
 

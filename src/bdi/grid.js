@@ -1,4 +1,3 @@
-// grid.js
 import { beliefs } from './beliefs.js';
 
 const BLOCKING_TYPES = new Set(['0']);
@@ -19,18 +18,11 @@ function isCellBlacklisted(key) {
 }
 
 /**
- * Checks whether a tile can be walked on.
- *
- * By default a tile occupied by a crate is not walkable, which is what A* and the
- * intention logic want. The PDDL planner, however, models crates as pushable
- * Sokoban objects and must keep their tiles in the problem; it passes
- * `awareOfCrates = false` so crate tiles stay walkable and can be emitted as
- * pushable `(occupied)` objects.
+ * True when a tile can be used for movement.
  *
  * @param {number} x
  * @param {number} y
- * @param {boolean} [awareOfCrates=true] - when false, a crate on the tile does not
- *  make it unwalkable.
+ * @param {boolean} [awareOfCrates=true] - whether crates block the tile.
  * @returns {boolean}
  */
 export function isWalkable(x, y, awareOfCrates = true) {
@@ -43,12 +35,7 @@ export function isWalkable(x, y, awareOfCrates = true) {
 }
 
 /**
- * Checks whether the destination tile is physically traversable, ignoring crates.
- *
- * A tile is traversable when it exists, is not a wall, is not blacklisted, and the
- * move does not go against a one-way arrow. Crate occupancy is intentionally NOT
- * checked here: the Sokoban-style PDDL domain models crates with its own `occupied`
- * predicate, so the static map topology (edges) must be crate-agnostic.
+ * Static traversability check, ignoring crate occupancy.
  *
  * @param {number} fromX
  * @param {number} fromY
@@ -71,7 +58,7 @@ export function canTraverse(fromX, fromY, toX, toY) {
 }
 
 /**
- * Checks whether the agent can simply step onto a tile (no crate in the way).
+ * True when the agent can step onto the tile.
  *
  * @param {number} fromX
  * @param {number} fromY
@@ -85,10 +72,7 @@ export function canEnter(fromX, fromY, toX, toY) {
 }
 
 /**
- * Checks whether the agent can push the crate that sits on (toX,toY) by stepping
- * into it. The push is valid only if there is a crate on the destination tile and
- * the tile directly beyond it (same direction) is free to receive the crate:
- * traversable and not already occupied by another crate.
+ * True when the crate on the target tile can be pushed forward.
  *
  * @param {number} fromX
  * @param {number} fromY

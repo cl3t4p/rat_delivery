@@ -1,11 +1,11 @@
-/** @typedef {import('../shared/types.js').Tile} Tile*/
+/** @typedef {import('../shared/types.js').Tile} Tile */
 
 import { aStar } from './pathfinding.js';
 
 export const USE_PDDL = process.env.USE_PDDL === 'true';
 
 /**
- * Return if a == b
+ * Same grid cell.
  * @param {Tile} a
  * @param {Tile} b
  * @returns {boolean}
@@ -15,11 +15,7 @@ export function sameTile(a, b) {
 }
 
 /**
- * Pick the candidate with the shortest distance, returning the tile and its
- * distance (in steps).
- *
- * Beware: this runs one reachPath per candidate. Pass `useManhattan` to use the
- * cheap straight-line estimate instead of A*. Agents are ignored when scoring.
+ * Best candidate by path cost, or by Manhattan distance when requested.
  *
  * @param {Position} myPos
  * @param {Position[]} multiplePos
@@ -35,7 +31,7 @@ export function findBestReachable(myPos, multiplePos, { useManhattan = USE_PDDL 
             dist = manhattanDistance(myPos, tile);
         } else {
             const result = costToReachPath(myPos, tile);
-            if (result == null) continue; // unreachable
+            if (result == null) continue;
             dist = result;
         }
 
@@ -48,7 +44,7 @@ export function findBestReachable(myPos, multiplePos, { useManhattan = USE_PDDL 
 }
 
 /**
- * Like {@link findBestReachable} but returns only the tile.
+ * Same as findBestReachable, returning only the tile.
  * @param {Position} myPos
  * @param {Position[]} multiplePos
  * @param {{useManhattan?: boolean}} [options]
@@ -59,7 +55,7 @@ export function findBestReachableTile(myPos, multiplePos, options) {
 }
 
 /**
- * Nearest tile of the list by Manhattan distance.
+ * Nearest tile by Manhattan distance.
  * @param {Position} myPos
  * @param {Position[]} multiplePos
  * @returns {Position|null}
@@ -80,12 +76,11 @@ export function manhattanDistance(a, b) {
 }
 
 /**
- * Reachability distance (in steps) used for deliberation only (not for movement).
- *
+ * Reachability distance used by deliberation.
  *
  * @param {Position} from
  * @param {Position} to
- * @returns {number | null} returns null if no path exists
+ * @returns {number | null}
  */
 export function costToReachPath(from, to) {
     if (USE_PDDL) return manhattanDistance(from, to);

@@ -1,8 +1,5 @@
 /**
- * intentionRevision.js
- *
- * Manages the lifecycle of Intentions.
- *
+ * Manages the active BDI intention.
  */
 
 import { beliefs, isWalkable } from './beliefs.js';
@@ -22,40 +19,31 @@ import { USE_PDDL } from './helper.js';
 
 import { findNearestSpawnerTile } from './components/tilesearch.js';
 
-// Improvement threshold: replace the current intention only if the new one
-// is significantly better.
+// Minimum score gain needed to replace the active intention.
 const IMPROVEMENT_THRESHOLD = 5;
 
-// Max lifetime of a 'wait' intention: after this, force a fresh deliberation
-// so the agent can never stay idle indefinitely.
+// Maximum age for a wait intention.
 const WAIT_MAX_AGE_MS = 3000;
 
-// Stuck watchdog: if the agent hasn't made progress toward its target for
-// this long, force a fresh deliberation
+// No-progress timeout for active targets.
 const STUCK_TIMEOUT_MS = 4000;
 
-// When enabled, the next intention is chosen by the standalone LLM agent
-// (see ../llm/intentionAgent.js) instead of the deterministic heuristic.
+// LLM deliberation mode.
 const USE_LLM = process.env.USE_LLM === 'true';
 
-// When enabled, the next intention is produced by the LLM policy agent
-// (see ../llm/policyAgent.js) instead of the per-tick intention agent.
+// Legacy policy-codegen mode.
 const USE_LLM_POLICY = process.env.USE_LLM_POLICY === 'true';
 
 /** @type {Intention|null} */
 let currentIntention = null;
 
-// Guards against launching overlapping LLM deliberations: the model call is
-// async and slow compared to the sensing rate, so at most one runs at a time.
+// Prevents overlapping async deliberations.
 let deliberationInFlight = false;
 
-// Monotonic token identifying the current deliberation. interruptForRevision()
-// bumps it so an in-flight (now stale) deliberation discards its result instead
-// of committing a decision taken before a new mission arrived.
+// Invalidates stale deliberation results after an interrupt.
 let _deliberationGen = 0;
 
-// Tracks the best (minimum) Manhattan distance achieved toward the current target
-// and when it last improved. Resets on goal change or arrival.
+// Tracks progress toward the current target.
 let _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
 
 export function requestRevision(force = false) {
@@ -65,16 +53,10 @@ export function requestRevision(force = false) {
 }
 
 /**
- * Preempts the current intention and re-deliberates immediately.
- *
- * Used when new information must be acted on right away — notably an incoming
- * natural-language mission/objective. A plain revise() would not preempt an
- * active intention, so the mission would only be seen once it finished; this
- * abandons it now and bumps the deliberation token so any in-flight LLM call
- * cannot commit a pre-mission decision.
+ * Preempts the current intention and starts a fresh deliberation.
  */
 export function interruptForRevision() {
-    _deliberationGen++; // invalidate any in-flight deliberation
+    _deliberationGen++;
     if (currentIntention && currentIntention.status === 'active') {
         currentIntention.status = 'failed';
         broadcastIntention(currentIntention);
@@ -84,7 +66,7 @@ export function interruptForRevision() {
 }
 
 /**
- * Produces the next intention using the configured deliberation strategy.
+ * Produces the next intention with the configured strategy.
  *
  * @returns {Promise<Intention>}
  */
@@ -99,8 +81,6 @@ async function deliberate() {
     }
     return getBestIntention();
 }
-
-// Public functions
 
 /**
  * Returns the current intention.
@@ -140,12 +120,7 @@ export function notifyIntentionDone() {
     clearPeerGoToLock();
     currentIntention = null;
 
-    // After each pickup, check if a handoff to the peer is beneficial. The
-    // handoff protocol itself lives in the multi layer (multi/coordinator.js)
-    // and reaches back into the intention lifecycle through the exported
-    // commitIntention / clearIntention / forceIntention primitives. In solo
-    // mode evaluateHandoff() returns null, so this short-circuits and we
-    // re-deliberate normally.
+    // After pickup or delivery, see whether a handoff is worth starting.
     if (beliefs.me.carrying.length >= 1) {
         const handoff = evaluateHandoff();
         if (handoff) {
@@ -157,16 +132,12 @@ export function notifyIntentionDone() {
     requestRevision(true);
 }
 
-// True when an intention is the placeholder `wait` held while a handoff request
-// is in flight (see proposeHandoff in multi/coordinator.js). Such waits are
-// protected from preemption in revise().
+// Placeholder wait used while a handoff request is in flight.
 function isHandoffRetryWait(intention) {
     return intention?.type === 'wait' && intention._handoffRetry === true;
 }
 
-// Helper used internally whenever currentIntention is replaced.
-// Broadcasts the new intention and, if it's a `go_pick_up` for a parcel
-// claimed by a peer, fires a counter-claim request fire-and-forget.
+// Commits and broadcasts a replacement intention.
 function commitNewIntention(intention) {
     currentIntention = intention;
     if (!intention) return;
@@ -200,18 +171,10 @@ function commitNewIntention(intention) {
     }
 }
 
-// Intention-control primitives exposed to the multi layer
-//
-// The handoff protocol (multi/coordinator.js) drives the intention lifecycle
-// from outside the BDI core. These small wrappers give it the exact operations
-// it needs without exposing the module-private `currentIntention` binding, and
-// keep the bdi-to-multi dependency from ever being created (multi receives them
-// via initCoordinator).
+// Intention-control hooks used by the multi-agent layer.
 
 /**
- * Commits a new intention, replacing the current one WITHOUT marking the
- * previous one failed (used by the handoff flow when the prior intention was
- * already a completed/failed/placeholder hold).
+ * Commits a new intention without failing the previous one.
  *
  * @param {Intention} intention
  */
@@ -220,9 +183,7 @@ export function commitIntention(intention) {
 }
 
 /**
- * Fails, broadcasts and clears the current intention so the next revise() can
- * produce a fresh one. Used to abandon a stale handoff-retry wait — a forced
- * revision alone cannot replace an already-active wait.
+ * Clears the active intention so the next revise() can choose a fresh one.
  */
 export function clearIntention() {
     if (!currentIntention) return;
@@ -230,8 +191,6 @@ export function clearIntention() {
     broadcastIntention(currentIntention);
     currentIntention = null;
 }
-
-// Validity check.
 
 /**
  * Checks whether the current intention is still valid.
@@ -245,19 +204,16 @@ function isIntentionStillValid(intention) {
             if (!intention.parcelId) return false;
             const parcel = beliefs.parcels.get(intention.parcelId);
             if (!parcel) {
-                // Parcel disappeared.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} disappeared`);
                 return false;
             }
             if (parcel.carriedBy && parcel.carriedBy !== beliefs.me.id) {
-                // Parcel was picked up by another agent.
                 console.log(
                     `[intentionRevision] Parcel ${intention.parcelId} taken by someone else (${parcel.carriedBy})`
                 );
                 return false;
             }
             if (parcel.reward <= 0) {
-                // Parcel reward has reached zero.
                 console.log(`[intentionRevision] Parcel ${intention.parcelId} reward depleted`);
                 return false;
             }
@@ -275,11 +231,10 @@ function isIntentionStillValid(intention) {
 
         case 'go_deliver':
         case 'drop': {
-            return beliefs.me.carrying.length > 0; // Valid only if i am carrying something
+            return beliefs.me.carrying.length > 0;
         }
 
         case 'go_to': {
-            // Still valid while the target is a known, walkable cell.
             if (!intention.targetPos) return false;
             return isWalkable(intention.targetPos.x, intention.targetPos.y);
         }
@@ -300,16 +255,13 @@ function isIntentionStillValid(intention) {
     }
 }
 
-// Main function
-
 /**
- * revise(force = false) - Main revision function.
- * Called:
- *   - On each sensing event from multiagent_a.js / multiagent_b.js
- *   - In forced mode after a failure or completion
+ * Revises the active intention after sensing, failure, or completion.
+ *
+ * @param {boolean} [force=false]
  */
 export async function revise(force = false) {
-    // Check if the current intention is still valid
+    // Drop invalid active intentions.
     if (currentIntention && currentIntention.status === 'active') {
         if (!isIntentionStillValid(currentIntention)) {
             console.log(`[intentionRevision] No longer valid: ${currentIntention.type}`);
@@ -319,28 +271,24 @@ export async function revise(force = false) {
         }
     }
 
-    // If there is no active intention, create a new one
+    // Create a new intention while idle.
     if (
         !currentIntention ||
         currentIntention.status === 'failed' ||
         currentIntention.status === 'done'
     ) {
-        // A deliberation may already be running (LLM calls are async). Don't
-        // stack a second one; the in-flight one will commit its result.
+        // Do not stack async deliberations.
         if (deliberationInFlight) return;
         deliberationInFlight = true;
         const gen = ++_deliberationGen;
         let rerun = false;
         try {
             const next = await deliberate();
-            // A newer interrupt (e.g. an incoming mission) happened while the
-            // model was thinking: discard this stale result and re-deliberate so
-            // the new context is taken into account.
+            // A newer interrupt made this result stale.
             if (gen !== _deliberationGen) {
                 rerun = true;
             } else if (
-                // While we were waiting, an intention may have been committed or
-                // the situation may have changed; only commit if still idle.
+                // Only commit if the agent is still idle.
                 !currentIntention ||
                 currentIntention.status === 'failed' ||
                 currentIntention.status === 'done'
@@ -353,16 +301,14 @@ export async function revise(force = false) {
         } finally {
             deliberationInFlight = false;
         }
-        // Re-run outside the in-flight guard so the fresh deliberation can start.
+        // Re-run outside the in-flight guard.
         if (rerun) requestRevision(true);
         return;
     }
 
-    // If there is already an active intention, compare it with the best option.
+    // Compare an active intention against the best current option.
     if (!force && currentIntention.status === 'active') {
-        // LLM mode: the model is the sole decision-maker, so we never fall back to
-        // the heuristic getBestIntention as a comparator. A 'wait' never completes
-        // on its own,
+        // LLM mode: the model owns replacement decisions.
         if (USE_LLM) {
             if (currentIntention.type !== 'wait') return;
             if (deliberationInFlight) return;
@@ -381,7 +327,7 @@ export async function revise(force = false) {
             return;
         }
 
-        // Heuristic mode: cheap synchronous comparison on every sensing tick.
+        // Heuristic mode: cheap comparison on every sensing tick.
         let candidate = getBestIntention();
         if (
             currentIntention.type === 'go_to' &&
@@ -399,11 +345,10 @@ export async function revise(force = false) {
         }
         if (!candidate) return;
 
-        // 'wait' is a last-resort intention with no progress to protect:
-        // replace it with any non-wait candidate, bypassing the threshold.
+        // Wait has no progress to protect.
         const escapeWait = currentIntention.type === 'wait' && candidate.type !== 'wait';
 
-        // Safety net: a wait older than WAIT_MAX_AGE_MS forces a fresh deliberation.
+        // Safety net for stale waits.
         const waitExpired =
             currentIntention.type === 'wait' &&
             Date.now() - currentIntention.createdAt > WAIT_MAX_AGE_MS;
@@ -415,29 +360,21 @@ export async function revise(force = false) {
             candidate.score > 0 &&
             !isPeerGoToLocked();
 
-        // Don't let a zero-score explore/roam interrupt an active pickup, even if
-        // the pickup has a negative score. Explore targets are often the spawner the
-        // agent just stepped off, so replacing causes an infinite oscillation loop:
-        // go_pick_up, then explore (completes instantly), then go_pick_up, and so on...
+        // Avoid oscillating between pickup and zero-score roaming.
         const exploringBeatsPickup =
             currentIntention.type === 'go_pick_up' &&
             (candidate.type === 'explore' || (candidate.type === 'go_to' && !candidate.parcelId)) &&
             candidate.score <= 0;
 
-        // Handoff intentions represent a bilateral commitment: A has already
-        // accepted and may have dropped parcels at the meetTile. Never preempt
-        // them with an opportunistic pickup — let the handoff complete first.
+        // Handoffs are bilateral commitments; let them complete.
         const handoffProtected =
             currentIntention.type === 'go_handoff' ||
             currentIntention.type === 'go_handoff_receive' ||
             isHandoffRetryWait(currentIntention);
 
-        // A peer-commanded go_to must run to completion regardless of score:
-        // any replacement would abort the mission B explicitly assigned to A.
+        // Peer-commanded movement should not be score-preempted.
         const peerGoToProtected =
-            currentIntention.type === 'go_to' &&
-            !currentIntention.parcelId &&
-            isPeerGoToLocked();
+            currentIntention.type === 'go_to' && !currentIntention.parcelId && isPeerGoToLocked();
 
         const improvement = candidate.score - currentIntention.score;
         if (
@@ -465,18 +402,15 @@ export async function revise(force = false) {
 }
 
 /**
- * Detects when the agent has not moved toward its current target for
- * STUCK_TIMEOUT_MS and forces a fresh re-deliberation.
- * Escapes tight executor failure loops (no-path / move-blocked cycling)
- * that keep re-picking the same unreachable tile.
+ * Forces re-deliberation when the agent stops progressing toward its target.
  */
 function checkStuck() {
-    if (USE_PDDL) return; // PDDL plans take legitimate detours; watchdog disabled (see USE_PDDL).
+    if (USE_PDDL) return;
     if (!currentIntention) {
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
     }
-    // Mid-cycle (failed/done awaiting revise): preserve watchdog state so stale-time accumulates.
+    // Preserve watchdog state between failure and the next revision.
     if (currentIntention.status !== 'active') return;
     if (currentIntention.type === 'wait') return;
     if (!currentIntention.targetPos) return;
@@ -486,7 +420,7 @@ function checkStuck() {
     const tx = currentIntention.targetPos.x;
     const ty = currentIntention.targetPos.y;
 
-    // Already at target — executor will finalise; not stuck.
+    // Executor will finalize once already at target.
     if (x === tx && y === ty) {
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
@@ -523,7 +457,6 @@ function checkStuck() {
     }
 }
 
-// Called by multiagent_a.js and multiagent_b.js on each sensing event
 export function onSensingRevise() {
     checkStuck();
     requestRevision(false);

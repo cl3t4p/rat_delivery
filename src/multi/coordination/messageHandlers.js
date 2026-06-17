@@ -6,12 +6,10 @@ import { touchPeer, isSelfMessage, state } from './peerState.js';
 import { runHeuristicZoneAssignment, getNearestReachableZoneTarget } from './zoneAssignment.js';
 import { handleHandoffRequest, DIR_DELTA_COORD } from './handoff.js';
 
-// Flag set when Agent B commands this agent to pause via PEER_COMMAND
+// Set when Agent B pauses this agent.
 let _pausedByPeer = false;
 
-// Safety timeout: if B doesn't send any follow-up command within this window
-// after pausing, A auto-resumes. Guards against B crashing, timing out, or
-// losing track of the peer before it can send the resume.
+// Auto-resume if the peer never sends a follow-up command.
 const PEER_PAUSE_SAFETY_MS = 60000;
 let _pauseSafetyTimer = null;
 
@@ -34,26 +32,23 @@ function _armPauseSafety() {
     }, PEER_PAUSE_SAFETY_MS);
 }
 
-/** Returns true while Agent B has commanded this agent to pause. */
+/** True while Agent B has paused this agent. */
 export function isPausedByPeer() {
     return _pausedByPeer;
 }
 
-// Flag set while a peer-commanded go_to is in progress; blocks deliberation
-// from replacing the forced intention with a pickup until the move is done.
+// Protects a peer-commanded go_to from normal deliberation replacement.
 let _peerGoToLocked = false;
 
-// When true, clearPeerGoToLock() will re-pause the agent after the commanded
-// go_to completes. Used by the "red light / green light" game so Agent A stays
-// on the odd row instead of resuming BDI play after arriving.
+// Used by stop/go missions to freeze after the commanded move.
 let _pauseAfterGoTo = false;
 
-/** Returns true while a peer-commanded go_to has not yet completed. */
+/** True while a peer-commanded go_to has not completed. */
 export function isPeerGoToLocked() {
     return _peerGoToLocked;
 }
 
-/** Clears the peer go_to lock; called by intentionRevision on completion or stuck. */
+/** Clears the peer go_to lock. */
 export function clearPeerGoToLock() {
     _peerGoToLocked = false;
     if (_pauseAfterGoTo) {
@@ -64,7 +59,7 @@ export function clearPeerGoToLock() {
     }
 }
 
-// Perpendicular directions to use when yielding right-of-way in a corridor
+// Perpendicular right-of-way moves in corridors.
 const PERP_DIRS = {
     left: ['up', 'down'],
     right: ['up', 'down'],
@@ -72,12 +67,12 @@ const PERP_DIRS = {
     down: ['left', 'right'],
 };
 
-// How many consecutive same-direction backoffs before forcing a navigation escape
+// Same-direction backoffs before forcing an escape.
 const PUSH_CHAIN_THRESHOLD = 2;
-// Time window in which consecutive backoffs count as a push chain
+// Time window for a push chain.
 const PUSH_CHAIN_WINDOW_MS = 2500;
 
-// Pending yield direction consumed by the executor at the top of each tick
+// Yield direction consumed by the executor.
 let _pendingYield = null;
 
 let _pushChainDir = null;
@@ -91,7 +86,6 @@ let _forceIntention = () => {};
 /** @type {(force?: boolean) => void} */
 let _requestRevision = () => {};
 
-// Must be called once before using this module; also registers all message handlers
 export function initMessageHandlers({ getCurrentIntention, forceIntention, requestRevision }) {
     _getCurrentIntention = getCurrentIntention;
     _forceIntention = forceIntention;
@@ -111,8 +105,7 @@ export function initMessageHandlers({ getCurrentIntention, forceIntention, reque
 }
 
 /**
- * Returns and clears the pending yield direction, if any.
- * Called by the executor at the top of each loop tick
+ * Returns and clears the pending yield direction.
  */
 export function consumeYieldRequest() {
     const dir = _pendingYield;
@@ -120,13 +113,12 @@ export function consumeYieldRequest() {
     return dir;
 }
 
-// Clears _pendingYield; used by resetCoordinatorForTests in coordinator.js
+// Used by resetCoordinatorForTests.
 export function clearPendingYield() {
     _pendingYield = null;
 }
 
-// Updates peer position, carrying count, and score from a belief_update message.
-// Triggers a heuristic zone split the first time the peer's position becomes known
+// Updates peer state from a belief_update message.
 function handleBeliefUpdate(envelope, senderId, senderName) {
     const wasPositionUnknown = (state.peers.get(senderId)?.x ?? null) === null;
     const peer = touchPeer(senderId, senderName);
@@ -144,7 +136,7 @@ function handleBeliefUpdate(envelope, senderId, senderName) {
     }
 }
 
-// Updates the peer's known intention and maintains the reservation table
+// Updates the peer intention and reservation table.
 function handleIntentionUpdate(envelope, senderId, senderName) {
     const peer = touchPeer(senderId, senderName);
     if (!peer) return;
@@ -177,7 +169,7 @@ function handleIntentionUpdate(envelope, senderId, senderName) {
     }
 }
 
-// Handles a take_parcel request from a peer; replies with accept/refuse
+// Handles a peer request to take over a parcel.
 function handleRequest(envelope, senderId, senderName) {
     if (!touchPeer(senderId, senderName)) return;
     const { action, parcelId } = envelope.payload ?? {};
@@ -195,7 +187,7 @@ function handleRequest(envelope, senderId, senderName) {
     replyTo(envelope, false, 'unknown');
 }
 
-// Resolves a pending outbound request when the peer replies
+// Resolves an outbound request.
 function handleResponse(envelope, senderId) {
     const { requestId, accepted, reason, ...extraPayload } = envelope.payload ?? {};
     const pending = state.pendingRequests.get(requestId);
@@ -211,8 +203,7 @@ function handleResponse(envelope, senderId) {
     }
 }
 
-// Handles notification that the peer has claimed a parcel we may have been targeting.
-// Suppresses our local pickup intention and triggers revision if needed
+// Drops a local pickup if the peer already claimed it.
 function handleParcelClaimed(envelope, senderId, senderName) {
     if (!touchPeer(senderId, senderName)) return;
     const parcelId = envelope.payload?.parcelId;
@@ -231,7 +222,7 @@ function handleParcelClaimed(envelope, senderId, senderName) {
     }
 }
 
-// Handles a pause/resume/task command from Agent B (level-3 peer control)
+// Handles peer control commands from Agent B.
 function handlePeerCommand(envelope, senderId) {
     const { action, x, y } = envelope.payload ?? {};
     if (action === 'pause') {
@@ -240,7 +231,7 @@ function handlePeerCommand(envelope, senderId) {
         console.log(`[coord] Paused by peer command from ${senderId}`);
     } else if (action === 'resume') {
         _pausedByPeer = false;
-        _pauseAfterGoTo = false; // cancel any pending re-pause so completing an in-flight go_to doesn't re-freeze the agent
+        _pauseAfterGoTo = false;
         _clearPauseSafety();
         console.log(`[coord] Resumed by peer command from ${senderId}`);
     } else if (action === 'handoff_bonus_active') {

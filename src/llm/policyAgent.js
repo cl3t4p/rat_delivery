@@ -39,7 +39,7 @@ You write the decision logic for a Deliveroo.js BDI agent.
 
 Produce the BODY of a JavaScript function with this exact signature:
 
-    function chooseIntention(state, actions) { /* your code — body only */ }
+    function chooseIntention(state, actions) { /* your code - body only */ }
 
 You MUST end every path by \`return\`ing exactly one intention, obtained by
 calling one of the builders in \`actions\`. Never build intentions yourself.
@@ -161,8 +161,7 @@ function extractBody(raw) {
 }
 
 /**
- * Code generation is disabled. This function exists only to keep old imports
- * from failing loudly with a clear reason.
+ * Disabled compatibility hook.
  *
  * @param {Position} me
  * @returns {Promise<void>}

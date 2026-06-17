@@ -1,8 +1,7 @@
 /**
  * deliberation.js
  *
- * The agent's decision-making layer: given the Belief Store, chooses what to do.
- *
+ * Chooses the next BDI intention from the current beliefs.
  */
 
 import { beliefs, isWalkable } from './beliefs.js';
@@ -38,15 +37,12 @@ import {
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
 /** @typedef {import('../shared/types.js').IntentionType} IntentionType */
-/** @typedef {import('../shard/types.js').ZoneName} ZoneName*/
+/** @typedef {import('../shard/types.js').ZoneName} ZoneName */
 
-// When parcels spawn at least this rarely, camping one spawner is wasteful, so
-// we roam between spawn points instead. Compared against the already-parsed
+// Slow spawns make fixed camping less useful.
 const SLOW_SPAWN_THRESHOLD_MS = Number(process.env.SLOW_SPAWN_MS) || 5000;
 
-// In sparse-spawner maps, stay committed to a patrol target long enough to
-// actually observe it before rotating. This prevents oscillation between nearby
-// spawners caused by re-scoring the nearest target on every sensing tick.
+// Small dwell time to avoid bouncing between sparse spawners.
 const SPAWNER_DWELL_MS = Number(process.env.SPAWNER_DWELL_MS) || 300;
 
 const DETOUR_NEAR_EXTRA_STEPS = 3;
@@ -60,12 +56,9 @@ const LOCAL_PICKUP_MAX_DISTANCE = Number(process.env.LOCAL_PICKUP_MAX_DISTANCE ?
 const LOCAL_PICKUP_MIN_REWARD = Number(process.env.LOCAL_PICKUP_MIN_REWARD ?? 15);
 const LOCAL_PICKUP_MIN_SCORE = Number(process.env.LOCAL_PICKUP_MIN_SCORE ?? -25);
 
-// Cache for detour evaluations: invalidated whenever the agent moves to a new tile.
 let _detourCachePos = { x: null, y: null };
 /**
- * Memoized detour evaluations, keyed by parcel id. A null value means the detour
- * was found impossible (some leg unreachable); the whole map is cleared whenever
- * the agent moves to a new tile.
+ * Cached detour scores for the current tile.
  *
  * @type {Map<string, {extraSteps: number, effectiveGain: number, accepted: boolean} | null>}
  */
@@ -73,7 +66,7 @@ const _detourCache = new Map();
 
 let _lastDelibLog = null;
 /**
- * Print only if the key is changed
+ * Logs only when the key changes.
  * @param {*} key
  * @param {*} msg to print
  */
@@ -88,10 +81,7 @@ function printLog(key, msg) {
 let _roamTarget = null;
 let _roamTargetZone = null;
 let _roamArrivalTs = 0;
-// Position in the (deterministically sorted) spawner cycle of the current patrol
-// target. Persists across ticks so the rotation resumes where it left off after
-// an interruption (e.g. a pickup) instead of restarting at the nearest spawner,
-// which would let the agent double back and never cover the whole loop.
+// Patrol index survives temporary interruptions.
 let _roamIndex = null;
 
 export function resetRoamTarget() {
@@ -102,8 +92,7 @@ export function resetRoamTarget() {
 }
 
 /**
- * Finds a reachable walkable tile at (or nearest to) the map's half point — the
- * parking spot for an agent whose assigned half has no spawner.
+ * Finds a reachable parking tile near the map half point.
  *
  * @param {Position} me
  * @returns {Position|null}
@@ -114,8 +103,7 @@ function halfPointTarget(me) {
         return half;
     }
 
-    // Half point is a wall or unreachable: snap to the nearest reachable walkable
-    // tile, scanning closest-first and capping the path checks.
+    // Snap to the nearest reachable walkable tile.
     const candidates = [];
     for (const key of beliefs.grid.keys()) {
         const [x, y] = key.split(',').map(Number);
@@ -158,17 +146,11 @@ export function createIntention(type, parcelId, targetPos, score = 0) {
 }
 
 /**
- * Computes and returns the best possible Intention based on the current beliefs.
- *
- * Priority:
- *   1. If carrying parcels, deliver them.
- *   2. If free parcels are available, pick up the best one.
- *   3. Otherwise, explore.
+ * Computes the next intention.
  *
  * @returns {Intention}
  */
 export function getBestIntention() {
-    // Current position
     if (beliefs.me.x === null || beliefs.me.y === null) {
         console.log('[deliberation] Position unknown, waiting...');
         return createIntention('wait', null, null, 0);
@@ -176,19 +158,15 @@ export function getBestIntention() {
 
     const me = { x: beliefs.me.x, y: beliefs.me.y };
 
-    // ----------------------------------------------------------------
-    // Case 1: carrying parcels, so consider delivery.
-    // ----------------------------------------------------------------
+    // Carrying: deliver, unless a worthwhile pickup detour exists.
     if (beliefs.me.carrying.length > 0) {
-        // Check that carried parcels still exist in the beliefs.
         const realCarrying = beliefs.me.carrying.filter((id) => beliefs.parcels.has(id));
         if (realCarrying.length === 0) {
             beliefs.me.carrying = []; // Cleanup: sensing has not updated this state yet.
         } else {
-            // Maximum number of parcels the agent can carry.
             const capacity = beliefs.config?.MAX_PARCELS ?? 1;
 
-            // Stack rules: hold back for the best target size while more parcels are reachable.
+            // Stack rules can delay delivery until the best count is reached.
             let _stackTarget = null;
             if (llmMemory.stackRules.size > 0) {
                 _stackTarget = getBestStackTarget(capacity);
@@ -199,7 +177,7 @@ export function getBestIntention() {
                 }
             }
 
-            // If at full capacity, deliver immediately.
+            // Full capacity means no more detours.
             if (beliefs.me.carrying.length >= capacity) {
                 const target = findBestDeliveryTile(me);
                 if (target) {
@@ -214,19 +192,17 @@ export function getBestIntention() {
                 }
             }
 
-            // If not at full capacity, check whether a detour to pick up an extra parcel is worth more than delivering immediately.
             const target = findBestDeliveryTile(me);
 
             if (target) {
-                // Skip the detour if we've already reached the stack-rule target: picking up
-                // more would break the "exactly N" constraint and forfeit the bonus multiplier.
+                // Exact stack targets should not be exceeded.
                 const _atStackTarget =
                     _stackTarget !== null && beliefs.me.carrying.length >= _stackTarget;
                 const pickUp = _atStackTarget ? null : findBestPickUp(me, { log: false });
                 if (pickUp) {
                     const parcel = beliefs.parcels.get(pickUp.parcelId);
                     if (parcel) {
-                        //Other agent on the delivery tile
+                        // Do not path to an occupied pickup tile.
                         if (isTileOccupiedByOtherAgent({ x: parcel.x, y: parcel.y })) {
                             printLog(
                                 `detour_occupied:${pickUp.parcelId}`,
@@ -286,20 +262,11 @@ export function getBestIntention() {
             }
         }
 
-        // Carrying but no delivery tile is reachable — wait rather than falling
-        // through to findBestPickUp, which would try to grab more parcels while
-        // holding items we cannot drop.
+        // Do not pick up more if carried parcels cannot be delivered.
         return createIntention('wait', null, null, 0);
     }
 
-    // ----------------------------------------------------------------
-    // Case 2: free parcels are available, so pick one up.
-    // ----------------------------------------------------------------
-
-    // A free parcel on the tile we're standing on is free to grab — take it
-    // immediately instead of letting the delivery-value gate make us hesitate
-    // (which matters with relay, where we only carry it partway, and would
-    // otherwise leave us waiting on the spawner on top of the parcel).
+    // Same-tile pickup is always worth checking before scoring.
     const mx = Math.round(me.x);
     const my = Math.round(me.y);
     const _sameTilePickCap = llmMemory.maxPickupReward;
@@ -326,8 +293,7 @@ export function getBestIntention() {
 
     let pickUp = findBestPickUp(me);
     if (!pickUp && _zoneConstraint) {
-        // Zone is empty — fall back to unclaimed parcels outside the zone rather
-        // than waiting indefinitely at a spawner
+        // Empty zone: leave it rather than waiting forever.
         pickUp = findBestPickUp(me, { allowOutOfZone: true });
         if (pickUp) {
             printLog(
@@ -338,17 +304,14 @@ export function getBestIntention() {
     }
     if (pickUp) return pickUp;
 
-    // ----------------------------------------------------------------
-    // Case 3: nothing else to do, so head for the spawners.
-    // ----------------------------------------------------------------
+    // No parcel target: explore or patrol spawners.
 
     _lastDelibLog = null; // reset dedup when entering exploration path
     const genMs = beliefs.config?.PARCEL_GENERATION_INTERVAL ?? null;
     const spawnsAreRare = genMs !== null && genMs >= SLOW_SPAWN_THRESHOLD_MS;
     const allSpawners = findSpawnerTiles();
 
-    // Respect zone constraint: use only in-zone spawners. If the assigned zone
-    // has no spawner, stay near the delivery area as a relay receiver
+    // Zone constraints apply to spawners too.
 
     const preferredSpawners = _zoneConstraint
         ? allSpawners.filter((s) => _isInZone(s))
@@ -356,9 +319,7 @@ export function getBestIntention() {
 
     if (_zoneConstraint && preferredSpawners.length === 0) {
         resetRoamTarget();
-        // This half has no spawner to patrol: park at the map's half point and
-        // wait there, positioned to receive handoffs from the peer working the
-        // other half.
+        // No spawner in this half: wait near the relay point.
         const parkSpot = halfPointTarget(me);
         if (parkSpot && !sameTile(me, parkSpot)) {
             printLog(
@@ -377,19 +338,15 @@ export function getBestIntention() {
 
     const spawners = preferredSpawners;
 
-    // With several spawners that fire rarely or are spread far apart, camping a
-    // single one wastes time: patrol between them in a round-robin instead.
+    // Sparse spawners are patrolled in a stable order.
     if (spawners.length > 1 && (spawnsAreRare || spawnersAreSparse(spawners))) {
-        // Sort into a stable order so the rotation visits spawners deterministically.
         spawners.sort((a, b) => a.x - b.x || a.y - b.y);
 
-        // Index of the spawner we're currently standing on, or -1 if none.
         const mx = Math.round(me.x);
         const my = Math.round(me.y);
         const onIdx = spawners.findIndex((s) => s.x === mx && s.y === my);
 
-        // Drop a stale roam target: it belonged to a different zone, or it is no
-        // longer one of the spawners we're patrolling.
+        // Drop stale patrol targets.
         if (_roamTarget && _roamTargetZone !== _zoneConstraint) {
             resetRoamTarget();
         }
@@ -398,9 +355,7 @@ export function getBestIntention() {
             resetRoamTarget();
         }
 
-        // Already committed to a roam target we haven't reached yet: keep heading
-        // there rather than re-choosing every tick (prevents oscillation). Only
-        // bail if it has become unreachable.
+        // Keep heading to a valid patrol target.
         if (_roamTarget && onIdx === -1 && !sameTile(me, _roamTarget)) {
             const result = costToReachPath(me, _roamTarget);
             if (result != null) {
@@ -416,9 +371,8 @@ export function getBestIntention() {
             resetRoamTarget();
         }
 
-        // Standing on a spawner.
         if (onIdx !== -1) {
-            // Grab a nearby parcel if one is visible and reachable before moving on.
+            // Do not walk away from an easy parcel.
             const opportunisticPickUp = findBestLocalPickUp(me);
             if (opportunisticPickUp) {
                 console.log(
@@ -428,8 +382,7 @@ export function getBestIntention() {
                 return opportunisticPickUp;
             }
 
-            // Dwell only while we're sitting on our actual patrol target, so we
-            // observe it for SPAWNER_DWELL_MS before rotating on.
+            // Dwell only on the committed patrol target.
             if (sameTile(me, _roamTarget)) {
                 const now = Date.now();
                 if (!_roamArrivalTs) _roamArrivalTs = now;
@@ -440,7 +393,7 @@ export function getBestIntention() {
             }
         }
 
-        // Pick the next spawner to head for, advancing the rotation pointer.
+        // Advance the patrol pointer.
         if (onIdx !== -1) {
             _roamIndex = nextReachableSpawnerIndex(me, spawners, onIdx + 1);
         } else if (_roamIndex !== null) {
@@ -452,15 +405,14 @@ export function getBestIntention() {
 
         const target = _roamIndex === -1 ? null : spawners[_roamIndex];
 
-        // Nothing reachable to patrol: wait until something becomes reachable.
+        // Nothing reachable to patrol.
         if (!target) {
             resetRoamTarget();
             console.log('[deliberation] No reachable in-zone spawner, waiting');
             return createIntention('wait', null, null, 0);
         }
 
-        // Commit to the chosen spawner; _roamArrivalTs resets so the dwell timer
-        // starts fresh once we arrive.
+        // Dwell starts once this target is reached.
         _roamTarget = target;
         _roamTargetZone = _zoneConstraint;
         _roamArrivalTs = 0;
@@ -474,8 +426,7 @@ export function getBestIntention() {
         return createIntention('go_to', null, target, 0);
     }
 
-    // Frequent spawns (or a single spawner): camp the nearest in-zone one,
-    // without falling back to another zone.
+    // Frequent spawns: camp the nearest in-zone spawner.
     const spawner = findBestReachableSpawnerTile(me, spawners);
     if (spawner) {
         if (manhattanDistance(me, spawner) < 1) {
@@ -507,9 +458,7 @@ function pickupValueByPath(parcel, stepsToParcel, stepsToDelivery) {
 }
 
 /**
- * Index of the first reachable spawner scanning cyclically forward from `start`.
- * Skips unreachable spawners; returns -1 if none are reachable. Used to advance
- * the patrol rotation while still covering every spawner in order.
+ * Next reachable spawner in the patrol cycle.
  *
  * @param {Position} from
  * @param {Position[]} spawners - Deterministically sorted spawner list.
@@ -526,11 +475,7 @@ function nextReachableSpawnerIndex(from, spawners, start) {
 }
 
 /**
- * Decides whether grabbing an extra parcel on the way to a delivery tile is
- * worthwhile, comparing the direct delivery against the detour route
- * (me to parcel to delivery).
- *
- * Result is cached per parcel
+ * Scores a pickup detour before delivery.
  *
  * @param {Position} myPos - Current position.
  * @param {{id: string, x: number, y: number}} parcel - Candidate parcel to grab on the way.
@@ -544,47 +489,40 @@ function evaluateDetour(myPos, parcel, directDelivery, parcelDelivery, gain) {
     const rx = Math.round(myPos.x);
     const ry = Math.round(myPos.y);
 
-    // Clear the cache whenever the agent steps to a new tile: every cached
-    // result was computed from the old position and is now stale.
+    // Cached paths are tied to the current tile.
     if (_detourCachePos.x !== rx || _detourCachePos.y !== ry) {
         _detourCache.clear();
         _detourCachePos = { x: rx, y: ry };
     }
 
-    // Same tile, same parcel: reuse the stored result (incl. cached null) and
-    // skip the three A* calls below.
+    // Cache null too: unreachable detours are expensive to rediscover.
     if (_detourCache.has(parcel.id)) {
         return _detourCache.get(parcel.id);
     }
 
-    // Step counts for the two competing routes:
-    //   direct           = me to delivery (no detour)
-    //   toParcel         = me to parcel
-    //   parcelToDelivery = parcel to delivery
+    // Compare direct delivery against me -> parcel -> delivery.
     const direct = costToReachPath(myPos, directDelivery);
     const toParcel = costToReachPath(myPos, { x: parcel.x, y: parcel.y });
     const parcelToDelivery = costToReachPath({ x: parcel.x, y: parcel.y }, parcelDelivery);
 
-    // If any leg is unreachable the detour is impossible; cache the null so we
-    // don't retry the pathfinding while standing on this tile.
+    // Any unreachable leg makes the detour impossible.
     if (direct == null || toParcel == null || parcelToDelivery == null) {
         _detourCache.set(parcel.id, null);
         return null;
     }
 
-    // Extra distance the detour costs over delivering directly, and the reward
-    // gain net of that cost.
+    // Reward gain after paying the extra distance.
     const directSteps = direct;
     const detourSteps = toParcel + parcelToDelivery;
     const extraSteps = detourSteps - directSteps;
     const effectiveGain = gain - extraSteps;
 
-    // Accept a near detour as long as it nets any positive gain; accept a longer
+    // Longer detours need a stronger gain.
     const accepted =
         (extraSteps <= DETOUR_NEAR_EXTRA_STEPS && effectiveGain > 0) ||
         (extraSteps <= DETOUR_MAX_EXTRA_STEPS && effectiveGain >= DETOUR_HIGH_EFFECTIVE_GAIN);
 
-    // Log only on first evaluation at this tile (cache miss)
+    // Log only on cache misses.
     if (!accepted && extraSteps <= DETOUR_MAX_EXTRA_STEPS + 4) {
         console.log(
             `[deliberation] Detour rejected parcel=${parcel.id} ` +

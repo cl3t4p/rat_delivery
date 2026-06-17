@@ -1,17 +1,7 @@
 /**
  * pddlPlanner.js
  *
- * Builds a PDDL problem from the current beliefs and calls the external planner.
- * Used by the executor to compute a sequence of moves toward an intention target.
- *
- * Structure:
- *   domainFile       - Static PDDL domain loaded from domain.pddl.
- *   planWithPDDL    - Public API used to generate a movement plan.
- *   buildProblem     - Converts beliefs and intention into a problem.pddl string.
- *   goalForIntention - Builds the PDDL goal for pickup, delivery, or exploration.
- *   blockedTiles     - Collects dynamic obstacles such as crates and active opponents.
- *   parsePlan        - Converts PDDL actions into executor directions.
- *   withTimeout      - Prevents the online solver from blocking forever.
+ * PDDL planner wrapper for movement intentions.
  */
 
 import { onlineSolver } from '@unitn-asa/pddl-client';
@@ -23,37 +13,25 @@ import { dirname, join } from 'path';
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Direction} Direction */
 
-// Read domain.pddl
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const domainFile = readFileSync(join(__dirname, 'domain.pddl'), 'utf8');
 
-// Timeout for local solver
 const PDDL_TIMEOUT_MS = 5000;
-
-//Public API
 
 /**
  * Plans a sequence of moves with PDDL to reach the intention target.
  *
- * Planning is done in two phases so the agent never disturbs a crate when it does
- * not have to:
- *   1. Treat crates as immovable walls and look for a clear path to the target.
- *      A regular move and a push cost the same to the planner, so without this
- *      phase it would gladly shove a crate even when an open route exists (and
- *      typically push it past the checkpoint).
- *   2. Only if no clear path exists, re-plan with the Sokoban push actions enabled
- *      so a genuinely blocking crate can be cleared.
+ * First tries a no-push route, then enables crate pushing only if needed.
  *
  * @param {Intention} intention
  * @returns {Promise<Direction[]>} Array of moves, or an empty array if planning fails.
  */
 export async function planWithPDDL(intention) {
-    // Phase 1: clear path, crates treated as walls and the spawner fallback disabled
-    // so an unreachable target makes this phase fail instead of wandering off.
+    // No fallback here: a bad target should fail before crate pushing is tried.
     const clear = await solveProblem(intention, { pushCrates: false, allowFallback: false });
     if (clear !== null) return clear;
 
-    // Phase 2: allow pushing to clear a crate that actually blocks the only route.
+    // Only push when walking around the crate is impossible.
     console.log('[pddl] no clear path, retrying with crate pushing enabled');
     const pushed = await solveProblem(intention, { pushCrates: true, allowFallback: true });
     return pushed ?? [];
@@ -95,8 +73,6 @@ async function solveProblem(intention, options) {
     }
 }
 
-// Problem construction.
-
 /**
  * Builds the problem.pddl string.
  * Returns null if there is not enough information in the beliefs to plan,
@@ -120,11 +96,7 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
     const mx = Math.round(me.x);
     const my = Math.round(me.y);
 
-    // Build the set of walkable tiles, excluding walls and active opponents.
-    // When pushCrates is true a crate is a movable obstacle handled by the Sokoban
-    // `occupied` predicate, so its tile stays in the set; when false it is treated
-    // as a wall and excluded so the agent can only route around it. Always include
-    // the tile currently occupied by me, even if it is not marked as walkable.
+    // Crates stay in the tile set only when the PDDL domain is allowed to push them.
     const blocked = blockedTiles();
     const crateKeys = new Set(beliefs.crates.keys());
     const tiles = new Set();
@@ -134,16 +106,11 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         if (blocked.has(key)) continue;
         if (!pushCrates && crateKeys.has(key)) continue; // crate treated as a wall
         const [x, y] = key.split(',').map(Number);
-        // Crate-unaware: crate tiles must stay in the problem so that, when pushing
-        // is enabled, they can be emitted as pushable objects below. Whether crates
-        // act as walls is decided by the `pushCrates` check above, not here.
         if (!isWalkable(x, y, false)) continue;
         tiles.add(key);
     }
 
-    // Sensed crates that sit on a tile included in the problem. Each becomes a movable
-    // object the planner can push. Keyed by tile so the name is stable across calls.
-    // Only emitted when pushing is enabled; otherwise crate tiles are absent entirely.
+    // Pushable crate objects.
     const crates = [];
     if (pushCrates) {
         for (const key of beliefs.crates.keys()) {
@@ -153,14 +120,11 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         }
     }
 
-    // Define the PDDL objects: agent, tiles, parcels, and crates.
-    // The target parcel for go_pick_up is added by goalForIntention only if it is still valid.
     const tileNames = [...tiles].map((k) => `t_${k.replace(',', '_')}`);
     const crateNames = crates.map((c) => c.name);
     const parcelNames = [];
     for (const id of me.carrying) parcelNames.push(`p_${id}`);
 
-    // Init facts
     const init = [];
     init.push(`(agent ${agentName})`);
     init.push(`(me ${agentName})`);
@@ -172,12 +136,11 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         init.push(`(tile ${tName})`);
         const tile = beliefs.grid.get(key);
         if (tile?.delivery) init.push(`(delivery ${tName})`);
-        // Crates may only rest on crate-slot tiles: type 5 (sliding) or 5! (spawner).
+        // Crates may only stop on crate-slot tiles.
         if (tile?.type === '5' || tile?.type === '5!') init.push(`(crate-slot ${tName})`);
     }
 
-    // Add adjacency facts only when the destination is in tiles and is traversable.
-    // This also enforces one-way arrow constraints.
+    // Movement facts already include one-way tile constraints.
     for (const key of tiles) {
         const [x, y] = key.split(',').map(Number);
         const from = `t_${x}_${y}`;
@@ -188,8 +151,7 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         addEdge(init, from, x, y, x, y - 1, 'down', tiles);
     }
 
-    // Add crate facts: each sensed crate is an object on its tile, and its tile is
-    // marked occupied so the agent must push it instead of walking through it.
+    // Occupied crate tiles must be pushed through, not walked through.
     for (const c of crates) {
         const tName = `t_${c.x}_${c.y}`;
         init.push(`(crate ${c.name})`);
@@ -197,15 +159,12 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         init.push(`(occupied ${tName})`);
     }
 
-    // Add parcel facts for carried parcels and, when picking up, the target parcel.
     for (const id of me.carrying) {
         init.push(`(parcel p_${id})`);
         init.push(`(carrying ${agentName} p_${id})`);
     }
 
-    // Build the goal from the requested intention.
-    // If the target is not valid or reachable, fall back to the nearest spawner tile
-    // so the agent does not remain stuck waiting for a parcel.
+    // Invalid pickup targets fall back to exploration unless the caller disabled it.
     let goal = goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames);
     if (!goal) {
         if (!allowFallback) return null;
@@ -227,13 +186,7 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
 }
 
 /**
- * Builds the PDDL goal for the given intention.
- *
- * Returns null if the intention has no valid target.
- * In that case, the caller uses the nearest spawner goal instead.
- *
- * For go_pick_up, this function also adds the parcel facts to init
- * and adds the parcel name to parcelNames.
+ * Builds the goal and adds pickup parcel facts when needed.
  *
  * @param {Intention} intention - Intention to convert into a PDDL goal.
  * @param {string} agentName - Name of the agent in the PDDL problem.
@@ -281,9 +234,7 @@ function goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames
 }
 
 /**
- * Builds a fallback goal that moves the agent to the nearest spawner tile.
- *
- * Returns null if no spawner tile exists.
+ * Builds a fallback goal toward the nearest spawner.
  *
  * @param {string} agentName - Name of the agent in the PDDL problem.
  * @param {number} mx - Current x position of the agent.
@@ -298,7 +249,7 @@ function nearestSpawnerGoal(agentName, mx, my, tiles) {
         const tile = beliefs.grid.get(key);
         if (!tile || tile.type !== '1') continue;
         const [x, y] = key.split(',').map(Number);
-        if (x === mx && y === my) continue; // Already here; this would be a trivial goal.
+        if (x === mx && y === my) continue;
         const d = Math.abs(x - mx) + Math.abs(y - my);
         if (d < bestDist) {
             bestDist = d;
@@ -310,12 +261,7 @@ function nearestSpawnerGoal(agentName, mx, my, tiles) {
 }
 
 /**
- * Adds a movement fact to the PDDL init section if the move is valid.
- *
- * The edge represents the static map topology and is therefore crate-agnostic:
- * it is added whenever the target tile exists and is traversable (no wall, not
- * blacklisted, arrow-compatible). Crate occupancy is handled in the domain via the
- * `occupied` predicate, which both moves and pushes test at planning time.
+ * Adds a traversable edge to the PDDL init facts.
  *
  * @param {string[]} init - PDDL init facts.
  * @param {string} fromName - Name of the starting tile.
@@ -334,11 +280,7 @@ function addEdge(init, fromName, fx, fy, tx, ty, dir, tiles) {
 }
 
 /**
- * Tiles that must be excluded from the problem because they are blocked by dynamic
- * entities the agent cannot displace: non-stale opponent agents.
- *
- * Crates are intentionally NOT excluded here — they are movable obstacles modelled
- * as pushable objects in the problem, not as missing tiles.
+ * Dynamic blockers that cannot be displaced.
  *
  * @returns {Set<string>}
  */
@@ -350,15 +292,8 @@ function blockedTiles() {
     }
     return blocked;
 }
-// Plan parsing.
-
 /**
- * Converts the PDDL plan into moves for the executor.
- * move-* and push-* actions are converted into directions: a push is, from the
- * executor's point of view, just a step in that direction — the server displaces
- * the crate when the agent walks into it.
- * pick-up and put-down actions are ignored because they are handled
- * by the executor when the target is reached.
+ * Converts planner actions into executor directions.
  *
  * @param {{action: string, args: string[]}[]} plan
  * @returns {Direction[]}
@@ -384,7 +319,7 @@ function parsePlan(plan) {
             case 'push-down':
                 moves.push('down');
                 break;
-            // pick-up / put-down: handled by the executor when the target is reached
+            // Pickup and putdown are handled by the executor at the target.
         }
     }
     return moves;

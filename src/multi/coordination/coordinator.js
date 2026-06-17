@@ -5,8 +5,7 @@ import { initHandoff, REQUEST_TIMEOUT_MS } from './handoff.js';
 import { initMessageHandlers, clearPendingYield } from './messageHandlers.js';
 
 /**
- * Initialises all coordinator sub-modules and wires up the BDI callbacks.
- * Must be called once from multiagent_a.js / multiagent_b.js before the agent loop starts
+ * Wires coordinator submodules to the BDI callbacks.
  */
 export function initCoordinator({
     getCurrentIntention,
@@ -35,8 +34,7 @@ export function initCoordinator({
 }
 
 /**
- * Asks the claiming peer to step aside so we can take the parcel.
- * Resolves with { accepted, reason } or rejects on timeout
+ * Asks the claiming peer to release a parcel target.
  */
 export function requestTakeover(parcelId) {
     const reservation = state.reservations.get(parcelId);
@@ -80,13 +78,13 @@ export function requestTakeover(parcelId) {
     });
 }
 
-// Resets all coordinator state; call between tests to start from a clean slate
+// Test reset hook.
 export function resetCoordinatorForTests() {
     resetPeerState();
     clearPendingYield();
 }
 
-// Re-exports — public API consumed by BDI, executor, and tests
+// Public coordinator API.
 export { getPeers, isParcelClaimedByPeer, shouldYieldParcel } from './peerState.js';
 export {
     setCoordinatorRole,
@@ -100,4 +98,9 @@ export {
     tryBlockedDeliveryHandoff,
     runHandoff,
 } from './handoff.js';
-export { consumeYieldRequest, isPausedByPeer, isPeerGoToLocked, clearPeerGoToLock } from './messageHandlers.js';
+export {
+    consumeYieldRequest,
+    isPausedByPeer,
+    isPeerGoToLocked,
+    clearPeerGoToLock,
+} from './messageHandlers.js';

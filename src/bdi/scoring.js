@@ -1,30 +1,23 @@
 /**
  * scoring.js
  *
- * Central scoring functions for BDI deliberation.
- * All value estimates account for parcel decay during travel.
- *
+ * Value estimates for BDI deliberation.
  */
 
 import { beliefs } from './beliefs.js';
 import { manhattanDistance } from './helper.js';
 
-/**
- * Default milliseconds per step, used before dynamic measurement kicks in.
- * Deliveroo agents move at roughly one tile per 500ms.
- */
+/** Default step duration before runtime measurement is available. */
 const DEFAULT_MS_PER_STEP = 500;
 
-/** Bonus awarded by the server when the delivering agent ≠ the original picker. */
+/** Cross-agent handoff delivery bonus. */
 export const HANDOFF_DELIVERY_BONUS = 200;
 
 /**
- * Estimates how many times a parcel will decay during a journey of `steps` tiles.
- *
- * Returns 0 if decay interval is unknown.
+ * Estimated decay ticks during a trip.
  *
  * @param {number} steps - Number of tiles to travel.
- * @returns {number}.
+ * @returns {number}
  */
 export function estimateDecay(steps) {
     const decayInterval = beliefs.config?.PARCEL_DECADING_INTERVAL;
@@ -35,10 +28,7 @@ export function estimateDecay(steps) {
 }
 
 /**
- * Estimates the reward a parcel will have when it reaches the delivery tile.
- *
- * Subtracts the expected decay over the full journey (me to parcel to delivery).
- * Returns at least 0 — a parcel cannot have negative reward.
+ * Estimated parcel reward at delivery time.
  *
  * @param {number} currentReward - Current reward of the parcel.
  * @param {number} totalSteps - Total steps of the journey (me-to-parcel plus parcel-to-delivery).
@@ -49,13 +39,7 @@ export function estimatedRewardAtDelivery(currentReward, totalSteps) {
 }
 
 /**
- * Computes the net value of picking up a parcel.
- *
- * Accounts for decay over the full journey (me to parcel to delivery)
- * and subtracts the cost of reaching the parcel.
- *
- * Returns -Infinity if the parcel will be worth 0 at delivery time,
- * so it is automatically excluded from the best-pickup search.
+ * Pickup value after travel cost and expected decay.
  *
  * @param {{ reward: number, x: number, y: number }} parcel - Parcel to evaluate.
  * @param {{ x: number, y: number }} myPos - Current agent position.
@@ -74,10 +58,7 @@ export function pickupValue(parcel, myPos, deliveryTile) {
 }
 
 /**
- * Computes the net value of delivering all currently carried parcels immediately.
- *
- * Estimates the reward of each carried parcel at delivery time,
- * accounting for decay during the walk from myPos to the delivery tile.
+ * Delivery value for the currently carried parcel IDs.
  *
  * @param {string[]} carriedIds - IDs of parcels currently being carried.
  * @param {{ x: number, y: number }} myPos - Current agent position.
@@ -90,17 +71,16 @@ export function deliveryValue(carriedIds, myPos, deliveryTile) {
     return carriedIds.reduce((total, id) => {
         const parcel = beliefs.parcels.get(id);
         if (!parcel) return total;
-        const bonus = beliefs.me.handoffBonusActive && beliefs.me.handoffReceivedParcels.has(id) ? HANDOFF_DELIVERY_BONUS : 0;
+        const bonus =
+            beliefs.me.handoffBonusActive && beliefs.me.handoffReceivedParcels.has(id)
+                ? HANDOFF_DELIVERY_BONUS
+                : 0;
         return total + estimatedRewardAtDelivery(parcel.reward, distToDelivery) + bonus;
     }, 0);
 }
 
 /**
- * Estimates the net gain of making a detour to pick up an extra parcel
- * before delivering, compared to delivering immediately.
- *
- * A positive return value means the detour is worth it.
- * A negative or zero return value means delivering now is better.
+ * Extra value of picking up one more parcel before delivery.
  *
  * @param {{ reward: number, x: number, y: number }} parcel - Candidate parcel to pick up.
  * @param {{ x: number, y: number }} myPos - Current agent position.
@@ -109,21 +89,21 @@ export function deliveryValue(carriedIds, myPos, deliveryTile) {
  * @returns {number} Gain from detour minus gain from delivering now.
  */
 export function detourValue(parcel, myPos, carriedIds, deliveryTile) {
-    // Scenario A: deliver now
+    // Deliver now.
     const valueDeliverNow = deliveryValue(carriedIds, myPos, deliveryTile);
 
-    // Scenario B: detour to parcel, then deliver everything
+    // Detour to parcel, then deliver everything.
     const stepsToParcel = manhattanDistance(myPos, { x: parcel.x, y: parcel.y });
     const stepsParcelToDelivery = manhattanDistance({ x: parcel.x, y: parcel.y }, deliveryTile);
 
-    // Carried parcels decay during the walk to the new parcel
+    // Carried parcels keep decaying during the detour.
     const rewardCarriedAfterDetour = carriedIds.reduce((total, id) => {
         const p = beliefs.parcels.get(id);
         if (!p) return total;
         return total + estimatedRewardAtDelivery(p.reward, stepsToParcel + stepsParcelToDelivery);
     }, 0);
 
-    // New parcel decays over the full detour journey
+    // The new parcel decays over its own pickup-to-delivery path.
     const rewardNewParcel = estimatedRewardAtDelivery(
         parcel.reward,
         stepsToParcel + stepsParcelToDelivery

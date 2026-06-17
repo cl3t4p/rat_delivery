@@ -1,15 +1,7 @@
 /**
  * beliefs.js
  *
- * Updated by socket sensing events.
- * Read by deliberation.js, pathfinding.js, and executor.js.
- *
- * Structure:
- *   grid          - Static map received upon connection.
- *   parcels       - Visible parcels, with rewards decremented locally.
- *   agents        - Other players, marked as stale when they leave the field of view.
- *   me            - The agent's own state.
- *   deliveryTiles - Cached delivery tiles.
+ * Shared belief store updated from sensing events.
  */
 
 import { invalidateBounds } from '../shared/zones.js';
@@ -34,16 +26,16 @@ export const beliefs = {
         y: null,
         score: 0,
         carrying: [],
-        handoffReceivedParcels: new Set(), // IDs of parcels received via handoff from the peer
-        handoffBonusActive: false,         // true only when the server has announced the +200 bonus rule
+        handoffReceivedParcels: new Set(), // Parcels received via handoff.
+        handoffBonusActive: false, // Server announced the +200 bonus rule.
     },
     deliveryTiles: [],
     crates: new Map(),
-    blacklist: new Set(), // cell keys "x,y" the agent must avoid (set by the policy/LLM)
-    temporaryBlacklist: new Map(), // cell key "x,y" -> expiresAt timestamp
+    blacklist: new Set(), // Permanent "x,y" blocked cells.
+    temporaryBlacklist: new Map(), // "x,y" -> expiresAt.
     config: {
         PARCEL_DECADING_INTERVAL: null,
-        PARCEL_GENERATION_INTERVAL: null, // ms between parcel spawns (see clockEventToMs)
+        PARCEL_GENERATION_INTERVAL: null,
         OBSERVATION_DISTANCE: null,
         MAX_PARCELS: 5,
         PARCEL_FORGET_MS: 5000,
@@ -52,15 +44,11 @@ export const beliefs = {
     },
 };
 
-const claimedParcelSuppressions = new Map(); // parcelId -> expiresAt
-const handoffDroppedParcels = new Map(); // parcelId -> expiresAt after own handoff drop
-
-// Functions
+const claimedParcelSuppressions = new Map(); // parcelId -> expiresAt.
+const handoffDroppedParcels = new Map(); // Own handoff drops, parcelId -> expiresAt.
 
 /**
- * Updates the known map tiles.
- *
- * Clears the old map, stores the new tiles, and saves all delivery tiles.
+ * Replaces the known map tiles.
  *
  * @param {{ x: number, y: number, type: string }[]} tiles - Tiles received from the server.
  */
@@ -88,10 +76,7 @@ export function updateMap(tiles) {
 }
 
 /**
- * Updates the agent's own state from a sensing event.
- *
- * Also measures the real ms-per-step dynamically using a moving average,
- * so scoring functions can estimate decay accurately.
+ * Updates this agent's state.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent} data
  */
@@ -106,8 +91,7 @@ export function updateMe(data) {
     beliefs.me.y = data.y;
     beliefs.me.score = data.score;
 
-    // Measure real ms per step dynamically using a moving average.
-    // Only update when the agent moved exactly 1 tile.
+    // Keep a rough moving average for decay estimates.
     if (prevX !== null && prevY !== null) {
         const moved = Math.abs(data.x - prevX) + Math.abs(data.y - prevY);
         if (Math.round(moved) === 1) {
@@ -122,10 +106,7 @@ export function updateMe(data) {
 }
 
 /**
- * Updates the belief store with the latest sensed objects.
- *
- * Updates parcels, agents, carried parcels, and crates.
- * Old parcels are removed, while agents not seen for a while are marked as stale.
+ * Updates dynamic beliefs from sensing.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk').IOParcel[]} sensedParcels - Parcels currently visible.
  * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent[]} sensedAgents - Agents currently visible.
@@ -134,7 +115,7 @@ export function updateMe(data) {
 export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     const now = Date.now();
 
-    // 1. Update parcels
+    // Parcels.
     pruneClaimedParcelSuppressions(now);
     const seenParcelIds = new Set();
 
@@ -191,7 +172,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
             .map((p) => p.id);
     }
 
-    // 2. Update agents
+    // Agents.
     const seenAgentIds = new Set(sensedAgents.map((a) => a.id));
 
     for (const a of sensedAgents) {
@@ -212,16 +193,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
         }
     }
 
-    // 3. Update crates.
-    // Crates are persisted across sensing updates so the planner keeps routing around
-    // a crate even after it leaves the field of view. The server only reports crates
-    // currently in range, so clearing them every tick made the agent forget any crate
-    // it could not see and later walk into / wrongly push it.
-    //
-    // A remembered crate is dropped only when we can actually observe its tile is
-    // empty: it is within observation range yet absent from the current sensing. With
-    // unlimited vision every crate is observable, so an unseen crate is always gone.
-    // Crates out of range are assumed to still sit where we last saw them.
+    // Crates persist until their tile is observed empty.
     const seenCrateKeys = new Set();
     const seenCrateIds = new Set();
     for (const c of sensedCrates) {
@@ -236,8 +208,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     const meKnown = beliefs.me.x !== null && beliefs.me.y !== null;
     for (const [key, c] of beliefs.crates) {
         if (seenCrateKeys.has(key)) continue;
-        // Same crate id sensed on another tile this tick, so this is a stale duplicate
-        // of a crate that has since moved; drop it regardless of range.
+        // Same crate id on another tile means this record is stale.
         if (c.id != null && seenCrateIds.has(c.id)) {
             beliefs.crates.delete(key);
             continue;
@@ -247,9 +218,7 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
         }
     }
 
-    // The agent can never share a tile with a crate. If we are standing on a
-    // remembered crate it must be stale, so drop it — this also lets the planner
-    // treat our own tile as a free crate destination once we step aside.
+    // A remembered crate on our own tile is stale.
     if (meKnown) {
         beliefs.crates.delete(`${Math.round(beliefs.me.x)},${Math.round(beliefs.me.y)}`);
     }
@@ -263,7 +232,7 @@ export function suppressClaimedParcel(parcelId, ttlMs = beliefs.config.CLAIMED_P
 
 /** Suppresses a parcel that this agent intentionally dropped for a handoff.
  *  Unlike suppressClaimedParcel, this suppression is NOT cleared when the
- *  sensing shows the parcel unclaimed — A must not re-pick its own drop. */
+ *  sensing shows the parcel unclaimed. A must not re-pick its own drop. */
 export function suppressHandoffDrop(parcelId, ttlMs = beliefs.config.CLAIMED_PARCEL_SUPPRESS_MS) {
     if (!parcelId) return;
     const expiresAt = Date.now() + ttlMs;
@@ -311,8 +280,7 @@ function pruneClaimedParcelSuppressions(now = Date.now()) {
 }
 
 export function decayParcelsReward() {
-    // Called every 1000ms. If decay interval > 1000ms, decay happens
-    // less than once per call — track fractional accumulation.
+    // Track fractional decay when the decay interval is longer than 1s.
     const interval = beliefs.config?.PARCEL_DECADING_INTERVAL;
     if (!interval || interval <= 0) return;
 
@@ -337,34 +305,24 @@ export function decayParcelsReward() {
 /**
  * Converts a Deliveroo clock-event value into milliseconds.
  *
- * The server expresses parcel generation/decay rates either as a number (ms)
- * or as a duration string with a unit: "<n>ms" | "<n>s" | "<n>m" (e.g. "2s",
- * "500ms", "1m"). The special event "frame" means one clock tick (~40ms). A
- * larger value means the event fires less often — a higher generation interval
- * means parcels spawn more rarely, so camping a spawner pays off less.
- *
  * @param {string|number|null|undefined} event
  * @returns {number|null} interval in ms, or null if it is not a parseable duration.
  */
 export function clockEventToMs(event) {
     if (event == null) return null;
-    if (typeof event === 'number') return Number.isFinite(event) ? event : null; // server sends numbers already in ms
-    if (event === 'frame') return 40; // one clock tick (~25 fps)
+    if (typeof event === 'number') return Number.isFinite(event) ? event : null;
+    if (event === 'frame') return 40;
 
     const match = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m)?\s*$/.exec(event);
     if (!match) return null;
 
     const value = parseFloat(match[1]);
-    const unit = match[2] ?? 's'; // string without unit defaults to seconds (e.g. "5" becomes 5000ms)
+    const unit = match[2] ?? 's';
     const factor = unit === 'ms' ? 1 : unit === 'm' ? 60_000 : 1000;
     return value * factor;
 }
 
-// Blacklisted cells
-//
-// The agent must treat as impassable for now. Honored by isWalkable /
-// canEnter (grid.js), so A* pathfinding, go_to and the executor all route
-// around them. Populated by the LLM policy (or coordination) at runtime.
+// Cells avoided by pathfinding and movement checks.
 
 /** @param {number} x
  * @param {number} y

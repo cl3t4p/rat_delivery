@@ -1,6 +1,6 @@
-# Minimal stack to run the planning-as-a-service PDDL solver locally.
+# Local planning-as-a-service stack.
 # Usage:
-#   npm run planner:build   # one-time: builds the paas:latest base image
+#   npm run planner:build   # builds the paas:latest base image
 #   npm run planner:up      # starts the stack
 #   npm run planner:down    # stops the stack
 

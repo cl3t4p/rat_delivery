@@ -1,12 +1,5 @@
 /**
- * executor.js
- *
- * Loop:
- *   1. Reads the intention from intentionRevision
- *   2. If the plan is missing, computes it with planTo
- *   3. Consumes one move and calls emitMove
- *   4. If on the target, calls emitPickup / emitPutdown
- *   5. Notifies intentionRevision with done / failed
+ * Executes the active intention one socket action at a time.
  */
 
 import { beliefs, canEnter, canPush, blacklistCellTemporary } from './beliefs.js';
@@ -28,10 +21,7 @@ import {
     runHandoff,
 } from './coordination.js';
 
-// Planner selection:
-//
-// USE_PDDL=true        — uses only the PDDL planner (no A* fallback).
-// Default (unset)      — uses only the A* planner.
+// USE_PDDL=true uses only PDDL; default uses A*.
 const USE_PDDL = process.env.USE_PDDL === 'true';
 const STUCK_FAILURE_THRESHOLD = 3;
 const STUCK_BLACKLIST_TTL_MS = 5000;
@@ -42,7 +32,7 @@ const MOVE_BLOCK_BACKOFF_MAX_MS = 800;
 const EMPTY_YIELD_HOLD_MS = Number(process.env.EMPTY_YIELD_HOLD_MS) || 350;
 const BLOCKING_CONTEXT_TTL_MS = 1500;
 
-// Maps each direction to its delta, used for the canEnter pre-check before emitMove.
+// Direction deltas for movement pre-checks.
 const DIR_DELTA = {
     up: { dx: 0, dy: 1 },
     down: { dx: 0, dy: -1 },
@@ -62,7 +52,7 @@ const OPPOSITE_DIR = {
 /** @typedef {import('../shared/types.js').Position}  Position */
 
 /**
- * Checks if the agent is at the target position.
+ * Checks whether the agent is at the target.
  *
  * @param {Position|null} target - Target position to check.
  * @returns {boolean} True if the agent is at the target position.
@@ -73,7 +63,6 @@ function isAtTarget(target) {
 }
 
 /**
- * Check if the position is valid
  * @returns {boolean}
  */
 function meReady() {
@@ -141,20 +130,17 @@ function setupSocketLifecycle(socket) {
     }
 }
 
-// Loop
-
 /**
  * Starts the executor loop.
  *
- * Must be called only once after the socket is created.
- * Reads the current intention and executes it until it is completed or fails.
+ * Must be called once after the socket is created.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send actions.
  */
 const failedMoves = new Map();
 const blockedMoveContext = new Map();
 
-// Tracks the start time of the current pickup to compute cycle duration on delivery.
+// Current pickup cycle timing.
 let _cycleStart = null;
 let _cyclePickupReward = 0;
 
@@ -174,7 +160,7 @@ export async function startExecutor(socket) {
 
         if (!meReady()) continue;
 
-        // Agent B can command this agent to pause via PEER_COMMAND message
+        // Peer-command pause.
         if (isPausedByPeer()) {
             await sleep(100);
             continue;
@@ -186,7 +172,7 @@ export async function startExecutor(socket) {
             continue;
         }
 
-        // Right-of-way yield: execute a lateral step requested by the coordinator
+        // Right-of-way yield requested by the coordinator.
         const yieldDir = consumeYieldRequest();
         if (yieldDir) {
             const moved = await safeSocketAction(`yield ${yieldDir}`, () =>
@@ -209,7 +195,7 @@ export async function startExecutor(socket) {
         const intention = getCurrentIntention();
         if (!intention) continue;
 
-        // Mark the new intention as active
+        // Activate a newly committed intention.
         if (intention !== lastIntention) {
             lastIntention = intention;
             intention.status = 'active';
@@ -236,26 +222,19 @@ export async function startExecutor(socket) {
     }
 }
 
-// Step toward the target.
-
 /**
  * Moves the agent one step toward the target of the intention.
- *
- * If the agent is already at the target, the intention is finalized.
- * If there is no plan, a new one is computed.
- * If the next step is no longer valid, the plan is cleared and recomputed later.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send moves.
  * @param {Intention} intention - Current intention to execute.
  */
 async function stepTowardsTarget(socket, intention) {
-    // Check if the agent is already at the target
     if (isAtTarget(intention.targetPos)) {
         await finalize(socket, intention);
         return;
     }
 
-    // If the plan is empty, compute it
+    // Build a plan on demand.
     if (!intention.plan || intention.plan.length === 0) {
         const moves = await computePlan(intention);
         if (moves.length === 0) {
@@ -271,7 +250,7 @@ async function stepTowardsTarget(socket, intention) {
         intention.plan = moves;
     }
 
-    // Check if the next step is still valid
+    // Replan if the next step became blocked.
     const next = intention.plan[0];
     if (!isStepValid(next)) {
         console.log(`[executor] Step ${next} no longer valid, replanning`);
@@ -279,13 +258,11 @@ async function stepTowardsTarget(socket, intention) {
         return;
     }
 
-    // Execute the next step
     const dir = intention.plan.shift();
     const fxBefore = Math.round(beliefs.me.x);
     const fyBefore = Math.round(beliefs.me.y);
 
-    // If the next tile holds a crate, this step is a push: remember it so the local
-    // crate beliefs can be updated immediately after the move
+    // Remember crate pushes before sensing catches up.
     const delta = DIR_DELTA[dir];
     const crateKey =
         delta && beliefs.crates.has(`${fxBefore + delta.dx},${fyBefore + delta.dy}`)
@@ -308,7 +285,7 @@ async function stepTowardsTarget(socket, intention) {
         const failures = (failedMoves.get(targetKey) ?? 0) + 1;
         failedMoves.set(targetKey, failures);
 
-        // Include who (if anyone) is on the target tile to make blocked logs actionable.
+        // Include blockers in logs when known.
         const blockingAgent = [...beliefs.agents.values()].find(
             (a) => !a.stale && Math.round(a.x) === tx && Math.round(a.y) === ty
         );
@@ -386,8 +363,7 @@ async function stepTowardsTarget(socket, intention) {
             return;
         }
 
-        // Right-of-way: only ask known teammates to yield. External agents do
-        // not speak our protocol, so broadcasting for them only adds log noise.
+        // Only teammates speak the right-of-way protocol.
         if (failures === 1) {
             if (isKnownTeammateBlocker) {
                 sendBroadcast(MSG_TYPE.BLOCKED_AT, {
@@ -399,9 +375,7 @@ async function stepTowardsTarget(socket, intention) {
                     console.log(`[executor] blocked_at broadcast failed: ${err.message ?? err}`);
                 });
 
-                // Fast-path: if delivering and the blocker is empty, propose a
-                // handoff immediately instead of waiting for STUCK_FAILURE_THRESHOLD.
-                // Saves ~2 × (backoff + retry) ≈ 0.6 s per reactive handoff cycle.
+                // Empty teammate blocking delivery can become a handoff receiver.
                 if (intention.type === 'go_deliver' && blockerCarryCount === 0) {
                     const handled = await tryBlockedDeliveryHandoff(
                         intention,
@@ -472,21 +446,18 @@ async function stepTowardsTarget(socket, intention) {
             return;
         }
 
-        // Below threshold: replan within the same intention without triggering
-        // a full intention replacement. This lets failedMoves accumulate so the
-        // threshold is reached if the blocker persists.
+        // Replan inside the same intention until the blocker persists.
         await sleep(Math.min(MOVE_BLOCK_BACKOFF_MAX_MS, failures * 150));
         intention.plan = [];
         return;
     }
 
-    // Update the position without waiting for the next sensing update
+    // Update position before the next sensing event.
     beliefs.me.x = moved.x;
     beliefs.me.y = moved.y;
     failedMoves.delete(`${Math.round(moved.x)},${Math.round(moved.y)}`);
 
-    // If this step pushed a crate, advance it one tile in the same direction locally
-    // so the rest of the plan sees the new layout before sensing catches up.
+    // Move pushed crates locally before sensing catches up.
     if (crateKey) {
         const crate = beliefs.crates.get(crateKey);
         beliefs.crates.delete(crateKey);
@@ -529,8 +500,7 @@ function getBlockingContext(targetKey) {
 }
 
 /**
- * Checks whether the next planned move is still valid
- * according to the current beliefs.
+ * Checks whether the next planned move is still valid.
  *
  * @param {Direction} dir
  * @returns {boolean}
@@ -542,14 +512,11 @@ function isStepValid(dir) {
     const fy = Math.round(beliefs.me.y);
     const nx = fx + delta.dx;
     const ny = fy + delta.dy;
-    // The step is valid if the agent can walk onto the tile, or push a crate off it.
     return canEnter(fx, fy, nx, ny) || canPush(fx, fy, nx, ny);
 }
 
 /**
- * Computes the plan needed to reach targetPos.
- * Uses PDDL first if enabled, otherwise uses A*.
- * Returns an empty array if planning fails.
+ * Computes a path to the intention target.
  *
  * @param {Intention} intention
  * @returns {Promise<Direction[]>}
@@ -567,13 +534,8 @@ async function computePlan(intention) {
     return planTo(intention.targetPos);
 }
 
-// Final Actions
-
 /**
  * Finalizes the current intention.
- *
- * For go_pick_up, tries to pick up the parcel and updates the local beliefs.
- * For go_deliver, drops the carried parcels and removes them from the local beliefs.
  *
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket used to send actions.
  * @param {Intention} intention - Intention to finalize.
@@ -651,7 +613,6 @@ async function finalize(socket, intention) {
     }
 
     if (intention.type === 'go_to') {
-        // Pure positioning: nothing to pick up or drop, the target was reached.
         console.log(`[executor] Reached (${intention.targetPos.x},${intention.targetPos.y})`);
         notifyIntentionDone();
         return;

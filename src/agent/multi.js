@@ -1,17 +1,7 @@
 /**
  * agent/multi.js
  *
- * Shared bootstrap for the two-agent (multi) setup. multiagent_a.js and multiagent_b.js are
- * thin wrappers that call startMultiAgent({ role }).
- *
- * role 'a' — plain BDI agent: communicates and accepts zone assignments. No LLM.
- *            Connects with the default token; prints the map grid.
- * role 'b' — BDI + LLM coordinator: owns the zone-assignment loop, receives
- *            natural-language objectives, maintains LLM context. Connects with
- *            TOKEN_B.
- *
- * Everything common to both roles lives here (and in agent/common.js); only the
- * role-specific wiring is branched on `isB`.
+ * Bootstrap shared by multiagent_a.js and multiagent_b.js.
  */
 
 import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk/client';
@@ -53,15 +43,11 @@ import {
     REVISE_HEARTBEAT_MS,
 } from './common.js';
 
-// How often to send a keepalive HELLO to known peers. Must be well under
-// PEER_TIMEOUT_MS (8000ms) so a peer is never pruned just because the BDI
-// loop is idle (e.g. blocked on LLM network I/O).
+// Keep peerState fresh even while an LLM call is pending.
 const PEER_HEARTBEAT_MS = 3000;
 
 /**
- * Starts a periodic HELLO ping to all currently known peers.
- * Runs as an independent setInterval so it fires even while an LLM await
- * is in progress or the executor is paused, keeping peer lastSeen fresh.
+ * Sends periodic HELLO pings to known peers.
  */
 function startPeerHeartbeat() {
     setInterval(() => {
@@ -72,10 +58,7 @@ function startPeerHeartbeat() {
 }
 
 /**
- * Connects and wires a multi-agent BDI agent for the given role.
- *
- * The token is supplied by the entrypoint (multiagent_a.js / multiagent_b.js),
- * each passing its own TOKEN_A / TOKEN_B.
+ * Connects and wires one multi-agent role.
  *
  * @param {{ role: 'a' | 'b', token: string }} options
  * @returns {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket}
@@ -92,8 +75,7 @@ export function startMultiAgent({ role, token }) {
     }
     const socket = DjsConnect(process.env.HOST, token);
 
-    // Multi-agent layer. installMultiAgent() injects the real coordination hooks
-    // into the BDI core, which otherwise runs solo (see bdi/coordination.js).
+    // Inject the multi-agent coordination hooks into the BDI core.
     installMultiAgent();
     initCommunication(socket, { selfIdProvider: () => beliefs.me.id });
     initCoordinator({
@@ -106,15 +88,13 @@ export function startMultiAgent({ role, token }) {
     initZoneAssignHandler();
     enableNotifier();
 
-    // Agent B owns the LLM coordination loop; Agent A only receives assignments.
+    // Agent B owns the LLM coordination loop.
     if (isB) {
         setCoordinatorRole();
         initLlmAgent(interruptForRevision);
         startZoneAssignmentLoop();
 
-        // Let the LLM intention agent talk to the teammate, a specific agent, or
-        // broadcast — e.g. to coordinate or to answer a special-mission question.
-        // `to` is 'all' (shout), 'peer' (say to teammate), or an agent id (say to it).
+        // `to` can be 'all', 'peer', or a specific agent id.
         llmMemory.sendMessage = (text, to = 'all') => {
             let targetId = null;
             if (to === 'peer') targetId = getPeers()[0]?.id ?? null;
@@ -126,7 +106,7 @@ export function startMultiAgent({ role, token }) {
             );
         };
 
-        // Auto-pause peer when a mission arrives; resume when the queue empties.
+        // Pause the peer while Agent B is handling a mission.
         let _peerPaused = false;
         llmMemory.onMissionsChanged = (prevLen, newLen) => {
             const peers = getPeers();
@@ -172,7 +152,7 @@ export function startMultiAgent({ role, token }) {
     startDecayLoop();
     startExecutor(socket);
 
-    // Agent B receives natural-language objectives over the fallback channel.
+    // Agent B receives natural-language objectives over chat.
     if (isB) {
         onFallbackMsg((id, name, msg) => {
             console.log(`[${tag}] Message from ${name}: ${msg}`);
@@ -180,12 +160,10 @@ export function startMultiAgent({ role, token }) {
         });
     }
 
-    // Heartbeat re-deliberation (see REVISE_HEARTBEAT_MS): keeps time-based
-    // deliberation alive even when no sensing events arrive.
+    // Keep time-based deliberation alive when sensing is quiet.
     setInterval(() => onSensingRevise(), REVISE_HEARTBEAT_MS);
 
-    // While no teammate is known, ping the team once a second so the two agents
-    // find each other; until then nothing about ourselves is broadcast.
+    // Discovery ping before the teammate is known.
     setInterval(() => {
         if (getPeers().length === 0) {
             sendBroadcast(MSG_TYPE.HELLO, 'YO BRO ARE YOU UP?');

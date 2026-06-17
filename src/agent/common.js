@@ -1,10 +1,7 @@
 /**
  * agent/common.js
  *
- * Helpers shared by the single- and multi-agent bootstraps (agent/runtime.js,
- * agent/multi.js): console timestamping, config ingestion, the parcel-decay loop,
- * the map ASCII dump, and per-agent state logging. Factored out so the bootstraps
- * don't duplicate this boilerplate.
+ * Shared bootstrap utilities.
  */
 
 import { beliefs, decayParcelsReward, clockEventToMs } from '../bdi/beliefs.js';
@@ -17,28 +14,28 @@ const BLACKLIST_LOG = (process.env.BLACKLIST_LOG ?? '')
     .map((s) => s.trim())
     .filter(Boolean);
 
-/** True if a console.log line should be suppressed (starts with a blacklisted prefix). */
+/** True when a log line should be muted. */
 function isLogBlacklisted(...args) {
     const first = args[0];
     if (typeof first !== 'string') return false;
     return BLACKLIST_LOG.some((prefix) => first.startsWith(prefix));
 }
 
-/** Prepend HH:MM:SS.mmm to every console line so logs can be correlated by time. */
+/** Adds HH:MM:SS.mmm to console output. */
 export function installTimestampedConsole() {
     const _log = console.log.bind(console);
     const _warn = console.warn.bind(console);
     const _error = console.error.bind(console);
     const ts = () => `[${new Date().toISOString().slice(11, 23)}]`;
     console.log = (...a) => {
-        if (isLogBlacklisted(...a)) return; // muted component
+        if (isLogBlacklisted(...a)) return;
         _log(ts(), ...a);
     };
     console.warn = (...a) => _warn(ts(), ...a);
     console.error = (...a) => _error(ts(), ...a);
 }
 
-/** Reads the game config event into beliefs.config and logs it under `tag`. */
+/** Applies the server config to beliefs.config. */
 export function applyConfig(tag, config) {
     beliefs.config.PARCEL_DECADING_INTERVAL =
         clockEventToMs(config?.GAME?.parcels?.decaying_event) ?? null;
@@ -52,12 +49,12 @@ export function applyConfig(tag, config) {
     console.log(`[${tag}] Decay interval: ${beliefs.config.PARCEL_DECADING_INTERVAL}ms`);
 }
 
-/** Starts the 1 sec local parcel-reward decay loop. */
+/** Starts local parcel reward decay. */
 export function startDecayLoop() {
     setInterval(() => decayParcelsReward(), 1000);
 }
 
-/** Dumps the known grid as an ASCII map (top row first). */
+/** Logs the known grid as an ASCII map. */
 export function logMapGrid(tiles) {
     const maxX = tiles.reduce((m, t) => (t.x > m ? t.x : m), 0);
     const maxY = tiles.reduce((m, t) => (t.y > m ? t.y : m), 0);
@@ -73,9 +70,7 @@ export function logMapGrid(tiles) {
 }
 
 /**
- * Builds a state logger that only emits when something meaningful changes,
- * tagged with `label` (e.g. 'state', 'state_a', 'state_b'). Each call returns an
- * independent logger with its own change-detection memory.
+ * Creates a state logger with local change detection.
  *
  * @param {string} label
  * @returns {() => void}

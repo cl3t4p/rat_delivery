@@ -1,9 +1,7 @@
 /**
  * pathfinding.js
  *
- * BFS on the Belief Store grid.
- * Returns a sequence of moves ('up', 'down', 'left', 'right')
- * ready to be consumed by the executor.
+ * A* pathfinding over the belief grid.
  */
 
 import { beliefs } from './beliefs.js';
@@ -13,10 +11,10 @@ import { isWalkable, canEnter } from './grid.js';
 /** @typedef {import('../shared/types.js').Direction}  Direction */
 /** @typedef {import('../shared/types.js').PathResult} PathResult */
 
-/** @typedef {string} TileKey  index as "x,y" */
+/** @typedef {string} TileKey */
 /** @typedef {{ from: TileKey, dir: Direction }} ParentLink */
 /** @typedef {Map<TileKey, ParentLink | null>} Parents */
-/** @typedef {{avoidAgents?: boolean}} PathOptions  default: {avoidAgents: true} */
+/** @typedef {{avoidAgents?: boolean}} PathOptions */
 
 const DEFAULT_OPTIONS = { avoidAgents: true };
 
@@ -31,7 +29,6 @@ const DEFAULT_OPTIONS = { avoidAgents: true };
 export function aStar(start, goal, options = DEFAULT_OPTIONS) {
     const opts = { ...DEFAULT_OPTIONS, ...options };
 
-    //Number is a float
     const sx = Math.round(start.x),
         sy = Math.round(start.y);
     const gx = Math.round(goal.x),
@@ -47,11 +44,11 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
     const parents = new Map();
     parents.set(startKey, null);
 
-    /** g-score: actual cost from the start node to a given node. */
+    /** Cost from the start node. */
     const gScore = new Map();
     gScore.set(startKey, 0);
 
-    /** Open set: Map used for deduplication and linear scan to extract min(f). */
+    /** Open set keyed by tile. */
     const open = new Map();
     open.set(startKey, { x: sx, y: sy, f: heuristic(sx, sy, gx, gy) });
 
@@ -64,7 +61,7 @@ export function aStar(start, goal, options = DEFAULT_OPTIONS) {
     ];
 
     while (open.size > 0) {
-        // Extract the node with the lowest f-score.
+        // Small maps: linear scan is fine here.
         let curKey = null;
         let curNode = null;
         let bestF = Infinity;
@@ -118,7 +115,7 @@ function heuristic(x1, y1, x2, y2) {
 }
 
 /**
- * Reconstructs the path and moves by following the parent links from the goal back to the start.
+ * Reconstructs path and moves from parent links.
  *
  * @param {Parents} parents
  * @param {TileKey} goalKey
@@ -144,7 +141,7 @@ function reconstruct(parents, goalKey, startKey) {
 }
 
 /**
- * Returns the sequence of moves needed to reach the target from beliefs.me.
+ * Plans from the current agent position.
  *
  * @param {Position} target - Destination tile.
  * @param {PathOptions} [options]
@@ -157,8 +154,7 @@ export function planTo(target, options = DEFAULT_OPTIONS) {
 
     let result = aStar(start, target, opts);
 
-    // Fallback: if no path is found while avoiding agents,
-    // retry without considering agents as blockers.
+    // If agents block everything, retry through stale space.
     if (!result && opts.avoidAgents) {
         result = aStar(start, target, { avoidAgents: false });
     }
@@ -167,7 +163,7 @@ export function planTo(target, options = DEFAULT_OPTIONS) {
 }
 
 /**
- * Find the goal with the shortest path
+ * Goal with the shortest reachable path.
  *
  * @param {Position} start
  * @param {Position[]} goals
@@ -192,8 +188,7 @@ export function nearestReachable(start, goals, options = DEFAULT_OPTIONS) {
 }
 
 /**
- * Builds the set of tiles occupied by non-stale opponents to treat as obstacles.
- * Tiles occupied by me are never included.
+ * Opponent tiles to treat as dynamic obstacles.
  *
  * @param {boolean} [enabled=false]
  * @returns {Set<TileKey>}

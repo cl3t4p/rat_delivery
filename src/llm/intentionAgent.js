@@ -1,40 +1,21 @@
 /**
  * intentionAgent.js
  *
- * The LLM layer sits ON TOP of the deterministic BDI. On a normal tick (no
- * special mission) generateBestIntention hands straight to getBestIntention, so
- * routine collecting / delivering / exploring is pure, reliable BDI and the model
- * is never called. The LLM only takes over while the "missions" list is non-empty:
- * it interprets each special mission, installs a rule / answers / does a one-off
- * action, resolves it, and then releases control back to the BDI the same tick.
- * The BDI honours the rules the LLM installs (stack size, pickup cap, delivery
- * multipliers, blacklist), so a level-2 mission reshapes ordinary play.
- *
- * The tools are deliberately few:
- *
- *   ACTIONS — turn into a concrete Intention the executor runs
- *     (go_pick_up, deliver, drop_at, go_to, wait). deliver auto-routes to the
- *     best (nearest, highest-reward) delivery tile; drop_at places a parcel on a
- *     specific tile for a mission. There is no explore tool — the LLM explores by
- *     calling go_to toward a spawner or an unexplored area itself.
- *
- *   PERSISTENT RULES (level-2 missions) — set_stack_rule (deliver in stacks of N
- *     for a given reward multiplier), set_max_pickup (skip parcels above a reward), set_delivery_reward
- *     (per-tile delivery multiplier; 0 = never deliver there), blacklist_tile
- *     (never enter a cell). Each stays active for the match and reshapes the
- *     pick-up / deliver behaviour; the action tools honour them every tick.
- *
- *   MISSIONS / CHAT — read and answer the special missions sent over the
- *     Deliveroo chat (send_message, resolve_mission): "move to (4,7)",
- *     "what is the capital of Italy?", "calculate 5*5". The model computes the
- *     answer itself, sends it, and clears the mission.
+ * Mission-level LLM deliberation. Normal collection and delivery stay in the
+ * deterministic BDI unless a chat mission is pending.
  */
 
 import { beliefs, manhattanDistance, isWalkable, blacklistCell } from '../bdi/beliefs.js';
 import { costToReachPath } from '../bdi/helper.js';
 import { createIntention, getBestIntention } from '../bdi/deliberation.js';
 import { findNearestDeliveryTile, findSpawnerTiles } from '../bdi/components/tilesearch.js';
-import { llmClient, llmMemory, notifyMissionsChanged, getStackMultiplier, getBestStackTarget } from './llmAgent.js';
+import {
+    llmClient,
+    llmMemory,
+    notifyMissionsChanged,
+    getStackMultiplier,
+    getBestStackTarget,
+} from './llmAgent.js';
 import { pickupValue, deliveryValue } from '../bdi/scoring.js';
 import { sendBroadcast, MSG_TYPE } from '../multi/communication.js';
 
@@ -43,23 +24,16 @@ const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 /** @typedef {import('../shared/types.js').Intention} Intention */
 /** @typedef {import('../shared/types.js').Position} Position */
 
-// Returned by side effect tools (send/resolve/freeze) that change memory but
-// produce no movement. It tells the deliberation loop to ask the model again
-// this same tick, with the updated state, so it still ends on a real action.
+// Side-effect tools return this so the same tick can still end on a movement.
 const CONTINUE = Symbol('continue');
 
-// Upper bound on model rounds per tick. Side-effect tools and not-applicable
-// retries each consume a round; a few rounds let the model recover within a tick
-// (e.g. answer a mission, then choose an action).
+// Tool retries per tick.
 const MAX_ROUNDS = 4;
 
-// The target of the last go_to we committed, kept so that once the agent arrives
-// we can tell the (stateless-per-tick) model it has reached that cell, instead of
-// it forgetting and re-routing to the same place.
+// Last committed go_to target, used to tell the model when it arrived.
 /** @type {Position|null} */
 let _lastGoToTarget = null;
-// Set for one tick when the agent has just reached its last go_to target; shown
-// to the model in buildUserContent so it knows that move is done.
+// One-tick arrival note shown to the model.
 let _reachedNote = '';
 
 const INTENTION_TOOLS = [
@@ -173,7 +147,8 @@ const INTENTION_TOOLS = [
                     },
                     multiplier: {
                         type: 'number',
-                        description: 'Reward multiplier applied when delivering exactly `size` parcels.',
+                        description:
+                            'Reward multiplier applied when delivering exactly `size` parcels.',
                     },
                 },
                 required: ['size', 'multiplier'],
@@ -291,8 +266,14 @@ const INTENTION_TOOLS = [
                         enum: ['go_to'],
                         description: 'The task to delegate to the peer.',
                     },
-                    x: { type: 'integer', description: 'Target x coordinate (required for go_to).' },
-                    y: { type: 'integer', description: 'Target y coordinate (required for go_to).' },
+                    x: {
+                        type: 'integer',
+                        description: 'Target x coordinate (required for go_to).',
+                    },
+                    y: {
+                        type: 'integer',
+                        description: 'Target y coordinate (required for go_to).',
+                    },
                     pauseAfter: {
                         type: 'boolean',
                         description:
@@ -309,7 +290,7 @@ const INTENTION_TOOLS = [
 // Local implementations
 //
 // Each builder receives the parsed args plus the current position. Action tools
-// return an Intention or null (not applicable → the model is asked again).
+// return an Intention or null. Null asks the model again.
 // Side-effect tools mutate memory and return CONTINUE (or a wait when nothing
 // changed, to avoid the model repeating an impossible action at temperature 0).
 
@@ -347,7 +328,7 @@ const TOOL_IMPL = {
         if (!target) return null;
 
         // Stacking rule: refuse to deliver on a delivery tile until carrying the
-        // required number of parcels — unless we are already at the carry cap or no
+        // required number of parcels, unless we are already at the carry cap or no
         // more parcels are reachable, so the agent never gets stuck holding a partial
         // stack with nothing left to collect.
         const onDelivery = beliefs.deliveryTiles.some((t) => t.x === target.x && t.y === target.y);
@@ -362,7 +343,12 @@ const TOOL_IMPL = {
                 const cap = beliefs.config.MAX_PARCELS ?? 1;
                 const bestTarget = getBestStackTarget(cap);
                 const carrying = beliefs.me.carrying.length;
-                if (bestTarget !== null && carrying < bestTarget && carrying < cap && hasReachableFreeParcel(me)) {
+                if (
+                    bestTarget !== null &&
+                    carrying < bestTarget &&
+                    carrying < cap &&
+                    hasReachableFreeParcel(me)
+                ) {
                     return null;
                 }
             }
@@ -484,7 +470,9 @@ const TOOL_IMPL = {
                 return createIntention('wait', null, null, 0);
             }
             const pauseAfter = !!args?.pauseAfter;
-            sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'go_to', x, y, pauseAfter }).catch(() => {});
+            sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'go_to', x, y, pauseAfter }).catch(
+                () => {}
+            );
             console.log(`[intentionAgent] command_peer go_to (${x},${y}) pauseAfter=${pauseAfter}`);
         }
         return CONTINUE;
@@ -550,9 +538,7 @@ function chooseBestDeliveryTile(me) {
 }
 
 /**
- * Finds the nearest walkable, reachable tile to a requested (possibly wall /
- * off-map) target. Candidates are scanned closest-first and the first with a
- * real path from `me` is returned.
+ * Snaps a requested target to a nearby reachable tile.
  *
  * @param {Position} me
  * @param {number} x
@@ -577,7 +563,7 @@ function nearestReachableWalkable(me, x, y) {
 }
 
 /**
- * Returns the mission at `index`, or null if the index is out of range.
+ * Reads a mission by index.
  *
  * @param {unknown} index
  * @returns {{text: string, from: string|null, ts: number}|null}
@@ -589,8 +575,7 @@ function missionAt(index) {
 }
 
 /**
- * Removes the mission at `index`. Returns true if one was removed. The reason is
- * logged so it is always clear WHY a mission was dropped.
+ * Removes a mission and logs why.
  *
  * @param {unknown} index
  * @param {unknown} [reason]
@@ -609,15 +594,7 @@ function removeMission(index, reason) {
 }
 
 /**
- * Deterministic handler for the handoff-bonus mission.
- *
- * The server broadcasts a chat message explaining the +200 bonus for cross-agent
- * pickup+delivery. This is a passive game rule — no action is required because the
- * BDI already incorporates the bonus into handoff scoring. We resolve any matching
- * mission immediately so the LLM never sees it (at temperature=0 it misclassifies
- * it as "negative reward" or junk, which is harmless but confusing).
- *
- * Returns an Intention (from the BDI) when a match is found, null to fall through.
+ * Handles the passive +200 handoff-bonus rule without calling the model.
  *
  * @param {{ x: number, y: number }} me
  * @returns {import('../shared/types.js').Intention|null}
@@ -633,23 +610,14 @@ function handleHandoffBonusMission(me) {
     beliefs.me.handoffBonusActive = true;
     sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'handoff_bonus_active' }).catch(() => {});
     removeMission(idx, 'handled by BDI handoff scoring — +200 bonus now active');
-    console.log('[intentionAgent] Handoff bonus mission resolved; +200 bonus activated in BDI scoring and notified peer');
+    console.log(
+        '[intentionAgent] Handoff bonus mission resolved; +200 bonus activated in BDI scoring and notified peer'
+    );
     return llmMemory.missions.length === 0 ? getBestIntention() : null;
 }
 
 /**
- * Deterministic handler for the STOP/GO ("red light / green light") game.
- *
- * The LLM at temperature=0 misclassifies short keyword messages ("red light",
- * "green light") as junk. This function runs BEFORE the LLM call and handles
- * the pattern with a simple regex, making the game reliable.
- *
- * STOP trigger: message contains "red light" OR ("odd row/numbered" + "wait")
- * GO   trigger: message contains "green light" but NOT "red light" (to exclude
- *               the challenge message that says "red light, green light game"),
- *               or a simple go/resume/start keyword when a STOP is pending.
- *
- * Returns an Intention when a signal is found, null to fall through to the LLM.
+ * Regex handler for the red-light / green-light mission.
  *
  * @param {{ x: number, y: number }} me
  * @returns {import('../shared/types.js').Intention|null}
@@ -663,8 +631,7 @@ function handleStopGoGame(me) {
             (/odd[\s-]*(row|numbered)/i.test(m.text) && /wait/i.test(m.text))
     );
 
-    // GO matches green-light-only messages, or simple resume keywords when STOP is pending.
-    // Explicitly excludes the challenge message which contains both "red light" and "green light".
+    // Avoid matching the initial challenge text that contains both colors.
     const goIdx = llmMemory.missions.findIndex(
         (m, i) =>
             i !== stopIdx &&
@@ -689,14 +656,12 @@ function handleStopGoGame(me) {
         const myX = Math.round(me.x);
 
         if (isOdd(myY)) {
-            // Already frozen on an odd row — stay put.
+            // Already frozen on an odd row, stay put.
             return createIntention('wait', null, null, 0);
         }
 
         // Choose the nearest odd row for self, skipping peer-occupied cells.
-        const selfCandidates = [myY + 1, myY - 1].filter(
-            (y) => isOdd(y) && isWalkable(myX, y)
-        );
+        const selfCandidates = [myY + 1, myY - 1].filter((y) => isOdd(y) && isWalkable(myX, y));
         const myOddY =
             selfCandidates.find(
                 (y) =>
@@ -783,7 +748,7 @@ Handle ONE mission per tick: pick the single tool that satisfies it, then resolv
           If otherAgents is non-empty: A = otherAgents[0].
             A_odd_y = A.y+1 if walkable else A.y-1.
             call command_peer(action='go_to', x=A.x, y=A_odd_y, pauseAfter=true).
-            NOTE: A.x ≠ me.x in general — A will go to its own nearest odd row, you go to yours.
+            Important: A.x may differ from me.x; A goes to its nearest odd row, you go to yours.
         Step C — move yourself: go_to(x=me.x, y=my_odd_y). This is your return action. DO NOT resolve.
 
   When you see a GO mission:
@@ -904,9 +869,7 @@ function buildUserContent(me) {
 }
 
 /**
- * Asks the model for the best next intention. It calls one tool per round; for a
- * side-effect tool or a not-applicable action we feed the outcome back and let it
- * choose again (up to MAX_ROUNDS) so it never loops on an impossible action.
+ * Asks the model for one actionable intention.
  *
  * @returns {Promise<Intention>}
  */
@@ -915,28 +878,20 @@ export async function generateBestIntention() {
         return createIntention('wait', null, null, 0);
     }
 
-    // No special mission to interpret: hand control to the deterministic BDI, which
-    // plays standard collect/deliver/explore and already honours the LLM's rules
-    // (stack size, pickup cap, delivery multipliers, blacklist). The LLM is not
-    // called at all on these ticks.
+    // No mission: deterministic BDI handles the normal game loop.
     if (llmMemory.missions.length === 0) return getBestIntention();
 
     const me = { x: beliefs.me.x, y: beliefs.me.y };
 
-    // Deterministic STOP/GO game handler — runs before the LLM to avoid
-    // unreliable keyword classification at temperature=0.
+    // Handle fragile keyword missions before the model sees them.
     const stopGoResult = handleStopGoGame(me);
     if (stopGoResult !== null) return stopGoResult;
 
-    // Deterministic handoff-bonus handler: the server sends a mission explaining the
-    // +200 bonus for cross-agent pickup+delivery. The BDI already accounts for this
-    // (evaluateHandoff includes the bonus, deliveryValue adds it for handoff parcels).
-    // Resolve immediately so the LLM never sees it and can't misclassify it.
+    // Passive score-rule mission.
     const handoffBonusResult = handleHandoffBonusMission(me);
     if (handoffBonusResult !== null) return handoffBonusResult;
 
-    // If the agent has arrived at the cell its last go_to was heading to, note it
-    // so the model is told the move completed (it has no memory across ticks).
+    // Tell the model when the previous go_to completed.
     _reachedNote = '';
     if (_lastGoToTarget && me.x === _lastGoToTarget.x && me.y === _lastGoToTarget.y) {
         _reachedNote = `You have completed your last go_to and are now at (${me.x},${me.y}).`;
@@ -959,8 +914,7 @@ export async function generateBestIntention() {
                     tool_choice: 'required',
                     temperature: 0,
                 },
-                // Fail fast inside the per-tick loop: a stale decision is worse than
-                // skipping this tick, and retries would stack the timeout.
+                // Avoid stacking retries inside the per-tick loop.
                 { maxRetries: 0 }
             );
             message = response.choices?.[0]?.message;
@@ -981,7 +935,7 @@ export async function generateBestIntention() {
             `[intentionAgent] LLM call: ${toolCall.function?.name}(${toolCall.function?.arguments ?? ''})`
         );
 
-        // Keep the assistant turn so the tool result that follows is correlated.
+        // Keep the assistant turn next to its tool result.
         messages.push(message);
 
         const name = toolCall.function?.name;
@@ -1001,10 +955,7 @@ export async function generateBestIntention() {
 
         const result = impl(args, me);
 
-        // Side-effect tool (rule installed / message sent / mission resolved /
-        // freeze toggled). If that cleared the last mission, the LLM is done — hand
-        // control straight back to the BDI for the actual movement this same tick.
-        // Otherwise re-state the updated situation and let the model continue.
+        // After side effects, either return to BDI or ask for the next tool.
         if (result === CONTINUE) {
             if (llmMemory.missions.length === 0) {
                 console.log('[intentionAgent] missions handled, returning control to BDI');
@@ -1019,10 +970,25 @@ export async function generateBestIntention() {
             console.log(`[intentionAgent] Tool "${name}" not applicable, asking again`);
             let hint = '';
             if (name === 'go_to') {
-                const lastX = (() => { try { return JSON.parse(toolCall.function?.arguments ?? '{}').x; } catch { return null; } })();
-                const lastY = (() => { try { return JSON.parse(toolCall.function?.arguments ?? '{}').y; } catch { return null; } })();
+                const lastX = (() => {
+                    try {
+                        return JSON.parse(toolCall.function?.arguments ?? '{}').x;
+                    } catch {
+                        return null;
+                    }
+                })();
+                const lastY = (() => {
+                    try {
+                        return JSON.parse(toolCall.function?.arguments ?? '{}').y;
+                    } catch {
+                        return null;
+                    }
+                })();
                 const peerThere = [...beliefs.agents.values()].some(
-                    (a) => !a.stale && Math.round(a.x) === Number(lastX) && Math.round(a.y) === Number(lastY)
+                    (a) =>
+                        !a.stale &&
+                        Math.round(a.x) === Number(lastX) &&
+                        Math.round(a.y) === Number(lastY)
                 );
                 if (peerThere) {
                     hint = ` Cell (${lastX},${lastY}) is permanently occupied by the peer agent. Choose a DIFFERENT odd-row cell — try (${Number(lastX) - 1},${Number(lastY)}), (${Number(lastX) + 1},${Number(lastY)}), or (${Number(lastX)},${Number(lastY) + 2}).`;

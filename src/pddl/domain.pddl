@@ -1,12 +1,7 @@
-; Deliveroo domain: grid navigation with parcel pickup/delivery and Sokoban-style
-; crate pushing. Designed for a single agent (no opponents in the problem).
+; Deliveroo domain for single-agent navigation, pickup, delivery and crate pushing.
 ;
-; Crates are movable obstacles: the agent cannot walk through a crate, it can only
-; push it by stepping into it, which shoves the crate one tile further in the same
-; direction. A push is only legal when the tile beyond the crate is free AND is a
-; crate-slot (map type 5 sliding tile or 5! spawner) — crates can only rest on those.
-; To clear a crate out of the way the planner therefore has to walk *around* it first
-; so it approaches from the correct side; this falls out naturally from the preconditions.
+; Crates are movable obstacles. The agent pushes a crate by stepping into it.
+; A push is legal only when the tile beyond the crate is free and is a crate slot.
 
 (define (domain deliveroo)
     (:requirements :strips :negative-preconditions)
@@ -28,7 +23,7 @@
         (down ?from ?to)
     )
 
-    ; --- plain moves: only onto a tile that is not blocked by a crate ---
+    ; Plain moves, only onto tiles not blocked by crates.
     (:action move-right
         :parameters (?me ?from ?to)
         :precondition (and (me ?me) (at ?me ?from) (right ?from ?to) (not (occupied ?to)))
@@ -50,8 +45,8 @@
         :effect (and (at ?me ?to) (not (at ?me ?from)))
     )
 
-    ; --- pushes: agent at ?from steps into the crate on ?mid, shoving it to ?to ---
-    ; ?to must exist (the edge ?mid->?to is only present for real tiles) and be free.
+    ; Pushes move the crate from ?mid to ?to.
+    ; ?to must exist and be free.
     (:action push-right
         :parameters (?me ?c ?from ?mid ?to)
         :precondition (and (me ?me) (at ?me ?from)

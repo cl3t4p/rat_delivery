@@ -1,4 +1,4 @@
-/** @typedef {import('../../shared/types.js').Position} Position*/
+/** @typedef {import('../../shared/types.js').Position} Position */
 
 import { beliefs } from '../beliefs.js';
 import {
@@ -12,16 +12,15 @@ import { getMapBounds as _getMapBounds, onBoundsInvalidated } from '../../shared
 import { _zoneConstraint, _isInZone } from './zone.js';
 import { llmMemory } from '../../llm/llmAgent.js';
 
-/** @type {Map<string, boolean>} Cache for spawner-to-delivery reachability (static per map load). */
+/** @type {Map<string, boolean>} */
 const _spawnerDeliveryCache = new Map();
 onBoundsInvalidated(() => _spawnerDeliveryCache.clear());
 
-// Normalised spawner spread (0 = single tight blob, 1 = across the whole map)
-// above which we roam regardless of spawn rate. Tunable via SPAWNER_SPARSE_THRESHOLD.
+// Spawner spread threshold for roaming.
 const SPARSE_THRESHOLD = Number(process.env.SPAWNER_SPARSE_THRESHOLD) || 0.25;
 
 /**
- * Finds the spawner tile nearest to the current position.
+ * Finds the nearest spawner by Manhattan distance.
  *
  * @param {Position} myPos - Current position.
  * @returns {Position|null}
@@ -31,7 +30,7 @@ export function findNearestSpawnerTile(myPos) {
 }
 
 /**
- * Find the first reachable spawner
+ * Finds the first reachable spawner.
  *
  * @param {Position} myPos
  * @param {Position[]} spawners
@@ -46,7 +45,7 @@ export function findFirstReachableSpawnerTile(myPos, spawners) {
 }
 
 /**
- * Finds the reachable spawner with the shortest real path.
+ * Finds the reachable spawner with the shortest path.
  *
  * @param {Position} myPos
  * @param {Position[]} [spawners]
@@ -70,7 +69,7 @@ export function findBestReachableSpawnerTile(myPos, spawners = findSpawnerTiles(
 }
 
 /**
- * Returns every spawner tile on the known map.
+ * Returns every known spawner tile.
  *
  * @returns {Position[]}
  */
@@ -85,7 +84,7 @@ export function findSpawnerTiles() {
 }
 
 /**
- * Finds the delivery tile nearest to the current position.
+ * Finds the nearest known delivery tile.
  *
  * @param {Position} myPos - Current position.
  * @returns {Position|null}
@@ -95,16 +94,13 @@ export function findNearestDeliveryTile(myPos) {
 }
 
 /**
- * Finds the reachable delivery tile with the shortest real path.
- *
- * Falls back to Manhattan nearest if A* cannot find any reachable delivery.
+ * Finds the best delivery tile from the current delivery rules.
  *
  * @param {Position} myPos - Current or candidate position.
  * @returns {Position|null}
  */
 export function findBestDeliveryTile(myPos) {
-    // Honour the LLM's per-tile delivery-reward rule: never use a 0/negative tile,
-    // and prefer the tile with the highest multiplier when a bonus tile exists.
+    // Per-tile reward rules can disable or prioritize delivery tiles.
     const rewards = llmMemory.deliveryRewards;
     const hasRule = rewards && Object.keys(rewards).length > 0;
 
@@ -118,8 +114,7 @@ export function findBestDeliveryTile(myPos) {
     });
     if (allowed.length === 0) return null;
 
-    // If a bonus multiplier (>1) is in play, go to the highest-multiplier reachable
-    // tile; otherwise just the nearest reachable allowed tile.
+    // Bonus tiles win when they are reachable.
     const mults = [...new Set(allowed.map((t) => rewards[`${t.x},${t.y}`] ?? 1))].sort(
         (a, b) => b - a
     );
@@ -138,8 +133,7 @@ export function findBestDeliveryTile(myPos) {
 }
 
 /**
- * Best delivery tile (with its distance), preferring tiles not currently occupied
- * by another agent and falling back to any reachable delivery tile.
+ * Finds the best reachable delivery tile and distance.
  *
  * @param {Position} pos
  * @returns {{tile: Position, dist: number} | null}
@@ -150,7 +144,7 @@ export function findBestDeliveryPathFrom(pos) {
 }
 
 /**
- * True if another (non-stale, non-self) agent currently occupies the given tile.
+ * Checks whether another active agent occupies a tile.
  *
  * @param {Position} tile
  * @returns {boolean}
@@ -172,8 +166,7 @@ export function isTileOccupiedByOtherAgent(tile) {
 }
 
 /**
- * Finds the nearest walkable, non-delivery tile inside the active zone constraint.
- * Used to step off a delivery tile when waiting as a relay receiver.
+ * Finds the nearest non-delivery tile inside the active zone.
  *
  * @param {Position} myPos
  * @returns {Position|null}
@@ -197,9 +190,10 @@ export function findNearestNonDeliveryInZoneTile(myPos) {
 }
 
 /**
+ * Measures normalized spawner spread.
  *
  * @param {Position[]} spawners
- * @returns {Number}
+ * @returns {number}
  */
 export function spawnerSparseness(spawners = findSpawnerTiles()) {
     if (spawners.length < 2) return 0;
@@ -214,8 +208,7 @@ export function spawnerSparseness(spawners = findSpawnerTiles()) {
 }
 
 export function spawnerCanReachDelivery(spawner) {
-    // A spawner that cannot reach any delivery tile creates parcels the agent
-    // cannot score. Do not camp or patrol these pockets.
+    // Do not camp spawners that cannot score.
     if (beliefs.deliveryTiles.length === 0) return false;
     const key = `${spawner.x},${spawner.y}`;
     if (_spawnerDeliveryCache.has(key)) return _spawnerDeliveryCache.get(key);
@@ -227,8 +220,7 @@ export function spawnerCanReachDelivery(spawner) {
 }
 
 /**
- * Decides whether the spawners are spread out enough to warrant roaming rather
- * than camping, taking the agent's view range into account.
+ * Checks whether spawners are spread enough to prefer roaming.
  *
  * @param {Position[]} [spawners] - Precomputed spawners (defaults to all).
  * @returns {boolean}
@@ -239,29 +231,23 @@ export function spawnersAreSparse(spawners = findSpawnerTiles()) {
     const view = beliefs.config?.OBSERVATION_DISTANCE ?? null;
 
     const { cx, cy } = centroid(spawners);
-    // Cluster radius: farthest spawner from the centroid.
+    // Cluster radius from the centroid.
     const radius = Math.max(...spawners.map((p) => Math.abs(p.x - cx) + Math.abs(p.y - cy)));
 
     if (view !== null && view > 0) {
-        // Finite vision: sparse if one vantage point can't watch them all.
+        // Finite vision: sparse if one vantage point cannot see them all.
         return radius > view;
     }
-    // Unlimited vision: fall back to normalized geometric spread.
+    // Unlimited vision: use normalized spread.
     return spawnerSparseness(spawners) >= SPARSE_THRESHOLD;
 }
 
 /**
- * Measures how spread out the spawner tiles are, normalised to [0, 1].
+ * Returns the mean x/y of a non-empty point list.
  *
- * 0 means every spawner sits on (essentially) one tile — a single blob;
- * values near 1 mean they are scattered across the whole map. Computed as the
- * mean distance of spawners from their centroid, divided by the map's
- * half-extent so it is comparable across map sizes.
- *
- * @param {Position[]} [spawners] - Precomputed spawners (defaults to all).
- * @returns {number}
+ * @param {Position[]} points
+ * @returns {{cx: number, cy: number}}
  */
-/** Mean (x, y) of a set of points. Caller guarantees a non-empty list. */
 function centroid(points) {
     const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
     const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
