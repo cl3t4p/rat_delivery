@@ -10,7 +10,6 @@
 import { beliefs, decayParcelsReward, clockEventToMs } from '../bdi/beliefs.js';
 import { getCurrentIntention } from '../bdi/intentionRevision.js';
 
-
 const BLACKLIST_LOG = (process.env.BLACKLIST_LOG ?? '')
     .split(',')
     .map((s) => s.trim())

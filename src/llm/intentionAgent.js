@@ -124,12 +124,7 @@ const INTENTION_TOOLS = [
         type: 'function',
         function: {
             name: 'send_message',
-            description:
-                'Send a chat message to the other agent (or broadcast it). Use this to ' +
-                'coordinate, or to ANSWER a question asked by a special mission (e.g. ' +
-                '"What is the capital of Italy?" -> "Rome", or "Calculate 5*5" -> "25"). ' +
-                'When answering a mission, ALSO pass resolveIndex so the mission is ' +
-                'removed in the same step and not answered again.',
+            description: 'Send a chat message to the other agent (or broadcast it).',
             parameters: {
                 type: 'object',
                 properties: {
@@ -249,7 +244,11 @@ const TOOL_IMPL = {
 
     /** @returns {Intention | typeof CONTINUE} */
     resolve_mission(args) {
+        console.log(
+            `[intentionAgent] resolved_mission idx:${args?.index} (${llmMemory.missions[args?.index]})`
+        );
         const removed = removeMission(args?.index);
+
         // Mission list changed: deliberate again for a real intention. If the
         // index was invalid (nothing removed), don't loop on an unchanged prompt.
         return removed ? CONTINUE : createIntention('wait', null, null, 0);
@@ -302,8 +301,8 @@ function removeMission(index) {
 const SYSTEM_PROMPT = `
 You are the deliberation module of an autonomous agent playing Deliveroo.js, a grid
 delivery game. Each tick you receive the current map and world state and must choose
-the single best next action. You act ONLY by calling exactly one tool. Never write
-prose, reasoning, or commentary — your entire reply is one tool call.
+the single best next action. You act ONLY by calling exactly one of the tools provided
+to you. Never write prose, reasoning, or commentary — your entire reply is one tool call.
 
 THE MAP
 Each cell has a type:
@@ -338,51 +337,44 @@ DECISION ORDER (top to bottom; pick the first that applies)
 1. CONSTRAINTS. Every action must respect the listed Constraints. They override all.
 2. OPERATOR OBJECTIVE. If an "Operator objective" is given, treat it as the human's
    standing intent and let it steer your choices (within constraints).
-3. SPECIAL MISSIONS. If the "Special missions" list is non-empty, handle a worthwhile
-   mission before ordinary parcel work (see MISSIONS).
-4. DELIVER. If you carry one or more parcels, default to go_deliver. Top up with
-   go_pick_up first ONLY when you are below maxCarry AND some free parcel has a high
-   score and lies close to you or roughly on the way to a delivery tile. At maxCarry,
-   always go_deliver.
-5. PICK UP. If carrying nothing (or topping up), call go_pick_up on the freeParcel with
-   the HIGHEST score. Never pick a parcel with score <= 0 or estimatedRewardAtDelivery
-   == 0 — it pays nothing by the time you arrive.
-6. EXPLORE. If nothing is worth carrying and nothing worth picking up, call explore to
-   search spawners for new parcels.
-7. REPOSITION. Use go_to(x, y) only for deliberate positioning — camp a spawner, move
-   toward a parcel-rich or contested area — aimed at a known, walkable cell. For plain
-   "find parcels", prefer explore.
+3. SPECIAL MISSIONS. If the "Special missions" list is non-empty, handle the worthwhile
+   ones before ordinary parcel work, and clear the bad ones (see MISSIONS).
+4. DELIVER. If you carry one or more parcels, default to delivering. Top up with a
+   pickup first ONLY when you are below maxCarry AND some free parcel has a high score
+   and lies close to you or roughly on the way to a delivery tile. At maxCarry, always
+   deliver.
+5. PICK UP. If carrying nothing (or topping up), pick up the freeParcel with the HIGHEST
+   score. Never pick a parcel with score <= 0 or estimatedRewardAtDelivery == 0 — it
+   pays nothing by the time you arrive.
+6. EXPLORE. If nothing is worth carrying and nothing worth picking up, explore spawners
+   for new parcels.
+7. REPOSITION. Move to a specific walkable cell only for deliberate positioning — camp a
+   spawner, move toward a parcel-rich or contested area. For plain "find parcels",
+   prefer exploring.
 8. WAIT only when literally nothing else is possible; it wastes the tick.
 
-TOOLS
-- go_pick_up(parcelId): collect a specific free parcel.
-- go_deliver(): take everything you carry to the nearest delivery tile.
-- explore(): go to the nearest spawner to look for parcels.
-- go_to(x, y): walk to a walkable cell without picking up or delivering.
-- wait(): stay put (last resort).
-- send_message(text, to?, resolveIndex?): chat the teammate ("peer") or broadcast
-  ("all"); also used to ANSWER a mission question.
-- resolve_mission(index): remove a finished, satisfied, or junk mission.
-
 MISSIONS
-Each is "index: text" — a natural-language task, usually worth points. Read it, do any
-arithmetic yourself (e.g. "x = 4*2" -> 8), then:
-- QUESTION ("What is the capital of Italy?", "Calculate 5*5"): free points. Call
-  send_message ONCE with the answer AND resolveIndex set to that mission's index, so it
-  is answered and removed together. Never answer twice; never resolve without answering.
-- COORDINATE / AREA ("Move to (4,7)", "go to the bottom-left"): pick the target cell and
-  call go_to(x, y). Keep calling go_to over successive ticks until you arrive; only THEN
-  call resolve_mission(index). Do not resolve before you are standing on it.
-- PARCEL mission: use go_pick_up / go_deliver as the task requires.
-- JUNK or not worth it (reward <= 0, nonsense): call resolve_mission alone, without acting.
-A mission you already stand on / have already satisfied is done — resolve it.
+Each is "index: text" — a natural-language task with an associated point value that may
+be POSITIVE or NEGATIVE. Before doing anything, judge whether the mission is worth it:
+estimate its net value as its reward minus the effort to complete it.
+- A mission whose reward is NEGATIVE or zero, whose payoff does not justify the detour,
+  or whose text is junk/nonsense: clear it with resolve_mission and do NOT carry it out.
+  Completing a negative mission LOSES points — never act on one, just remove it.
+- Only pursue missions with a clearly worthwhile positive payoff.
+- A mission you already stand on / have already satisfied is done — resolve it.
+- IF a mission is not worthwhile clear it with resolve_mission
+- resolve_mission you need to call it 1 time
 
 HARD RULES
 - Output exactly one tool call. No text.
 - Never target a wall, a "." cell, a blacklisted cell, or an off-map coordinate.
-- Never go_pick_up a parcel with score <= 0 or estimatedRewardAtDelivery == 0.
+- Never pick up a parcel with score <= 0 or estimatedRewardAtDelivery == 0.
+- Never act on a mission with negative or zero reward — resolve it instead.
 - Never answer the same mission twice, and never resolve a question without answering.
-- Prefer acting over waiting; wait is the last resort.`.trim();
+- Prefer acting over waiting; wait is the last resort.
+- ALWAYS AND ALWAYS RESOLVE A MISSION FIRST MISSIONS SHOULD BE CLEAR
+
+`.trim();
 
 /**
  * Renders the known static map as an ASCII grid for the prompt.
