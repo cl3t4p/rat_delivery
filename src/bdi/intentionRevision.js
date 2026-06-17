@@ -14,6 +14,8 @@ import {
     requestTakeover,
     evaluateHandoff,
     proposeHandoff,
+    isPeerGoToLocked,
+    clearPeerGoToLock,
 } from './coordination.js';
 
 import { USE_PDDL } from './helper.js';
@@ -135,6 +137,7 @@ export function notifyIntentionDone() {
         currentIntention.status = 'done';
         broadcastIntention(currentIntention);
     }
+    clearPeerGoToLock();
     currentIntention = null;
 
     // After each pickup, check if a handoff to the peer is beneficial. The
@@ -409,7 +412,8 @@ export async function revise(force = false) {
             candidate.type === 'go_pick_up' &&
             (currentIntention.type === 'explore' ||
                 (currentIntention.type === 'go_to' && !currentIntention.parcelId)) &&
-            candidate.score > 0;
+            candidate.score > 0 &&
+            !isPeerGoToLocked();
 
         // Don't let a zero-score explore/roam interrupt an active pickup, even if
         // the pickup has a negative score. Explore targets are often the spawner the
@@ -501,6 +505,7 @@ function checkStuck() {
                 `for ${staleMs}ms (bestDist=${_stuckWatchdog.bestDist}), forcing re-deliberation`
         );
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
+        clearPeerGoToLock();
         if (currentIntention) {
             currentIntention.status = 'failed';
             broadcastIntention(currentIntention);

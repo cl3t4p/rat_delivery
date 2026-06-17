@@ -14,6 +14,20 @@ export function isPausedByPeer() {
     return _pausedByPeer;
 }
 
+// Flag set while a peer-commanded go_to is in progress; blocks deliberation
+// from replacing the forced intention with a pickup until the move is done.
+let _peerGoToLocked = false;
+
+/** Returns true while a peer-commanded go_to has not yet completed. */
+export function isPeerGoToLocked() {
+    return _peerGoToLocked;
+}
+
+/** Clears the peer go_to lock; called by intentionRevision on completion or stuck. */
+export function clearPeerGoToLock() {
+    _peerGoToLocked = false;
+}
+
 // Perpendicular directions to use when yielding right-of-way in a corridor
 const PERP_DIRS = {
     left: ['up', 'down'],
@@ -181,15 +195,24 @@ function handleParcelClaimed(envelope, senderId, senderName) {
     }
 }
 
-// Handles a pause/resume command from Agent B (level-3 peer control)
+// Handles a pause/resume/task command from Agent B (level-3 peer control)
 function handlePeerCommand(envelope, senderId) {
-    const { action } = envelope.payload ?? {};
+    const { action, x, y } = envelope.payload ?? {};
     if (action === 'pause') {
         _pausedByPeer = true;
         console.log(`[coord] Paused by peer command from ${senderId}`);
     } else if (action === 'resume') {
         _pausedByPeer = false;
         console.log(`[coord] Resumed by peer command from ${senderId}`);
+    } else if (action === 'go_to') {
+        const tx = Number(x);
+        const ty = Number(y);
+        if (Number.isInteger(tx) && Number.isInteger(ty)) {
+            console.log(`[coord] Peer commanded go_to (${tx},${ty})`);
+            _peerGoToLocked = true;
+            _forceIntention(createIntention('go_to', null, { x: tx, y: ty }, 0));
+            _requestRevision(true);
+        }
     }
 }
 

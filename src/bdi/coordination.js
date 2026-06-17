@@ -52,6 +52,8 @@ const defaults = {
     consumeYieldRequest: () => null,
     getPeers: () => [],
     isPausedByPeer: () => false,
+    isPeerGoToLocked: () => false,
+    clearPeerGoToLock: () => {},
     // notifier
     broadcastIntention: () => {},
     // communication. sendBroadcast must return a Promise: callers do
@@ -92,6 +94,8 @@ export const getNearestReachableZoneTarget = (...a) => impl.getNearestReachableZ
 export const consumeYieldRequest = (...a) => impl.consumeYieldRequest(...a);
 export const getPeers = (...a) => impl.getPeers(...a);
 export const isPausedByPeer = (...a) => impl.isPausedByPeer(...a);
+export const isPeerGoToLocked = (...a) => impl.isPeerGoToLocked(...a);
+export const clearPeerGoToLock = (...a) => impl.clearPeerGoToLock(...a);
 export const broadcastIntention = (...a) => impl.broadcastIntention(...a);
 export const sendBroadcast = (...a) => impl.sendBroadcast(...a);
 export const onMessage = (...a) => impl.onMessage(...a);

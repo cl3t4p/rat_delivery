@@ -189,10 +189,11 @@ export function getBestIntention() {
             const capacity = beliefs.config?.MAX_PARCELS ?? 1;
 
             // Stack rules: hold back for the best target size while more parcels are reachable.
+            let _stackTarget = null;
             if (llmMemory.stackRules.size > 0) {
-                const bestTarget = getBestStackTarget(capacity);
+                _stackTarget = getBestStackTarget(capacity);
                 const carrying = beliefs.me.carrying.length;
-                if (bestTarget !== null && carrying < bestTarget && carrying < capacity) {
+                if (_stackTarget !== null && carrying < _stackTarget && carrying < capacity) {
                     const pickUp = findBestPickUp(me, { log: false });
                     if (pickUp) return pickUp;
                 }
@@ -217,7 +218,11 @@ export function getBestIntention() {
             const target = findBestDeliveryTile(me);
 
             if (target) {
-                const pickUp = findBestPickUp(me, { log: false });
+                // Skip the detour if we've already reached the stack-rule target: picking up
+                // more would break the "exactly N" constraint and forfeit the bonus multiplier.
+                const _atStackTarget =
+                    _stackTarget !== null && beliefs.me.carrying.length >= _stackTarget;
+                const pickUp = _atStackTarget ? null : findBestPickUp(me, { log: false });
                 if (pickUp) {
                     const parcel = beliefs.parcels.get(pickUp.parcelId);
                     if (parcel) {
@@ -297,8 +302,12 @@ export function getBestIntention() {
     // otherwise leave us waiting on the spawner on top of the parcel).
     const mx = Math.round(me.x);
     const my = Math.round(me.y);
+    const _sameTilePickCap = llmMemory.maxPickupReward;
     for (const parcel of beliefs.parcels.values()) {
         if (parcel.carriedBy || parcel.reward <= 0) {
+            continue;
+        }
+        if (_sameTilePickCap != null && parcel.reward > _sameTilePickCap) {
             continue;
         }
         if (Math.round(parcel.x) !== mx || Math.round(parcel.y) !== my) {

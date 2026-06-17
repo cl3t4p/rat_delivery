@@ -23,6 +23,8 @@ import {
     consumeYieldRequest,
     getPeers,
     isPausedByPeer,
+    isPeerGoToLocked,
+    clearPeerGoToLock,
 } from './coordination/coordinator.js';
 import { broadcastIntention } from './notifier.js';
 import { sendBroadcast, onMessage } from './communication.js';
@@ -43,6 +45,8 @@ export function installMultiAgent() {
         consumeYieldRequest,
         getPeers,
         isPausedByPeer,
+        isPeerGoToLocked,
+        clearPeerGoToLock,
         broadcastIntention,
         sendBroadcast,
         onMessage,

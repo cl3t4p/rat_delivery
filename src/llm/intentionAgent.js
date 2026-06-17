@@ -36,6 +36,7 @@ import { createIntention, getBestIntention } from '../bdi/deliberation.js';
 import { findNearestDeliveryTile, findSpawnerTiles } from '../bdi/components/tilesearch.js';
 import { llmClient, llmMemory, notifyMissionsChanged, getStackMultiplier, getBestStackTarget } from './llmAgent.js';
 import { pickupValue, deliveryValue } from '../bdi/scoring.js';
+import { sendBroadcast, MSG_TYPE } from '../multi/communication.js';
 
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 
@@ -272,6 +273,29 @@ const INTENTION_TOOLS = [
             },
         },
     },
+    {
+        type: 'function',
+        function: {
+            name: 'command_peer',
+            description:
+                'Send a task command to the teammate agent (Agent A). Use this when the mission is ' +
+                'explicitly addressed to the other agent, not to you — e.g. "Agent A go to (x,y)". ' +
+                'DO NOT use go_to for these; use command_peer instead. Supported actions: go_to.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    action: {
+                        type: 'string',
+                        enum: ['go_to'],
+                        description: 'The task to delegate to the peer.',
+                    },
+                    x: { type: 'integer', description: 'Target x coordinate (required for go_to).' },
+                    y: { type: 'integer', description: 'Target y coordinate (required for go_to).' },
+                },
+                required: ['action', 'x', 'y'],
+            },
+        },
+    },
 ];
 
 // Local implementations
@@ -432,6 +456,21 @@ const TOOL_IMPL = {
         if (removeMission(args?.index, args?.reason)) return CONTINUE;
         return createIntention('wait', null, null, 0);
     },
+
+    /** @returns {typeof CONTINUE} */
+    command_peer(args) {
+        const action = args?.action;
+        if (action === 'go_to') {
+            const x = Number(args?.x);
+            const y = Number(args?.y);
+            if (!Number.isInteger(x) || !Number.isInteger(y)) {
+                return createIntention('wait', null, null, 0);
+            }
+            sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'go_to', x, y }).catch(() => {});
+            console.log(`[intentionAgent] command_peer go_to (${x},${y})`);
+        }
+        return CONTINUE;
+    },
 };
 
 /**
@@ -563,7 +602,8 @@ y=row (0=bottom; grid printed top=highest y). maxX/maxY = largest x/y on the map
 STATE: me; freeParcels; deliveryTiles; spawners; blacklist; world.maxCarry; plus the active rules.
 
 Handle ONE mission per tick: pick the single tool that satisfies it, then resolve_mission(index, reason).
-- "move to (x,y)" / go to a coordinate -> go_to(x,y). Evaluate math (e.g. 4*2) yourself. Resolve once there.
+- "Agent A go to (x,y)" / mission targeting Agent A (your teammate, NOT you) -> command_peer(action='go_to', x, y), then resolve.
+- "move to (x,y)" / go to a coordinate (targeting YOU) -> go_to(x,y). Evaluate math (e.g. 4*2) yourself. Resolve once there.
 - a question or calculation ("capital of Rome?", "25*25") -> send_message(answer, resolveIndex=index).
 - place/drop a parcel at a SPOT ("drop in the bottom left for 1000pts") -> if not carrying, go_pick_up
   first; once carrying, drop_at(x,y) at THAT spot — bottom-left=(0,0), bottom-right=(maxX,0),
