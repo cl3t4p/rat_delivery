@@ -10,6 +10,7 @@ import {
 } from '../helper.js';
 import { getMapBounds as _getMapBounds, onBoundsInvalidated } from '../../shared/zones.js';
 import { _zoneConstraint, _isInZone } from './zone.js';
+import { llmMemory } from '../../llm/llmAgent.js';
 
 /** @type {Map<string, boolean>} Cache for spawner-to-delivery reachability (static per map load). */
 const _spawnerDeliveryCache = new Map();
@@ -102,7 +103,38 @@ export function findNearestDeliveryTile(myPos) {
  * @returns {Position|null}
  */
 export function findBestDeliveryTile(myPos) {
-    return findBestDeliveryPathFrom(myPos)?.tile ?? findNearestDeliveryTile(myPos);
+    // Honour the LLM's per-tile delivery-reward rule: never use a 0/negative tile,
+    // and prefer the tile with the highest multiplier when a bonus tile exists.
+    const rewards = llmMemory.deliveryRewards;
+    const hasRule = rewards && Object.keys(rewards).length > 0;
+
+    if (!hasRule) {
+        return findBestDeliveryPathFrom(myPos)?.tile ?? findNearestDeliveryTile(myPos);
+    }
+
+    const allowed = beliefs.deliveryTiles.filter((t) => {
+        const m = rewards[`${t.x},${t.y}`];
+        return m == null || m > 0;
+    });
+    if (allowed.length === 0) return null;
+
+    // If a bonus multiplier (>1) is in play, go to the highest-multiplier reachable
+    // tile; otherwise just the nearest reachable allowed tile.
+    const mults = [...new Set(allowed.map((t) => rewards[`${t.x},${t.y}`] ?? 1))].sort(
+        (a, b) => b - a
+    );
+    if (mults[0] > 1) {
+        for (const m of mults) {
+            const group = allowed.filter((t) => (rewards[`${t.x},${t.y}`] ?? 1) === m);
+            const best = findBestReachable(myPos, group);
+            if (best) return best.tile;
+        }
+    }
+
+    return (
+        findBestReachable(myPos, allowed)?.tile ??
+        findBestReachableTile(myPos, allowed, { useManhattan: true })
+    );
 }
 
 /**

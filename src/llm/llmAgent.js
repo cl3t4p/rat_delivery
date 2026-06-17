@@ -3,13 +3,11 @@
  *
  * Infrastructure for the LLM-driven agent (agent B). Three responsibilities:
  *   1. Own the connection to the LLM server (OpenAI-compatible LiteLLM gateway).
- *   2. Hold the LLM memory: the operator objective, hard constraints, the queue
- *      of special missions received over the Deliveroo chat, the persistent
- *      strategy rules the model installs (level-2 missions), and the latest
+ *   2. Hold the LLM memory: the operator objective, the queue of special missions
+ *      received over the Deliveroo chat, the freeze flag, and the latest
  *      environment snapshot.
  *   3. Expose the low-level model call (`callLLM`) with a circuit breaker so a
- *      flaky model never blocks the agent — the BDI heuristic keeps playing
- *      meanwhile.
+ *      flaky model never blocks the planner.
  *
  * The per-tick deliberation (reading and acting on missions, choosing the next
  * intention) lives in intentionAgent.js; this module only stores state and talks
@@ -27,8 +25,10 @@ const apiKey = process.env.LITELLM_API_KEY;
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 const LLM_FAILURE_THRESHOLD = Number(process.env.LLM_FAILURE_THRESHOLD) || 3;
 const LLM_COOLDOWN_MS = Number(process.env.LLM_COOLDOWN_MS) || 120000;
-const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 7000;
-const LLM_MAX_RETRIES = Number(process.env.LLM_MAX_RETRIES) || 2;
+// The LLM is allowed to be slow: we'd rather wait for a good decision than skip
+// the tick. A generous timeout matters more than call frequency here.
+const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 60000;
+const LLM_MAX_RETRIES = Number(process.env.LLM_MAX_RETRIES) || 1;
 
 // Keep the prompt small: only the most recent missions are retained.
 const MAX_MISSIONS = 5;
@@ -47,7 +47,7 @@ let _lastUnavailableLog = 0;
 export { llmClient };
 
 /**
- * Initialises the LLM client. Must be called once, only by the LLM agent
+ * Initializes the LLM client. Must be called once, only by the LLM agent
  * (agent B / single-agent USE_LLM). Agent A never calls this, so it keeps the
  * LLM modules effectively unused.
  *
@@ -58,9 +58,7 @@ export function initLlmAgent(onObjectiveChange) {
     _onObjectiveChange = onObjectiveChange;
 
     if (!apiKey) {
-        console.warn(
-            '[llmAgent] LITELLM_API_KEY missing in .env — LLM disabled, heuristic fallback only'
-        );
+        console.warn('[llmAgent] LITELLM_API_KEY missing in .env — LLM disabled');
         return;
     }
 
@@ -76,32 +74,13 @@ export function initLlmAgent(onObjectiveChange) {
 // LLM memory
 
 /**
- * Persistent strategy rules the model installs while interpreting level-2
- * special missions. Unlike a one-off action, a rule stays active for the rest
- * of the match and reshapes ordinary pick-up / delivery behaviour. The
- * intention agent reads these every tick when building an intention.
- *
- * @typedef {Object} MissionRules
- * @property {number|null} deliverStackSize - Deliver exactly this many parcels
- *   per drop (e.g. "deliver stacks of exactly 3"). null = no constraint.
- * @property {Record<string, number>} deliveryTileMultipliers - Per delivery-tile
- *   reward multiplier keyed `"x,y"`. A value <= 0 marks a tile that scores
- *   nothing, so we never deliver there; > 1 marks a bonus tile to prefer.
- * @property {number|null} maxPickupReward - Never pick up a parcel whose reward
- *   exceeds this (e.g. "parcels with score > 10 give no reward"). null = no cap.
- * @property {{x: number, y: number}[]} avoidTiles - Tiles to never traverse
- *   (e.g. "do not go through (x,y)"); also blacklisted for pathfinding.
- */
-
-/**
  * Memory shared between the infrastructure here and the intention agent.
  *
  * - objective: standing operator intent in natural language (replaced wholesale).
- * - constraints: hard rules that must never be violated (accumulated, free text).
  * - missions: special missions received over the chat, stored verbatim with the
  *   id of the sender so an answer can be routed back. The LLM reads them, decides
  *   whether each is worth doing, acts, and clears them.
- * - rules: persistent level-2 strategy modifiers (see MissionRules).
+ * - paused: when true the agent is frozen — it only waits until resumed.
  * - environmentSnapshot: latest sensed world state (set by updateContext).
  * - sendMessage: wired by the entrypoint; sends a chat message to the peer or
  *   broadcasts. null in contexts with no chat channel.
@@ -109,17 +88,16 @@ export function initLlmAgent(onObjectiveChange) {
 export const llmMemory = {
     /** @type {string|null} */
     objective: null,
-    /** @type {string[]} */
-    constraints: [],
     /** @type {{text: string, from: string|null, ts: number}[]} */
     missions: [],
-    /** @type {MissionRules} */
-    rules: {
-        deliverStackSize: null,
-        deliveryTileMultipliers: {},
-        maxPickupReward: null,
-        avoidTiles: [],
-    },
+    /** @type {boolean} */
+    paused: false,
+    /** @type {number|null} - Require this many parcels before delivering (stacking). null = no rule. */
+    deliverStackSize: null,
+    /** @type {number|null} - Never pick up a parcel whose reward exceeds this. null = no cap. */
+    maxPickupReward: null,
+    /** @type {Record<string, number>} - Per delivery-tile reward multiplier keyed "x,y" (0 = never deliver there). */
+    deliveryRewards: {},
     /** @type {object|null} */
     environmentSnapshot: null,
     /** @type {((text: string, to?: 'peer'|'all') => void) | null} */
@@ -130,8 +108,8 @@ export const llmMemory = {
  * Records a special mission for the LLM to interpret on its next deliberation.
  *
  * Everything that arrives over the chat is stored verbatim — classification
- * (mission vs. constraint vs. junk) and all decisions are the model's job, done
- * with its tools in intentionAgent.js. We only sanitise and cap the queue here.
+ * (mission vs. junk) and all decisions are the model's job, done with its tools
+ * in intentionAgent.js. We only sanitise and cap the queue here.
  *
  * @param {string} text - Raw message text.
  * @param {string|null} [from] - Sender id, so a reply can be routed back to them.
@@ -230,7 +208,7 @@ function recordLlmSuccess() {
  * the breaker opens for LLM_COOLDOWN_MS, during which callers use their heuristic.
  *
  * @param {unknown} err
- * @param {string} context - Short label for the log (e.g. "Zone assignment").
+ * @param {string} context - Short label for the log (e.g. "LLM call").
  */
 function recordLlmFailure(err, context) {
     _llmFailures += 1;
@@ -239,8 +217,8 @@ function recordLlmFailure(err, context) {
     if (_llmFailures >= LLM_FAILURE_THRESHOLD) {
         _llmDisabledUntil = Date.now() + LLM_COOLDOWN_MS;
         console.log(
-            `[llmAgent] ${context} failed (${msg}); LLM unavailable, ` +
-                `heuristic fallback for ${Math.round(LLM_COOLDOWN_MS / 1000)}s`
+            `[llmAgent] ${context} failed (${msg}); LLM unavailable for ` +
+                `${Math.round(LLM_COOLDOWN_MS / 1000)}s`
         );
         return;
     }
@@ -250,7 +228,7 @@ function recordLlmFailure(err, context) {
         _lastUnavailableLog = now;
         console.log(
             `[llmAgent] ${context} failed (${msg}); ` +
-                `heuristic fallback active (${_llmFailures}/${LLM_FAILURE_THRESHOLD})`
+                `retrying (${_llmFailures}/${LLM_FAILURE_THRESHOLD})`
         );
     }
 }

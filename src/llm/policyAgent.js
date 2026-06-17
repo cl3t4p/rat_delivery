@@ -25,7 +25,6 @@ import {
     findBestDeliveryTile,
 } from '../bdi/components/tilesearch.js';
 import { llmMemory } from './llmAgent.js';
-import { buildStateSnapshot } from './intentionAgent.js';
 import { pickupValue, deliveryValue } from '../bdi/scoring.js';
 
 /** @typedef {import('../shared/types.js').Intention} Intention */

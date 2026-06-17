@@ -207,9 +207,6 @@ export async function startExecutor(socket) {
             lastIntention = intention;
             intention.status = 'active';
             broadcastIntention(intention);
-            // Stale failure counts from the previous intention could cause tiles that
-            // were only transiently blocked to be prematurely blacklisted if the agent
-            // navigates through them again under a different intention.
             failedMoves.clear();
         }
 
@@ -221,13 +218,11 @@ export async function startExecutor(socket) {
             case 'go_to':
             case 'go_pick_up':
             case 'go_deliver':
+            case 'drop':
                 await stepTowardsTarget(socket, intention);
                 continue;
             case 'go_handoff':
             case 'go_handoff_receive':
-                // Handoff execution lives in the multi layer; hand it the
-                // executor primitives it needs to walk and act (see runHandoff
-                // in multi/coordinator.js).
                 await runHandoff(socket, intention, { stepTowardsTarget, safeSocketAction });
                 continue;
         }
@@ -283,8 +278,7 @@ async function stepTowardsTarget(socket, intention) {
     const fyBefore = Math.round(beliefs.me.y);
 
     // If the next tile holds a crate, this step is a push: remember it so the local
-    // crate beliefs can be updated immediately after the move, before the next sensing
-    // event, keeping chained pushes and the next isStepValid check consistent.
+    // crate beliefs can be updated immediately after the move
     const delta = DIR_DELTA[dir];
     const crateKey =
         delta && beliefs.crates.has(`${fxBefore + delta.dx},${fyBefore + delta.dy}`)
@@ -622,7 +616,7 @@ async function finalize(socket, intention) {
         return;
     }
 
-    if (intention.type === 'go_deliver') {
+    if (intention.type === 'go_deliver' || intention.type === 'drop') {
         const dropped = await safeSocketAction('putdown', () => socket.emitPutdown());
         if (dropped === null) return;
         const cycleMs = _cycleStart ? Date.now() - _cycleStart : null;

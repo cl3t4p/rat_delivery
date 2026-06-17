@@ -6,6 +6,7 @@
  */
 
 import { beliefs, isWalkable } from './beliefs.js';
+import { llmMemory } from '../llm/llmAgent.js';
 import { shouldYieldParcel } from './coordination.js';
 import { deliveryValue, detourValue, estimatedRewardAtDelivery } from './scoring.js';
 import { aStar } from './pathfinding.js';
@@ -186,6 +187,16 @@ export function getBestIntention() {
         } else {
             // Maximum number of parcels the agent can carry.
             const capacity = beliefs.config?.MAX_PARCELS ?? 1;
+
+            // LLM stacking rule: keep collecting until the required stack size before
+            // delivering, as long as we can still carry more and a parcel is reachable.
+            const stack = llmMemory.deliverStackSize;
+            if (stack && stack > 1 && beliefs.me.carrying.length < stack) {
+                if (beliefs.me.carrying.length < capacity) {
+                    const pickUp = findBestPickUp(me, { log: false });
+                    if (pickUp) return pickUp;
+                }
+            }
 
             // If at full capacity, deliver immediately.
             if (beliefs.me.carrying.length >= capacity) {
@@ -598,6 +609,9 @@ export function findBestPickUp(myPos, options = {}) {
         if (parcel.carriedBy) continue; // Skip parcels that have already been picked up by another agent.
         if (parcel.reward <= 0) continue; // Skip parcels with no remaining reward.
         if (parcel.reward < minReward) continue;
+        // LLM pickup-cap rule: parcels above this reward give nothing, so skip them.
+        const pickCap = llmMemory.maxPickupReward;
+        if (pickCap != null && parcel.reward > pickCap) continue;
         if (shouldYieldParcel(parcel.id, myPos)) continue; // Peer claimed it and is closer.
 
         const parcelPos = { x: parcel.x, y: parcel.y };

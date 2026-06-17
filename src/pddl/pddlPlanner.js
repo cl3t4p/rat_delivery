@@ -262,7 +262,7 @@ function goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames
         const drops = beliefs.me.carrying.map((id) => `(not (carrying ${agentName} p_${id}))`);
         return drops.length === 1 ? drops[0] : `(and ${drops.join(' ')})`;
     }
-    if (intention.type === 'explore' || intention.type === 'go_to') {
+    if (intention.type === 'explore' || intention.type === 'go_to' || intention.type === 'drop') {
         const t = intention.targetPos;
         const tx = Math.round(t.x),
             ty = Math.round(t.y);

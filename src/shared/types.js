@@ -10,7 +10,7 @@
 
 /** @typedef {'left'|'right'|'top'|'bottom'|null} ZoneName */
 
-/** @typedef {'go_pick_up'|'go_deliver'|'explore'|'go_to'|'wait'|'go_handoff'|'go_handoff_receive'} IntentionType */
+/** @typedef {'go_pick_up'|'go_deliver'|'drop'|'explore'|'go_to'|'wait'|'go_handoff'|'go_handoff_receive'} IntentionType */
 
 /** @typedef {{ type: '0'|'1'|'2'|'3', delivery: boolean }} Tile */
 

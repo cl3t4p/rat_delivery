@@ -270,7 +270,8 @@ function isIntentionStillValid(intention) {
             return true;
         }
 
-        case 'go_deliver': {
+        case 'go_deliver':
+        case 'drop': {
             return beliefs.me.carrying.length > 0; // Valid only if i am carrying something
         }
 
