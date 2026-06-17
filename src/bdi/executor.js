@@ -23,6 +23,7 @@ import {
     sendBroadcast,
     consumeYieldRequest,
     getPeers,
+    isPausedByPeer,
     tryBlockedDeliveryHandoff,
     runHandoff,
 } from './coordination.js';
@@ -172,6 +173,12 @@ export async function startExecutor(socket) {
         }
 
         if (!meReady()) continue;
+
+        // Agent B can command this agent to pause via PEER_COMMAND message
+        if (isPausedByPeer()) {
+            await sleep(100);
+            continue;
+        }
 
         const holdRemaining = _yieldHoldUntil - Date.now();
         if (holdRemaining > 0) {

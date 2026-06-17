@@ -100,4 +100,4 @@ export {
     tryBlockedDeliveryHandoff,
     runHandoff,
 } from './handoff.js';
-export { consumeYieldRequest } from './messageHandlers.js';
+export { consumeYieldRequest, isPausedByPeer } from './messageHandlers.js';

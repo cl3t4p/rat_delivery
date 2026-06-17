@@ -6,6 +6,14 @@ import { touchPeer, isSelfMessage, state } from './peerState.js';
 import { runHeuristicZoneAssignment, getNearestReachableZoneTarget } from './zoneAssignment.js';
 import { handleHandoffRequest, DIR_DELTA_COORD } from './handoff.js';
 
+// Flag set when Agent B commands this agent to pause via PEER_COMMAND
+let _pausedByPeer = false;
+
+/** Returns true while Agent B has commanded this agent to pause. */
+export function isPausedByPeer() {
+    return _pausedByPeer;
+}
+
 // Perpendicular directions to use when yielding right-of-way in a corridor
 const PERP_DIRS = {
     left: ['up', 'down'],
@@ -49,6 +57,7 @@ export function initMessageHandlers({ getCurrentIntention, forceIntention, reque
     onMessage(MSG_TYPE.HANDOFF_REQUEST, handleHandoffRequest);
     onMessage(MSG_TYPE.BLOCKED_AT, handleBlockedAt);
     onMessage(MSG_TYPE.PARCEL_CLAIMED, handleParcelClaimed);
+    onMessage(MSG_TYPE.PEER_COMMAND, handlePeerCommand);
 }
 
 /**
@@ -169,6 +178,18 @@ function handleParcelClaimed(envelope, senderId, senderName) {
         current.status = 'failed';
         console.log(`[coord] Parcel ${parcelId} claimed by ${senderId}; abandoning local pickup`);
         _requestRevision(true);
+    }
+}
+
+// Handles a pause/resume command from Agent B (level-3 peer control)
+function handlePeerCommand(envelope, senderId) {
+    const { action } = envelope.payload ?? {};
+    if (action === 'pause') {
+        _pausedByPeer = true;
+        console.log(`[coord] Paused by peer command from ${senderId}`);
+    } else if (action === 'resume') {
+        _pausedByPeer = false;
+        console.log(`[coord] Resumed by peer command from ${senderId}`);
     }
 }
 

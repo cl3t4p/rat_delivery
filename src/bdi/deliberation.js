@@ -6,7 +6,7 @@
  */
 
 import { beliefs, isWalkable } from './beliefs.js';
-import { llmMemory } from '../llm/llmAgent.js';
+import { llmMemory, getStackMultiplier, getBestStackTarget } from '../llm/llmAgent.js';
 import { shouldYieldParcel } from './coordination.js';
 import { deliveryValue, detourValue, estimatedRewardAtDelivery } from './scoring.js';
 import { aStar } from './pathfinding.js';
@@ -188,11 +188,11 @@ export function getBestIntention() {
             // Maximum number of parcels the agent can carry.
             const capacity = beliefs.config?.MAX_PARCELS ?? 1;
 
-            // LLM stacking rule: keep collecting until the required stack size before
-            // delivering, as long as we can still carry more and a parcel is reachable.
-            const stack = llmMemory.deliverStackSize;
-            if (stack && stack > 1 && beliefs.me.carrying.length < stack) {
-                if (beliefs.me.carrying.length < capacity) {
+            // Stack rules: hold back for the best target size while more parcels are reachable.
+            if (llmMemory.stackRules.size > 0) {
+                const bestTarget = getBestStackTarget(capacity);
+                const carrying = beliefs.me.carrying.length;
+                if (bestTarget !== null && carrying < bestTarget && carrying < capacity) {
                     const pickUp = findBestPickUp(me, { log: false });
                     if (pickUp) return pickUp;
                 }
@@ -202,11 +202,12 @@ export function getBestIntention() {
             if (beliefs.me.carrying.length >= capacity) {
                 const target = findBestDeliveryTile(me);
                 if (target) {
-                    const dvScore = deliveryValue(beliefs.me.carrying, me, target);
+                    const stackMult = getStackMultiplier(beliefs.me.carrying.length);
+                    const dvScore = deliveryValue(beliefs.me.carrying, me, target) * stackMult;
                     printLog(
                         `deliver:${target.x},${target.y}`,
                         `[deliberation] go_deliver (full) to (${target.x},${target.y}) ` +
-                            `estimatedReward=${dvScore.toFixed(1)}`
+                            `estimatedReward=${dvScore.toFixed(1)} stackMult=${stackMult}`
                     );
                     return createIntention('go_deliver', null, target, dvScore);
                 }
@@ -269,11 +270,12 @@ export function getBestIntention() {
                     }
                 }
 
-                const dvScore = deliveryValue(beliefs.me.carrying, me, target);
+                const stackMult = getStackMultiplier(beliefs.me.carrying.length);
+                const dvScore = deliveryValue(beliefs.me.carrying, me, target) * stackMult;
                 printLog(
                     `deliver:${target.x},${target.y}`,
                     `[deliberation] go_deliver to (${target.x},${target.y}) ` +
-                        `estimatedReward=${dvScore.toFixed(1)}`
+                        `estimatedReward=${dvScore.toFixed(1)} stackMult=${stackMult}`
                 );
                 return createIntention('go_deliver', null, target, dvScore);
             }

@@ -90,10 +90,8 @@ export const llmMemory = {
     objective: null,
     /** @type {{text: string, from: string|null, ts: number}[]} */
     missions: [],
-    /** @type {boolean} */
-    paused: false,
-    /** @type {number|null} - Require this many parcels before delivering (stacking). null = no rule. */
-    deliverStackSize: null,
+    /** @type {Map<number, number>} - Stack rules: size → multiplier. Agent targets the most profitable size. */
+    stackRules: new Map(),
     /** @type {number|null} - Never pick up a parcel whose reward exceeds this. null = no cap. */
     maxPickupReward: null,
     /** @type {Record<string, number>} - Per delivery-tile reward multiplier keyed "x,y" (0 = never deliver there). */
@@ -102,6 +100,8 @@ export const llmMemory = {
     environmentSnapshot: null,
     /** @type {((text: string, to?: 'peer'|'all') => void) | null} */
     sendMessage: null,
+    /** @type {((prevLen: number, newLen: number) => void) | null} */
+    onMissionsChanged: null,
 };
 
 /**
@@ -125,9 +125,11 @@ export async function setObjective(text, from = null) {
         return;
     }
 
+    const prevLen = llmMemory.missions.length;
     llmMemory.missions.push({ text: sanitized, from, ts: Date.now() });
     if (llmMemory.missions.length > MAX_MISSIONS) llmMemory.missions.shift();
     console.log(`[llmAgent] Mission stored (total ${llmMemory.missions.length}): "${sanitized}"`);
+    notifyMissionsChanged(prevLen, llmMemory.missions.length);
 
     updateContext();
     if (_onObjectiveChange) await _onObjectiveChange();
@@ -150,6 +152,54 @@ export function updateContext() {
             .map((p) => ({ id: p.id, x: p.x, y: p.y, reward: p.reward })),
         deliveryTiles: beliefs.deliveryTiles,
     };
+}
+
+// Stack rule helpers — exported so deliberation.js and intentionAgent.js can use them
+
+/**
+ * Returns the reward multiplier for the given carrying count from stackRules.
+ * If no rule exists for that count, returns 1 (no change).
+ *
+ * @param {number} carryingCount
+ * @returns {number}
+ */
+export function getStackMultiplier(carryingCount) {
+    if (llmMemory.stackRules.size === 0) return 1;
+    return llmMemory.stackRules.get(carryingCount) ?? 1;
+}
+
+/**
+ * Returns the stack size with the highest expected value (size × multiplier)
+ * among rules that fit within `capacity`. Returns null when no rules are set.
+ *
+ * @param {number} [capacity=Infinity]
+ * @returns {number|null}
+ */
+export function getBestStackTarget(capacity = Infinity) {
+    let bestSize = null;
+    let bestValue = -Infinity;
+    for (const [size, mult] of llmMemory.stackRules) {
+        if (size > capacity) continue;
+        const v = size * mult;
+        if (v > bestValue) {
+            bestValue = v;
+            bestSize = size;
+        }
+    }
+    return bestSize;
+}
+
+/**
+ * Fires the onMissionsChanged hook when the missions list size changes.
+ * Called from setObjective (here) and removeMission (intentionAgent.js).
+ *
+ * @param {number} prevLen
+ * @param {number} newLen
+ */
+export function notifyMissionsChanged(prevLen, newLen) {
+    if (llmMemory.onMissionsChanged) {
+        llmMemory.onMissionsChanged(prevLen, newLen);
+    }
 }
 
 // Model call + circuit breaker

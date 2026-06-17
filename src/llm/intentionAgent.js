@@ -18,12 +18,8 @@
  *     specific tile for a mission. There is no explore tool — the LLM explores by
  *     calling go_to toward a spawner or an unexplored area itself.
  *
- *   FREEZE — pause_at(true) stops the agent completely, pause_at(false) resumes.
- *     While llmMemory.paused is true every chosen action is overridden with wait,
- *     so the agent only ever waits until told to resume.
- *
- *   PERSISTENT RULES (level-2 missions) — set_stack_size (deliver only in stacks
- *     of N), set_max_pickup (skip parcels above a reward), set_delivery_reward
+ *   PERSISTENT RULES (level-2 missions) — set_stack_rule (deliver in stacks of N
+ *     for a given reward multiplier), set_max_pickup (skip parcels above a reward), set_delivery_reward
  *     (per-tile delivery multiplier; 0 = never deliver there), blacklist_tile
  *     (never enter a cell). Each stays active for the match and reshapes the
  *     pick-up / deliver behaviour; the action tools honour them every tick.
@@ -38,7 +34,7 @@ import { beliefs, manhattanDistance, isWalkable, blacklistCell } from '../bdi/be
 import { costToReachPath } from '../bdi/helper.js';
 import { createIntention, getBestIntention } from '../bdi/deliberation.js';
 import { findNearestDeliveryTile, findSpawnerTiles } from '../bdi/components/tilesearch.js';
-import { llmClient, llmMemory } from './llmAgent.js';
+import { llmClient, llmMemory, notifyMissionsChanged, getStackMultiplier, getBestStackTarget } from './llmAgent.js';
 import { pickupValue, deliveryValue } from '../bdi/scoring.js';
 
 const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
@@ -81,19 +77,6 @@ const INTENTION_TOOLS = [
                 },
                 required: ['parcelId'],
             },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'deliver',
-            description:
-                'Deliver the carried parcels for score. Automatically walks to the BEST delivery ' +
-                'tile — the nearest one that gives the most (it honours per-tile reward rules and ' +
-                'never uses a 0-reward tile). Use this for normal scoring; you do NOT pick the tile. ' +
-                'Only valid while carrying. (Use drop_at only to PLACE a parcel on a specific tile ' +
-                'for a mission.)',
-            parameters: { type: 'object', properties: {} },
         },
     },
     {
@@ -155,27 +138,6 @@ const INTENTION_TOOLS = [
     {
         type: 'function',
         function: {
-            name: 'pause_at',
-            description:
-                'FREEZE or UNFREEZE the agent persistently. Call with paused=true to STOP completely ' +
-                '(e.g. "stop / freeze / halt until I say go"): the agent then only waits and does no ' +
-                'parcel work. Call with paused=false to RESUME (e.g. "greenlight / go / continue"). ' +
-                'While paused you may still answer missions and resume, but never move, pick up, or deliver.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    paused: {
-                        type: 'boolean',
-                        description: 'true to freeze the agent, false to resume it.',
-                    },
-                },
-                required: ['paused'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
             name: 'blacklist_tile',
             description:
                 'Permanently mark a cell (x,y) as off-limits: the agent will never walk through or ' +
@@ -195,21 +157,25 @@ const INTENTION_TOOLS = [
     {
         type: 'function',
         function: {
-            name: 'set_stack_size',
+            name: 'set_stack_rule',
             description:
-                'Install a stacking rule: the agent must carry at least N parcels before it is ' +
-                'allowed to deliver on a delivery tile. Use for missions/rules like "deliver only in ' +
-                'stacks of 3" or "carry multiple parcels before delivering". Pass size=N (N>=2 to set, ' +
-                '0 or 1 to clear the rule). It stays active for the rest of the match.',
+                'Install a stacking-reward rule: the agent must carry exactly `size` parcels before ' +
+                'delivering, and earns `multiplier`× the normal reward. Multiple rules accumulate — ' +
+                'e.g. size=4→2× and size=5→0.3× can both be active; the agent targets the most ' +
+                'profitable combination automatically. Stays active for the rest of the match.',
             parameters: {
                 type: 'object',
                 properties: {
                     size: {
                         type: 'integer',
-                        description: 'Required parcels per delivery (>=2 to set, 0/1 to clear).',
+                        description: 'Required parcel count (>=2).',
+                    },
+                    multiplier: {
+                        type: 'number',
+                        description: 'Reward multiplier applied when delivering exactly `size` parcels.',
                     },
                 },
-                required: ['size'],
+                required: ['size', 'multiplier'],
             },
         },
     },
@@ -332,24 +298,6 @@ const TOOL_IMPL = {
     },
 
     /** @returns {Intention|null} */
-    deliver(_args, me) {
-        if (beliefs.me.carrying.length === 0) return null;
-
-        // Stacking rule: hold out for a fuller stack while more parcels are reachable.
-        const stack = llmMemory.deliverStackSize;
-        if (stack && stack > 1) {
-            const carrying = beliefs.me.carrying.length;
-            const cap = beliefs.config.MAX_PARCELS ?? 1;
-            if (carrying < stack && carrying < cap && hasReachableFreeParcel(me)) return null;
-        }
-
-        const target = chooseBestDeliveryTile(me);
-        if (!target) return null;
-        const score = deliveryValue(beliefs.me.carrying, me, target);
-        return createIntention('go_deliver', null, target, score);
-    },
-
-    /** @returns {Intention|null} */
     drop_at(args, me) {
         if (beliefs.me.carrying.length === 0) return null;
 
@@ -376,15 +324,14 @@ const TOOL_IMPL = {
             const mult = llmMemory.deliveryRewards[`${target.x},${target.y}`];
             if (mult != null && mult <= 0) return null;
 
-            // Stacking rule: refuse to deliver until carrying the required number of
-            // parcels — unless at the carry cap or no more parcels are reachable, so the
-            // agent never gets stuck holding a partial stack with nothing left to collect.
-            const stack = llmMemory.deliverStackSize;
-            if (stack && stack > 1) {
-                const carrying = beliefs.me.carrying.length;
+            // Stack rules: refuse to deliver until the best target stack size is reached,
+            // unless at the carry cap or no more parcels are reachable.
+            if (llmMemory.stackRules.size > 0) {
                 const cap = beliefs.config.MAX_PARCELS ?? 1;
-                if (carrying < stack && carrying < cap && hasReachableFreeParcel(me)) {
-                    return null; // not a full stack yet and a pickup is still available
+                const bestTarget = getBestStackTarget(cap);
+                const carrying = beliefs.me.carrying.length;
+                if (bestTarget !== null && carrying < bestTarget && carrying < cap && hasReachableFreeParcel(me)) {
+                    return null;
                 }
             }
         }
@@ -411,13 +358,6 @@ const TOOL_IMPL = {
         return createIntention('wait', null, null, 0);
     },
 
-    /** @returns {typeof CONTINUE} */
-    pause_at(args) {
-        llmMemory.paused = Boolean(args?.paused);
-        console.log(`[intentionAgent] paused=${llmMemory.paused}`);
-        return CONTINUE;
-    },
-
     /** @returns {Intention | typeof CONTINUE} */
     blacklist_tile(args) {
         const x = Number(args?.x);
@@ -431,14 +371,13 @@ const TOOL_IMPL = {
     },
 
     /** @returns {typeof CONTINUE} */
-    set_stack_size(args) {
+    set_stack_rule(args) {
         const size = Number(args?.size);
-        if (Number.isInteger(size) && size >= 2) {
-            llmMemory.deliverStackSize = size;
-        } else {
-            llmMemory.deliverStackSize = null;
+        const multiplier = Number(args?.multiplier);
+        if (Number.isInteger(size) && size >= 2 && Number.isFinite(multiplier)) {
+            llmMemory.stackRules.set(size, multiplier);
+            console.log(`[intentionAgent] stackRule size=${size} multiplier=${multiplier}`);
         }
-        console.log(`[intentionAgent] deliverStackSize=${llmMemory.deliverStackSize}`);
         return CONTINUE;
     },
 
@@ -536,14 +475,15 @@ function hasReachableFreeParcel(me) {
  * @returns {Position|null}
  */
 function chooseBestDeliveryTile(me) {
+    const stackMult = getStackMultiplier(beliefs.me.carrying.length);
     let best = null;
     let bestScore = -Infinity;
     for (const tile of beliefs.deliveryTiles) {
-        let mult = llmMemory.deliveryRewards[`${tile.x},${tile.y}`];
-        if (mult == null) mult = 1;
-        if (mult <= 0) continue; // never deliver on a zero/negative tile
+        let tileMult = llmMemory.deliveryRewards[`${tile.x},${tile.y}`];
+        if (tileMult == null) tileMult = 1;
+        if (tileMult <= 0) continue; // never deliver on a zero/negative tile
         if (costToReachPath(me, tile) == null) continue; // unreachable
-        const value = deliveryValue(beliefs.me.carrying, me, tile) * mult;
+        const value = deliveryValue(beliefs.me.carrying, me, tile) * tileMult * stackMult;
         if (value > bestScore) {
             bestScore = value;
             best = { x: tile.x, y: tile.y };
@@ -602,10 +542,12 @@ function missionAt(index) {
 function removeMission(index, reason) {
     const i = Number(index);
     if (!Number.isInteger(i) || i < 0 || i >= llmMemory.missions.length) return false;
+    const prevLen = llmMemory.missions.length;
     const [removed] = llmMemory.missions.splice(i, 1);
     let why = String(reason ?? '').trim();
     if (!why) why = 'no reason given';
     console.log(`[intentionAgent] resolved mission: "${removed?.text ?? ''}" — reason: ${why}`);
+    notifyMissionsChanged(prevLen, llmMemory.missions.length);
     return true;
 }
 
@@ -627,16 +569,14 @@ Handle ONE mission per tick: pick the single tool that satisfies it, then resolv
   first; once carrying, drop_at(x,y) at THAT spot — bottom-left=(0,0), bottom-right=(maxX,0),
   top-left=(0,maxY), top-right=(maxX,maxY), "leftmost"=x=0. A wall corner auto-snaps to the nearest
   cell, so just pass the corner. Resolve only AFTER the drop.
-- "deliver only in stacks of N" -> set_stack_size(N), then resolve.
+- "deliver stacks of N for Kx" / "N parcels gives Kx" -> set_stack_rule(N, K), then resolve. Rules accumulate; agent picks the best target.
 - "parcels with score/reward above N give no reward" -> set_max_pickup(N), then resolve.
 - "delivering in (x,y) gives Kx / 0 pts" -> set_delivery_reward(x,y,K) (0 = never deliver there), then resolve.
 - "never go through / avoid tile (x,y)" -> blacklist_tile(x,y), then resolve.
-- "stop/freeze until I say go" -> pause_at(true); "greenlight/go/continue" -> pause_at(false).
-- coordination ("both agents near (x,y) and wait", "red light green light") -> send_message(to:'peer')
-  to coordinate, pause_at to wait/resume.
+- coordination ("both agents near (x,y) and wait") -> send_message(to:'peer') to coordinate.
 - negative/zero reward, or junk -> resolve_mission and nothing else.
 
-set_stack_size, set_max_pickup, set_delivery_reward and blacklist_tile are INSTANT, free rule
+set_stack_rule, set_max_pickup, set_delivery_reward and blacklist_tile are INSTANT, free rule
 installs — just call the tool, then resolve. Never resolve a positive mission before you finish it;
 never answer the same mission twice; never target a wall/blacklisted/off-map cell.
 `.trim();
@@ -705,8 +645,7 @@ function buildStateSnapshot(me) {
             const [x, y] = k.split(',').map(Number);
             return { x, y };
         }),
-        paused: llmMemory.paused,
-        deliverStackSize: llmMemory.deliverStackSize,
+        stackRules: Object.fromEntries(llmMemory.stackRules),
         maxPickupReward: llmMemory.maxPickupReward,
         deliveryRewards: llmMemory.deliveryRewards,
         world: {
@@ -725,13 +664,6 @@ function buildStateSnapshot(me) {
 function buildUserContent(me) {
     const snapshot = buildStateSnapshot(me);
 
-    let pausedBlock = '';
-    if (llmMemory.paused) {
-        pausedBlock =
-            'PAUSED: you are frozen. Only wait, answer missions, or call pause_at(false) to resume ' +
-            'when told to greenlight/go/continue. Never move, pick up, or deliver.\n\n';
-    }
-
     let reachedBlock = '';
     if (_reachedNote) reachedBlock = `${_reachedNote}\n\n`;
 
@@ -746,7 +678,6 @@ function buildUserContent(me) {
 
     return (
         reachedBlock +
-        pausedBlock +
         missionBlock +
         objectiveBlock +
         `Map (legend in the system prompt):\n${buildGridMap()}\n\n` +
@@ -765,9 +696,6 @@ export async function generateBestIntention() {
     if (beliefs.me.x === null || beliefs.me.y === null) {
         return createIntention('wait', null, null, 0);
     }
-
-    // While frozen, the agent only ever waits, whatever else is going on.
-    if (llmMemory.paused) return createIntention('wait', null, null, 0);
 
     // No special mission to interpret: hand control to the deterministic BDI, which
     // plays standard collect/deliver/explore and already honours the LLM's rules
@@ -862,14 +790,14 @@ export async function generateBestIntention() {
             let hint = '';
             if (name === 'drop_at' && beliefs.me.carrying.length === 0) {
                 hint = ' You are not carrying any parcel — go_pick_up one first, then retry.';
-            } else if (
-                name === 'drop_at' &&
-                llmMemory.deliverStackSize &&
-                beliefs.me.carrying.length < llmMemory.deliverStackSize
-            ) {
-                hint =
-                    ` The stacking rule requires ${llmMemory.deliverStackSize} parcels before delivering and you ` +
-                    `carry ${beliefs.me.carrying.length} — go_pick_up more parcels first.`;
+            } else if (name === 'drop_at' && llmMemory.stackRules.size > 0) {
+                const cap = beliefs.config.MAX_PARCELS ?? 1;
+                const bestTarget = getBestStackTarget(cap);
+                if (bestTarget !== null && beliefs.me.carrying.length < bestTarget) {
+                    hint =
+                        ` The stacking rule requires ${bestTarget} parcels before delivering and you ` +
+                        `carry ${beliefs.me.carrying.length} — go_pick_up more parcels first.`;
+                }
             }
             feedToolResult(
                 messages,
@@ -879,12 +807,6 @@ export async function generateBestIntention() {
                     `mission just because a tool failed.${hint}`
             );
             continue;
-        }
-
-        // While frozen the agent only ever waits, whatever action the model picked.
-        if (llmMemory.paused && result.type !== 'wait') {
-            console.log(`[intentionAgent] paused: overriding ${name} with wait`);
-            return createIntention('wait', null, null, 0);
         }
 
         // Remember a go_to target so we can confirm arrival next tick; any other

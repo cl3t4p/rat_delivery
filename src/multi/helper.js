@@ -22,6 +22,7 @@ import {
     getNearestReachableZoneTarget,
     consumeYieldRequest,
     getPeers,
+    isPausedByPeer,
 } from './coordination/coordinator.js';
 import { broadcastIntention } from './notifier.js';
 import { sendBroadcast, onMessage } from './communication.js';
@@ -41,6 +42,7 @@ export function installMultiAgent() {
         getNearestReachableZoneTarget,
         consumeYieldRequest,
         getPeers,
+        isPausedByPeer,
         broadcastIntention,
         sendBroadcast,
         onMessage,

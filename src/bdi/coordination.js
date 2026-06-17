@@ -32,6 +32,7 @@ export const MSG_TYPE = Object.freeze({
     HANDOFF_RESPONSE: 'handoff_response',
     BLOCKED_AT: 'blocked_at',
     PARCEL_CLAIMED: 'parcel_claimed',
+    PEER_COMMAND: 'peer_command',
 });
 
 // Single-agent defaults. Overridden by installMultiAgent() in multi mode.
@@ -50,6 +51,7 @@ const defaults = {
     getNearestReachableZoneTarget: () => null,
     consumeYieldRequest: () => null,
     getPeers: () => [],
+    isPausedByPeer: () => false,
     // notifier
     broadcastIntention: () => {},
     // communication. sendBroadcast must return a Promise: callers do
@@ -89,6 +91,7 @@ export const runHandoff = (...a) => impl.runHandoff(...a);
 export const getNearestReachableZoneTarget = (...a) => impl.getNearestReachableZoneTarget(...a);
 export const consumeYieldRequest = (...a) => impl.consumeYieldRequest(...a);
 export const getPeers = (...a) => impl.getPeers(...a);
+export const isPausedByPeer = (...a) => impl.isPausedByPeer(...a);
 export const broadcastIntention = (...a) => impl.broadcastIntention(...a);
 export const sendBroadcast = (...a) => impl.sendBroadcast(...a);
 export const onMessage = (...a) => impl.onMessage(...a);

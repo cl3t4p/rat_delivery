@@ -107,6 +107,26 @@ export function startMultiAgent({ role, token }) {
                 console.log(`[${tag}] sendMessage failed: ${err?.message ?? err}`)
             );
         };
+
+        // Auto-pause peer when a mission arrives; resume when the queue empties.
+        let _peerPaused = false;
+        llmMemory.onMissionsChanged = (prevLen, newLen) => {
+            const peers = getPeers();
+            if (peers.length === 0) return;
+            if (prevLen === 0 && newLen > 0 && !_peerPaused) {
+                _peerPaused = true;
+                sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'pause' }).catch((err) =>
+                    console.log(`[${tag}] PEER_COMMAND pause failed: ${err?.message ?? err}`)
+                );
+                console.log(`[${tag}] Mission arrived — pausing peer`);
+            } else if (newLen === 0 && _peerPaused) {
+                _peerPaused = false;
+                sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'resume' }).catch((err) =>
+                    console.log(`[${tag}] PEER_COMMAND resume failed: ${err?.message ?? err}`)
+                );
+                console.log(`[${tag}] Missions cleared — resuming peer`);
+            }
+        };
     }
 
     const logState = makeLogState(`state_${role}`);
