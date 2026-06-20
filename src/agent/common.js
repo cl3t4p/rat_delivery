@@ -44,6 +44,7 @@ export function applyConfig(tag, config) {
     );
     beliefs.config.OBSERVATION_DISTANCE = config?.GAME?.player?.observation_distance ?? null;
     beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
+    beliefs.config.MS_PER_STEP = config?.GAME?.player?.movement_duration ?? 500;
 
     console.log(`[${tag}] Config:`, beliefs.config);
     console.log(`[${tag}] Decay interval: ${beliefs.config.PARCEL_DECADING_INTERVAL}ms`);

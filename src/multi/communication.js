@@ -12,7 +12,6 @@ import { getPeers } from './coordination/peerState.js';
 
 // Re-exported here for the multi-agent modules.
 export { MSG_TYPE } from '../bdi/coordination.js';
-import { MSG_TYPE } from '../bdi/coordination.js';
 
 const KNOWN_TYPES = new Set(Object.values(MSG_TYPE));
 

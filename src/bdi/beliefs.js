@@ -81,28 +81,11 @@ export function updateMap(tiles) {
  * @param {import('@unitn-asa/deliveroo-js-sdk').IOAgent} data
  */
 export function updateMe(data) {
-    const prevX = beliefs.me.x;
-    const prevY = beliefs.me.y;
-    const now = Date.now();
-
     beliefs.me.id = data.id;
     beliefs.me.name = data.name;
     beliefs.me.x = data.x;
     beliefs.me.y = data.y;
     beliefs.me.score = data.score;
-
-    // Keep a rough moving average for decay estimates.
-    if (prevX !== null && prevY !== null) {
-        const moved = Math.abs(data.x - prevX) + Math.abs(data.y - prevY);
-        if (Math.round(moved) === 1) {
-            const elapsed = now - (beliefs.config._lastMoveTime ?? now);
-            if (elapsed > 0 && elapsed < 5000) {
-                const prev = beliefs.config.MS_PER_STEP ?? 500;
-                beliefs.config.MS_PER_STEP = prev * 0.8 + elapsed * 0.2;
-            }
-            beliefs.config._lastMoveTime = now;
-        }
-    }
 }
 
 /**
