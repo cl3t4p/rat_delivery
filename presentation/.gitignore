@@ -1,0 +1,5 @@
+node_modules/
+dist/
+
+# Lockfile (pnpm-lock.yaml) and pnpm-workspace.yaml are intentionally committed:
+# pinning resolved versions + integrity hashes is a supply-chain safeguard.

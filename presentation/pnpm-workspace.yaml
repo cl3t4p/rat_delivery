@@ -1,0 +1,4 @@
+# Security: pnpm blocks dependency install/build scripts by default.
+# Only esbuild (the build engine behind Vite) is explicitly allowed to run them.
+allowBuilds:
+  esbuild: true
