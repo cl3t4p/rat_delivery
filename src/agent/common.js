@@ -35,16 +35,22 @@ export function installTimestampedConsole() {
     console.error = (...a) => _error(ts(), ...a);
 }
 
-/** Applies the server config to beliefs.config. */
+/**
+ * Applies the server config to beliefs.config.
+ * @param {string} tag - Log tag identifying the agent.
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').IOConfig} config
+ * @throws {Error} 
+ */
 export function applyConfig(tag, config) {
-    beliefs.config.PARCEL_DECADING_INTERVAL =
-        clockEventToMs(config?.GAME?.parcels?.decaying_event) ?? null;
-    beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(
-        config?.GAME?.parcels?.generation_event
-    );
-    beliefs.config.OBSERVATION_DISTANCE = config?.GAME?.player?.observation_distance ?? null;
-    beliefs.config.MAX_PARCELS = config?.GAME?.player?.capacity ?? 1;
-    beliefs.config.MS_PER_STEP = config?.GAME?.player?.movement_duration ?? 500;
+    const game = config?.GAME;
+    if (!game?.player) throw new Error(`[${tag}] Missing config.GAME.player`);
+    if (!game?.parcels) throw new Error(`[${tag}] Missing config.GAME.parcels`);
+
+    beliefs.config.PARCEL_DECADING_INTERVAL = clockEventToMs(game.parcels.decaying_event);
+    beliefs.config.PARCEL_GENERATION_INTERVAL = clockEventToMs(game.parcels.generation_event);
+    beliefs.config.OBSERVATION_DISTANCE = game.player.observation_distance;
+    beliefs.config.MAX_PARCELS = game.player.capacity;
+    beliefs.config.MS_PER_STEP = game.player.movement_duration;
 
     console.log(`[${tag}] Config:`, beliefs.config);
 }

@@ -27,16 +27,16 @@ export const beliefs = {
         score: 0,
         carrying: [],
         handoffReceivedParcels: new Set(), // Parcels received via handoff.
-        handoffBonusActive: false, // Server announced the +200 bonus rule.
+        handoffBonusActive: false, // Server announced handoff bonus rule.
     },
     deliveryTiles: [],
     crates: new Map(),
     blacklist: new Set(), // Permanent "x,y" blocked cells.
     temporaryBlacklist: new Map(), // "x,y" -> expiresAt.
     config: {
-        PARCEL_DECADING_INTERVAL: null,
+        PARCEL_DECADING_INTERVAL: 1000,
         PARCEL_GENERATION_INTERVAL: null,
-        OBSERVATION_DISTANCE: null,
+        OBSERVATION_DISTANCE: 5,
         MS_PER_STEP: 500,
         MAX_PARCELS: 1,
         PARCEL_FORGET_MS: 5000,

@@ -75,9 +75,12 @@ export function startSingleAgent({ tag = 'single', token } = {}) {
         logState();
     });
 
-    socket.onConfig((config) => applyConfig(tag, config));
+    socket.onConfig((config) => {
+        applyConfig(tag, config)
+        startDecayLoop(beliefs.config.PARCEL_DECADING_INTERVAL);
+    });
 
-    startDecayLoop();
+
     startExecutor(socket);
 
     // Keep timers moving even when sensing is quiet.

@@ -53,8 +53,14 @@
 
 /**
  * @typedef {Object} GameConfig
- * @property {number|null} PARCEL_DECADING_INTERVAL
- * @property {number|null} OBSERVATION_DISTANCE
+ * @property {number} PARCEL_DECADING_INTERVAL
+ * @property {number} PARCEL_GENERATION_INTERVAL
+ * @property {number} OBSERVATION_DISTANCE
+ * @property {number} MS_PER_STEP
+ * @property {number} MAX_PARCELS
+ * @property {number} PARCEL_FORGET_MS
+ * @property {number} AGENT_STALE_MS
+ * @property {number} CLAIMED_PARCEL_SUPPRESS_MS
  */
 
 /**
