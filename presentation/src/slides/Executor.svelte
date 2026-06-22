@@ -38,11 +38,3 @@
     </ul>
   </div>
 </div>
-
-<div class="card red-border" style="max-width: 920px; margin-top: 18px;">
-  <h3>Anticipated crate push</h3>
-  <p style="color: var(--text-muted);">
-    When the agent pushes a crate it <strong style="color:var(--heading)">updates beliefs locally</strong> before the next sensing arrives — so the
-    following step doesn't replan thinking the crate is still in its original position.
-  </p>
-</div>
