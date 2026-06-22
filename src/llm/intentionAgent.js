@@ -594,7 +594,7 @@ function removeMission(index, reason) {
 }
 
 /**
- * Handles the passive +200 handoff-bonus rule without calling the model.
+ * Handles the passive handoff-bonus rule without calling the model.
  *
  * @param {{ x: number, y: number }} me
  * @returns {import('../shared/types.js').Intention|null}
@@ -609,9 +609,9 @@ function handleHandoffBonusMission(me) {
 
     beliefs.me.handoffBonusActive = true;
     sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'handoff_bonus_active' }).catch(() => {});
-    removeMission(idx, 'handled by BDI handoff scoring — +200 bonus now active');
+    removeMission(idx, 'handled by BDI handoff scoring');
     console.log(
-        '[intentionAgent] Handoff bonus mission resolved; +200 bonus activated in BDI scoring and notified peer'
+        '[intentionAgent] Handoff bonus mission resolved;'
     );
     return llmMemory.missions.length === 0 ? getBestIntention() : null;
 }
@@ -991,18 +991,10 @@ export async function generateBestIntention() {
                         Math.round(a.y) === Number(lastY)
                 );
                 if (peerThere) {
-                    hint = ` Cell (${lastX},${lastY}) is permanently occupied by the peer agent. Choose a DIFFERENT odd-row cell — try (${Number(lastX) - 1},${Number(lastY)}), (${Number(lastX) + 1},${Number(lastY)}), or (${Number(lastX)},${Number(lastY) + 2}).`;
+                    hint = ` Cell (${lastX},${lastY}) is permanently occupied by the peer agent. Choose a DIFFERENT cell.`;
                 }
             } else if (name === 'drop_at' && beliefs.me.carrying.length === 0) {
                 hint = ' You are not carrying any parcel — go_pick_up one first, then retry.';
-            } else if (name === 'drop_at' && llmMemory.stackRules.size > 0) {
-                const cap = beliefs.config.MAX_PARCELS ?? 1;
-                const bestTarget = getBestStackTarget(cap);
-                if (bestTarget !== null && beliefs.me.carrying.length < bestTarget) {
-                    hint =
-                        ` The stacking rule requires ${bestTarget} parcels before delivering and you ` +
-                        `carry ${beliefs.me.carrying.length} — go_pick_up more parcels first.`;
-                }
             }
             feedToolResult(
                 messages,

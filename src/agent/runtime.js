@@ -76,9 +76,8 @@ export function startSingleAgent({ tag = 'single', token } = {}) {
     });
 
     socket.onConfig((config) => {
-        applyConfig(tag, config)
+        applyConfig(tag, config);
     });
-
 
     startExecutor(socket);
 

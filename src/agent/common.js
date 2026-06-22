@@ -4,7 +4,7 @@
  * Shared bootstrap utilities.
  */
 
-import { beliefs, decayParcelsReward, clockEventToMs } from '../bdi/beliefs.js';
+import { beliefs, decayParcelsReward } from '../bdi/beliefs.js';
 import { getCurrentIntention } from '../bdi/intentionRevision.js';
 
 export const REVISE_HEARTBEAT_MS = Number(process.env.REVISE_HEARTBEAT_MS) || 200;
@@ -36,10 +36,30 @@ export function installTimestampedConsole() {
 }
 
 /**
+ * Converts a Deliveroo clock-event value into milliseconds.
+ *
+ * @param {string|number|null|undefined} event
+ * @returns {number|null} interval in ms, or null if it is not a parseable duration.
+ */
+function clockEventToMs(event) {
+    if (event == null) return null;
+    if (typeof event === 'number') return Number.isFinite(event) ? event : null;
+    if (event === 'frame') return 40;
+
+    const match = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m)?\s*$/.exec(event);
+    if (!match) return null;
+
+    const value = parseFloat(match[1]);
+    const unit = match[2] ?? 's';
+    const factor = unit === 'ms' ? 1 : unit === 'm' ? 60_000 : 1000;
+    return value * factor;
+}
+
+/**
  * Applies the server config to beliefs.config.
  * @param {string} tag - Log tag identifying the agent.
  * @param {import('@unitn-asa/deliveroo-js-sdk/client').IOConfig} config
- * @throws {Error} 
+ * @throws {Error}
  */
 export function applyConfig(tag, config) {
     const game = config?.GAME;
@@ -52,13 +72,13 @@ export function applyConfig(tag, config) {
     beliefs.config.MAX_PARCELS = game.player.capacity;
     beliefs.config.MS_PER_STEP = game.player.movement_duration;
 
-    startDecayLoop(beliefs.config.PARCEL_DECADING_INTERVAL)
+    startDecayLoop(beliefs.config.PARCEL_DECADING_INTERVAL);
     console.log(`[${tag}] Config:`, beliefs.config);
 }
 
-/** Starts local parcel reward decay. 
+/** Starts local parcel reward decay.
  * @param {number} decay
-*/
+ */
 export function startDecayLoop(decay) {
     setInterval(() => decayParcelsReward(), decay);
 }
