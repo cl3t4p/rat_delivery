@@ -610,9 +610,7 @@ function handleHandoffBonusMission(me) {
     beliefs.me.handoffBonusActive = true;
     sendBroadcast(MSG_TYPE.PEER_COMMAND, { action: 'handoff_bonus_active' }).catch(() => {});
     removeMission(idx, 'handled by BDI handoff scoring');
-    console.log(
-        '[intentionAgent] Handoff bonus mission resolved;'
-    );
+    console.log('[intentionAgent] Handoff bonus mission resolved;');
     return llmMemory.missions.length === 0 ? getBestIntention() : null;
 }
 

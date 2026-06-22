@@ -241,7 +241,7 @@ function isIntentionStillValid(intention) {
 
         case 'go_handoff':
         case 'go_handoff_receive':
-            return intention.targetPos != null
+            return intention.targetPos != null;
 
         case 'explore':
         case 'wait':
@@ -357,7 +357,6 @@ export async function revise(force = false) {
             currentIntention.type === 'wait' &&
             Date.now() - currentIntention.createdAt > WAIT_MAX_AGE_MS;
 
-
         //I'm roaming, should I switch TO a pickup?"
         const pickupBeatsLowValueRoaming =
             candidate.type === 'go_pick_up' &&
@@ -433,7 +432,6 @@ function checkStuck() {
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
     }
-
 
     const dist = manhattanDistance({ x, y }, { x: tx, y: ty });
 
