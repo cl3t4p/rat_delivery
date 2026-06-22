@@ -4,18 +4,11 @@ import { beliefs } from '../beliefs.js';
 import {
     nearestByManhattan,
     costToReachPath,
-    manhattanDistance,
     findBestReachable,
     findBestReachableTile,
 } from '../helper.js';
 import { getMapBounds as _getMapBounds } from '../../shared/zones.js';
-import { _zoneConstraint, _isInZone } from './zone.js';
 import { llmMemory } from '../../llm/llmAgent.js';
-
-
-//Cache for 
-/** @type {Map<string, boolean>} */
-const _spawnerReachabilityCache = new Map();
 
 // Spawner spread threshold for roaming.
 const SPARSE_THRESHOLD = Number(process.env.SPAWNER_SPARSE_THRESHOLD) || 0.25;
@@ -167,30 +160,6 @@ export function isTileOccupiedByOtherAgent(tile) {
 }
 
 /**
- * Finds the nearest non-delivery tile inside the active zone.
- *
- * @param {Position} myPos
- * @returns {Position|null}
- */
-export function findNearestNonDeliveryInZoneTile(myPos) {
-    const deliverySet = new Set(beliefs.deliveryTiles.map((t) => `${t.x},${t.y}`));
-    let best = null;
-    let bestDist = Infinity;
-    for (const [key, tile] of beliefs.grid) {
-        if (tile.type === '0') continue;
-        if (deliverySet.has(key)) continue;
-        const [x, y] = key.split(',').map(Number);
-        if (_zoneConstraint && !_isInZone({ x, y })) continue;
-        const dist = manhattanDistance(myPos, { x, y });
-        if (dist > 0 && dist < bestDist) {
-            bestDist = dist;
-            best = { x, y };
-        }
-    }
-    return best;
-}
-
-/**
  * Measures normalized spawner spread.
  *
  * @param {Position[]} spawners
@@ -206,18 +175,6 @@ export function spawnerSparseness(spawners = findSpawnerTiles()) {
     const { maxX, maxY } = _getMapBounds(beliefs.grid);
     const halfExtent = (maxX + maxY) / 2 || 1;
     return Math.min(1, meanRadius / halfExtent);
-}
-
-export function spawnerCanReachDelivery(spawner) {
-    // Do not camp spawners that cannot score.
-    if (beliefs.deliveryTiles.length === 0) return false;
-    const key = `${spawner.x},${spawner.y}`;
-    if (_spawnerReachabilityCache.has(key)) return _spawnerReachabilityCache.get(key);
-    const result = beliefs.deliveryTiles.some(
-        (delivery) => costToReachPath(spawner, delivery,false) != null
-    );
-    _spawnerReachabilityCache.set(key, result);
-    return result;
 }
 
 /**
