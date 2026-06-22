@@ -296,7 +296,6 @@ export function getBestIntention() {
     if (pickUp) return pickUp;
 
     // No parcel target: explore or patrol spawners.
-
     _lastDelibLog = null; // reset dedup when entering exploration path
     const genMs = beliefs.config?.PARCEL_GENERATION_INTERVAL ?? null;
     const spawnsAreRare = genMs !== null && genMs >= SLOW_SPAWN_THRESHOLD_MS;
@@ -308,6 +307,7 @@ export function getBestIntention() {
         ? allSpawners.filter((s) => _isInZone(s))
         : allSpawners;
 
+    //No spawner near us go to half point and wait for peer
     if (_zoneConstraint && preferredSpawners.length === 0) {
         resetRoamTarget();
         // No spawner in this half: wait near the relay point.
@@ -339,10 +339,6 @@ export function getBestIntention() {
 
         // Drop stale patrol targets.
         if (_roamTarget && _roamTargetZone !== _zoneConstraint) {
-            resetRoamTarget();
-        }
-
-        if (_roamTarget && !spawners.some((s) => s.x === _roamTarget.x && s.y === _roamTarget.y)) {
             resetRoamTarget();
         }
 
@@ -386,10 +382,13 @@ export function getBestIntention() {
 
         // Advance the patrol pointer.
         if (onIdx !== -1) {
+            // step past the current spawner
             _roamIndex = nextReachableSpawnerIndex(mePos, spawners, onIdx + 1);
         } else if (_roamIndex !== null) {
+            // resume from saved index
             _roamIndex = nextReachableSpawnerIndex(mePos, spawners, _roamIndex);
         } else {
+            // start at nearest reachable
             const best = findBestReachable(mePos, spawners);
             _roamIndex = best ? spawners.indexOf(best.tile) : -1;
         }
@@ -550,6 +549,7 @@ export function findBestPickUp(myPos, options = {}) {
         if (parcel.reward <= 0) continue; // Skip parcels with no remaining reward.
         if (parcel.reward < minReward) continue;
         // LLM pickup-cap rule: parcels above this reward give nothing, so skip them.
+        //TODO Modify this so it's at delivery
         const pickCap = llmMemory.maxPickupReward;
         if (pickCap != null && parcel.reward > pickCap) continue;
         if (shouldYieldParcel(parcel.id, myPos)) continue; // Peer claimed it and is closer.
