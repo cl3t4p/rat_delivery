@@ -31,13 +31,13 @@
 </div>
 
 <div class="flow" style="margin-top: 22px;">
-  <div class="flow-box blue">Beliefs<small>map, parcels, agents</small></div>
+  <div class="flow-box blue">Beliefs<small>world model</small></div>
   <span class="flow-arrow">&#8594;</span>
-  <div class="flow-box blue">Deliberation<small>score one intention</small></div>
+  <div class="flow-box blue">Deliberation<small>select intention</small></div>
   <span class="flow-arrow">&#8594;</span>
-  <div class="flow-box blue">Revision<small>keep or replace</small></div>
+  <div class="flow-box blue">Intention Revision<small>validate or update the intention</small></div>
   <span class="flow-arrow">&#8594;</span>
-  <div class="flow-box blue">Executor<small>plan, move, recover</small></div>
+  <div class="flow-box blue">Executor<small>action</small></div>
 </div>
 
 <div class="card purple-border" style="max-width: 920px; margin-top: 20px;">
