@@ -80,10 +80,11 @@ export function manhattanDistance(a, b) {
  *
  * @param {Position} from
  * @param {Position} to
+ * @param {boolean} avoidAgents default to true
  * @returns {number | null}
  */
-export function costToReachPath(from, to) {
+export function costToReachPath(from, to,avoidAgents = true) {
     if (USE_PDDL) return manhattanDistance(from, to);
-    const result = aStar(from, to, { avoidAgents: true });
+    const result = aStar(from, to, { avoidAgents: avoidAgents });
     return result ? result.moves.length : null;
 }

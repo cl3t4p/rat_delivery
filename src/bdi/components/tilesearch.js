@@ -8,13 +8,14 @@ import {
     findBestReachable,
     findBestReachableTile,
 } from '../helper.js';
-import { getMapBounds as _getMapBounds, onBoundsInvalidated } from '../../shared/zones.js';
+import { getMapBounds as _getMapBounds } from '../../shared/zones.js';
 import { _zoneConstraint, _isInZone } from './zone.js';
 import { llmMemory } from '../../llm/llmAgent.js';
 
+
+//Cache for 
 /** @type {Map<string, boolean>} */
-const _spawnerDeliveryCache = new Map();
-onBoundsInvalidated(() => _spawnerDeliveryCache.clear());
+const _spawnerReachabilityCache = new Map();
 
 // Spawner spread threshold for roaming.
 const SPARSE_THRESHOLD = Number(process.env.SPAWNER_SPARSE_THRESHOLD) || 0.25;
@@ -211,11 +212,11 @@ export function spawnerCanReachDelivery(spawner) {
     // Do not camp spawners that cannot score.
     if (beliefs.deliveryTiles.length === 0) return false;
     const key = `${spawner.x},${spawner.y}`;
-    if (_spawnerDeliveryCache.has(key)) return _spawnerDeliveryCache.get(key);
+    if (_spawnerReachabilityCache.has(key)) return _spawnerReachabilityCache.get(key);
     const result = beliefs.deliveryTiles.some(
-        (delivery) => costToReachPath(spawner, delivery) != null
+        (delivery) => costToReachPath(spawner, delivery,false) != null
     );
-    _spawnerDeliveryCache.set(key, result);
+    _spawnerReachabilityCache.set(key, result);
     return result;
 }
 

@@ -52,6 +52,7 @@ export function applyConfig(tag, config) {
     beliefs.config.MAX_PARCELS = game.player.capacity;
     beliefs.config.MS_PER_STEP = game.player.movement_duration;
 
+    startDecayLoop(beliefs.config.PARCEL_DECADING_INTERVAL)
     console.log(`[${tag}] Config:`, beliefs.config);
 }
 

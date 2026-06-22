@@ -77,7 +77,6 @@ export function startSingleAgent({ tag = 'single', token } = {}) {
 
     socket.onConfig((config) => {
         applyConfig(tag, config)
-        startDecayLoop(beliefs.config.PARCEL_DECADING_INTERVAL);
     });
 
 

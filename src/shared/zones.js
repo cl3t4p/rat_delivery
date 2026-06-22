@@ -5,26 +5,6 @@
 /** @type {{ minX: number, maxX: number, minY: number, maxY: number } | null} */
 let _cachedBounds = null;
 
-/** @type {Array<() => void>} */
-const _boundsInvalidationListeners = [];
-
-/**
- * Registers a callback for map-bound invalidation.
- *
- * @param {() => void} fn
- */
-export function onBoundsInvalidated(fn) {
-    _boundsInvalidationListeners.push(fn);
-}
-
-/**
- * Invalidates cached map bounds.
- */
-export function invalidateBounds() {
-    _cachedBounds = null;
-    for (const fn of _boundsInvalidationListeners) fn();
-}
-
 /**
  * Returns cached map bounds.
  *

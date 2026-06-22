@@ -4,7 +4,6 @@
  * Shared belief store updated from sensing events.
  */
 
-import { invalidateBounds } from '../shared/zones.js';
 import { manhattanDistance } from './helper.js';
 
 /** @typedef {import('../shared/types.js').Tile}        Tile */
@@ -49,13 +48,12 @@ const claimedParcelSuppressions = new Map(); // parcelId -> expiresAt.
 const handoffDroppedParcels = new Map(); // Own handoff drops, parcelId -> expiresAt.
 
 /**
- * Replaces the known map tiles.
+ * Sets the known map tiles.
  *
  * @param {{ x: number, y: number, type: string }[]} tiles - Tiles received from the server.
  */
 export function updateMap(tiles) {
-    beliefs.grid.clear();
-    beliefs.deliveryTiles = [];
+    if (beliefs.grid.size > 0) return;
 
     for (const tile of tiles) {
         const key = `${tile.x},${tile.y}`;
@@ -68,8 +66,6 @@ export function updateMap(tiles) {
             beliefs.deliveryTiles.push({ x: tile.x, y: tile.y });
         }
     }
-
-    invalidateBounds();
 
     console.log(
         `[beliefs] Map: ${beliefs.grid.size} tiles, ${beliefs.deliveryTiles.length} delivery`

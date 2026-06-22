@@ -11,7 +11,8 @@ import { getPeers } from './coordination/peerState.js';
 /** @typedef {import('../shared/types.js').Envelope} Envelope */
 
 // Re-exported here for the multi-agent modules.
-export { MSG_TYPE } from '../bdi/coordination.js';
+import { MSG_TYPE } from '../bdi/coordination.js';
+export { MSG_TYPE };
 
 const KNOWN_TYPES = new Set(Object.values(MSG_TYPE));
 
