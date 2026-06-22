@@ -39,9 +39,9 @@
   </div>
 
   <div class="card red-border">
-    <h3>Circuit breaker</h3>
+    <h3>Feedback on errors with hints</h3>
     <ul>
-      <li>After <strong>3 consecutive failures</strong> the LLM is suspended for <strong>2 minutes</strong> and the agent falls back to the deterministic BDI</li>
+      <li>When an agent or tool call fails, the result is fed back with a <strong>targeted hint</strong> (e.g. cell occupied by the peer, not carrying any parcel) so the LLM retries with a different action instead of abandoning the mission</li>
     </ul>
   </div>
 </div>

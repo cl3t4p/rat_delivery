@@ -15,7 +15,7 @@ import {
     clearPeerGoToLock,
 } from './coordination.js';
 
-import { USE_PDDL } from './helper.js';
+import { USE_PDDL, manhattanDistance } from './helper.js';
 
 import { findNearestSpawnerTile } from './components/tilesearch.js';
 
@@ -241,7 +241,7 @@ function isIntentionStillValid(intention) {
 
         case 'go_handoff':
         case 'go_handoff_receive':
-            return !!intention.targetPos;
+            return intention.targetPos != null
 
         case 'explore':
         case 'wait':
@@ -280,7 +280,9 @@ export async function revise(force = false) {
         // Do not stack async deliberations.
         if (deliberationInFlight) return;
         deliberationInFlight = true;
-        const gen = ++_deliberationGen;
+
+        _deliberationGen++;
+        const gen = _deliberationGen;
         let rerun = false;
         try {
             const next = await deliberate();
@@ -328,7 +330,9 @@ export async function revise(force = false) {
         }
 
         // Heuristic mode: cheap comparison on every sensing tick.
+        // Best option available right now to weigh against the active intention.
         let candidate = getBestIntention();
+        // While walking a target-less go_to, prefer grabbing a parcel right next to us.
         if (
             currentIntention.type === 'go_to' &&
             !currentIntention.parcelId &&
@@ -345,14 +349,16 @@ export async function revise(force = false) {
         }
         if (!candidate) return;
 
-        // Wait has no progress to protect.
+        // Always try to never 'wait'
         const escapeWait = currentIntention.type === 'wait' && candidate.type !== 'wait';
 
-        // Safety net for stale waits.
+        // Wait has expired
         const waitExpired =
             currentIntention.type === 'wait' &&
             Date.now() - currentIntention.createdAt > WAIT_MAX_AGE_MS;
 
+
+        //I'm roaming, should I switch TO a pickup?"
         const pickupBeatsLowValueRoaming =
             candidate.type === 'go_pick_up' &&
             (currentIntention.type === 'explore' ||
@@ -360,19 +366,19 @@ export async function revise(force = false) {
             candidate.score > 0 &&
             !isPeerGoToLocked();
 
-        // Avoid oscillating between pickup and zero-score roaming.
+        //I'm heading to a pickup, should I drop it FOR roaming?
         const exploringBeatsPickup =
             currentIntention.type === 'go_pick_up' &&
             (candidate.type === 'explore' || (candidate.type === 'go_to' && !candidate.parcelId)) &&
             candidate.score <= 0;
 
-        // Handoffs are bilateral commitments; let them complete.
+        // is this a handoff in progress? then leave it alone
         const handoffProtected =
             currentIntention.type === 'go_handoff' ||
             currentIntention.type === 'go_handoff_receive' ||
             isHandoffRetryWait(currentIntention);
 
-        // Peer-commanded movement should not be score-preempted.
+        // did a peer command this move? then don't score over it
         const peerGoToProtected =
             currentIntention.type === 'go_to' && !currentIntention.parcelId && isPeerGoToLocked();
 
@@ -386,13 +392,14 @@ export async function revise(force = false) {
                 pickupBeatsLowValueRoaming ||
                 improvement > IMPROVEMENT_THRESHOLD)
         ) {
-            const reason = escapeWait
-                ? 'escaping wait'
-                : waitExpired
-                  ? 'wait expired'
-                  : pickupBeatsLowValueRoaming
-                    ? 'pickup beats roaming'
-                    : `+${improvement}`;
+            let reason = `+${improvement}`;
+            if (escapeWait) {
+                reason = 'escaping wait';
+            } else if (waitExpired) {
+                reason = 'wait expired';
+            } else if (pickupBeatsLowValueRoaming) {
+                reason = 'pickup beats roaming';
+            }
             console.log(`[intentionRevision] Replacing intention (${reason})`);
             currentIntention.status = 'failed';
             broadcastIntention(currentIntention);
@@ -407,6 +414,7 @@ export async function revise(force = false) {
 function checkStuck() {
     if (USE_PDDL) return;
     if (!currentIntention) {
+        //Reset watchdog
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
     }
@@ -420,15 +428,17 @@ function checkStuck() {
     const tx = currentIntention.targetPos.x;
     const ty = currentIntention.targetPos.y;
 
-    // Executor will finalize once already at target.
+    //Am I already on the target tile.
     if (x === tx && y === ty) {
         _stuckWatchdog = { bestDist: Infinity, lastImprovement: 0, targetX: null, targetY: null };
         return;
     }
 
-    const sameGoal = tx === _stuckWatchdog.targetX && ty === _stuckWatchdog.targetY;
-    const dist = Math.abs(x - tx) + Math.abs(y - ty);
 
+    const dist = manhattanDistance({ x, y }, { x: tx, y: ty });
+
+    //Check that the goal for the watchdog had not changed from the intention
+    const sameGoal = tx === _stuckWatchdog.targetX && ty === _stuckWatchdog.targetY;
     if (!sameGoal) {
         _stuckWatchdog = { bestDist: dist, lastImprovement: Date.now(), targetX: tx, targetY: ty };
         return;

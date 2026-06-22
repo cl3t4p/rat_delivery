@@ -48,9 +48,6 @@
   </div>
 </div>
 
-<p style="margin-top: 10px; color: var(--text-muted); font-size: 0.82rem;">
-  This is the deterministic single-agent core. Coordination (zones, yielding, handoff) and LLM rules layer on top of the same scored loop — covered in later slides.
-</p>
 
 <style>
   .delib-grid {
