@@ -80,6 +80,13 @@ let _socketHooksInstalled = false;
 let _everDisconnected = false;
 let _yieldHoldUntil = 0;
 
+/**
+ * Runs a socket action, catching errors. Returns null so the caller can retry.
+ *
+ * @param {string} label - Action name for error logs.
+ * @param {() => Promise<*>} action - Socket call to run.
+ * @returns {Promise<*>} The result, or null on failure.
+ */
 async function safeSocketAction(label, action) {
     if (!_transportAvailable) {
         await sleep(SOCKET_DISCONNECTED_SLEEP_MS);
