@@ -151,115 +151,116 @@ export function createIntention(type, parcelId, targetPos, score = 0) {
  * @returns {Intention}
  */
 export function getBestIntention() {
-    if (beliefs.me.x === null || beliefs.me.y === null) {
+    const me = beliefs.me;
+    if (me.x === null || me.y === null) {
         console.log('[deliberation] Position unknown, waiting...');
         return createIntention('wait', null, null, 0);
     }
 
-    const me = { x: beliefs.me.x, y: beliefs.me.y };
+    const mePos = { x: me.x, y: me.y };
+
+    // Drop carried ids no longer in the store.
+    if (me.carrying.length > 0 && !me.carrying.some((id) => beliefs.parcels.has(id))) {
+        me.carrying = []; // sensing has not updated this state yet
+    }
 
     // Carrying: deliver, unless a worthwhile pickup detour exists.
-    if (beliefs.me.carrying.length > 0) {
-        const realCarrying = beliefs.me.carrying.filter((id) => beliefs.parcels.has(id));
-        if (realCarrying.length === 0) {
-            beliefs.me.carrying = []; // Cleanup: sensing has not updated this state yet.
-        } else {
-            const capacity = beliefs.config?.MAX_PARCELS ?? 1;
+    if (me.carrying.length > 0) {
+        const capacity = beliefs.config?.MAX_PARCELS ?? 1;
 
-            // Stack rules can delay delivery until the best count is reached.
-            let _stackTarget = null;
-            if (llmMemory.stackRules.size > 0) {
-                _stackTarget = getBestStackTarget(capacity);
-                const carrying = beliefs.me.carrying.length;
-                if (_stackTarget !== null && carrying < _stackTarget && carrying < capacity) {
-                    const pickUp = findBestPickUp(me, { log: false });
-                    if (pickUp) return pickUp;
-                }
+        // Stack rules can delay delivery until the best count is reached.
+        let _stackTarget = null;
+        if (llmMemory.stackRules.size > 0) {
+            _stackTarget = getBestStackTarget(capacity);
+            const carrying = me.carrying.length;
+            if (_stackTarget !== null && carrying < _stackTarget && carrying < capacity) {
+                const pickUp = findBestPickUp(mePos, { log: false });
+                if (pickUp) return pickUp;
             }
+        }
 
-            // Full capacity means no more detours.
-            if (beliefs.me.carrying.length >= capacity) {
-                const target = findBestDeliveryTile(me);
-                if (target) {
-                    const stackMult = getStackMultiplier(beliefs.me.carrying.length);
-                    const dvScore = deliveryValue(beliefs.me.carrying, me, target) * stackMult;
-                    printLog(
-                        `deliver:${target.x},${target.y}`,
-                        `[deliberation] go_deliver (full) to (${target.x},${target.y}) ` +
-                            `estimatedReward=${dvScore.toFixed(1)} stackMult=${stackMult}`
-                    );
-                    return createIntention('go_deliver', null, target, dvScore);
-                }
-            }
-
-            const target = findBestDeliveryTile(me);
-
+        // Full capacity means no more detours.
+        if (me.carrying.length >= capacity) {
+            const target = findBestDeliveryTile(mePos);
             if (target) {
-                // Exact stack targets should not be exceeded.
-                const _atStackTarget =
-                    _stackTarget !== null && beliefs.me.carrying.length >= _stackTarget;
-                const pickUp = _atStackTarget ? null : findBestPickUp(me, { log: false });
-                if (pickUp) {
-                    const parcel = beliefs.parcels.get(pickUp.parcelId);
-                    if (parcel) {
-                        // Do not path to an occupied pickup tile.
-                        if (isTileOccupiedByOtherAgent({ x: parcel.x, y: parcel.y })) {
-                            printLog(
-                                `detour_occupied:${pickUp.parcelId}`,
-                                `[deliberation] Detour skipped parcel=${pickUp.parcelId} ` +
-                                    'pickup tile occupied by another agent'
-                            );
-                        } else {
-                            const parcelDelivery = findNearestDeliveryTile({
-                                x: parcel.x,
-                                y: parcel.y,
-                            });
-                            if (parcelDelivery) {
-                                const gain = detourValue(
-                                    parcel,
-                                    me,
-                                    beliefs.me.carrying,
-                                    parcelDelivery
-                                );
-                                const detour = evaluateDetour(
-                                    me,
-                                    parcel,
-                                    target,
-                                    parcelDelivery,
-                                    gain
-                                );
-
-                                if (detour?.accepted) {
-                                    const deliveryScore = deliveryValue(
-                                        beliefs.me.carrying,
-                                        me,
-                                        target
-                                    );
-                                    pickUp.score = deliveryScore + detour.effectiveGain;
-
-                                    console.log(
-                                        `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
-                                            `gain=${gain.toFixed(1)} ` +
-                                            `extraSteps=${detour.extraSteps} ` +
-                                            `effectiveGain=${detour.effectiveGain.toFixed(1)} ` +
-                                            `score=${pickUp.score.toFixed(1)}`
-                                    );
-                                    return pickUp;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                const stackMult = getStackMultiplier(beliefs.me.carrying.length);
-                const dvScore = deliveryValue(beliefs.me.carrying, me, target) * stackMult;
+                const stackMult = getStackMultiplier(me.carrying.length);
+                const dvScore = deliveryValue(me.carrying, mePos, target) * stackMult;
                 printLog(
                     `deliver:${target.x},${target.y}`,
-                    `[deliberation] go_deliver to (${target.x},${target.y}) ` +
+                    `[deliberation] go_deliver (full) to (${target.x},${target.y}) ` +
                         `estimatedReward=${dvScore.toFixed(1)} stackMult=${stackMult}`
                 );
                 return createIntention('go_deliver', null, target, dvScore);
             }
+        }
+
+        const target = findBestDeliveryTile(mePos);
+
+        if (target) {
+            // Exact stack targets should not be exceeded.
+            const _atStackTarget =
+                _stackTarget !== null && me.carrying.length >= _stackTarget;
+            const pickUp = _atStackTarget ? null : findBestPickUp(mePos, { log: false });
+            if (pickUp) {
+                const parcel = beliefs.parcels.get(pickUp.parcelId);
+                if (parcel) {
+                    // Do not path to an occupied pickup tile.
+                    if (isTileOccupiedByOtherAgent({ x: parcel.x, y: parcel.y })) {
+                        printLog(
+                            `detour_occupied:${pickUp.parcelId}`,
+                            `[deliberation] Detour skipped parcel=${pickUp.parcelId} ` +
+                                'pickup tile occupied by another agent'
+                        );
+                    } else {
+                        const parcelDelivery = findNearestDeliveryTile({
+                            x: parcel.x,
+                            y: parcel.y,
+                        });
+                        if (parcelDelivery) {
+                            const gain = detourValue(
+                                parcel,
+                                mePos,
+                                me.carrying,
+                                parcelDelivery
+                            );
+                            const detour = evaluateDetour(
+                                mePos,
+                                parcel,
+                                target,
+                                parcelDelivery,
+                                gain
+                            );
+
+                            if (detour?.accepted) {
+                                const deliveryScore = deliveryValue(
+                                    me.carrying,
+                                    mePos,
+                                    target
+                                );
+                                pickUp.score = deliveryScore + detour.effectiveGain;
+
+                                console.log(
+                                    `[deliberation] Detour accepted parcel=${pickUp.parcelId} ` +
+                                        `gain=${gain.toFixed(1)} ` +
+                                        `extraSteps=${detour.extraSteps} ` +
+                                        `effectiveGain=${detour.effectiveGain.toFixed(1)} ` +
+                                        `score=${pickUp.score.toFixed(1)}`
+                                );
+                                return pickUp;
+                            }
+                        }
+                    }
+                }
+            }
+
+            const stackMult = getStackMultiplier(me.carrying.length);
+            const dvScore = deliveryValue(me.carrying, mePos, target) * stackMult;
+            printLog(
+                `deliver:${target.x},${target.y}`,
+                `[deliberation] go_deliver to (${target.x},${target.y}) ` +
+                    `estimatedReward=${dvScore.toFixed(1)} stackMult=${stackMult}`
+            );
+            return createIntention('go_deliver', null, target, dvScore);
         }
 
         // Do not pick up more if carried parcels cannot be delivered.
@@ -267,8 +268,8 @@ export function getBestIntention() {
     }
 
     // Same-tile pickup is always worth checking before scoring.
-    const mx = Math.round(me.x);
-    const my = Math.round(me.y);
+    const mx = Math.round(mePos.x);
+    const my = Math.round(mePos.y);
     const _sameTilePickCap = llmMemory.maxPickupReward;
     for (const parcel of beliefs.parcels.values()) {
         if (parcel.carriedBy || parcel.reward <= 0) {
@@ -280,7 +281,7 @@ export function getBestIntention() {
         if (Math.round(parcel.x) !== mx || Math.round(parcel.y) !== my) {
             continue;
         }
-        if (shouldYieldParcel(parcel.id, me)) {
+        if (shouldYieldParcel(parcel.id, mePos)) {
             continue;
         }
         return createIntention(
@@ -291,10 +292,10 @@ export function getBestIntention() {
         );
     }
 
-    let pickUp = findBestPickUp(me);
+    let pickUp = findBestPickUp(mePos);
     if (!pickUp && _zoneConstraint) {
         // Empty zone: leave it rather than waiting forever.
-        pickUp = findBestPickUp(me, { allowOutOfZone: true });
+        pickUp = findBestPickUp(mePos, { allowOutOfZone: true });
         if (pickUp) {
             printLog(
                 `pickup_ooz:${pickUp.parcelId}`,
@@ -320,8 +321,8 @@ export function getBestIntention() {
     if (_zoneConstraint && preferredSpawners.length === 0) {
         resetRoamTarget();
         // No spawner in this half: wait near the relay point.
-        const parkSpot = halfPointTarget(me);
-        if (parkSpot && !sameTile(me, parkSpot)) {
+        const parkSpot = halfPointTarget(mePos);
+        if (parkSpot && !sameTile(mePos, parkSpot)) {
             printLog(
                 `relay_half:${parkSpot.x},${parkSpot.y}`,
                 `[deliberation] No spawner in zone ${_zoneConstraint}, ` +
@@ -342,8 +343,8 @@ export function getBestIntention() {
     if (spawners.length > 1 && (spawnsAreRare || spawnersAreSparse(spawners))) {
         spawners.sort((a, b) => a.x - b.x || a.y - b.y);
 
-        const mx = Math.round(me.x);
-        const my = Math.round(me.y);
+        const mx = Math.round(mePos.x);
+        const my = Math.round(mePos.y);
         const onIdx = spawners.findIndex((s) => s.x === mx && s.y === my);
 
         // Drop stale patrol targets.
@@ -356,8 +357,8 @@ export function getBestIntention() {
         }
 
         // Keep heading to a valid patrol target.
-        if (_roamTarget && onIdx === -1 && !sameTile(me, _roamTarget)) {
-            const result = costToReachPath(me, _roamTarget);
+        if (_roamTarget && onIdx === -1 && !sameTile(mePos, _roamTarget)) {
+            const result = costToReachPath(mePos, _roamTarget);
             if (result != null) {
                 const reason = spawnsAreRare
                     ? `spawns rare (${genMs}ms)`
@@ -373,7 +374,7 @@ export function getBestIntention() {
 
         if (onIdx !== -1) {
             // Do not walk away from an easy parcel.
-            const opportunisticPickUp = findBestLocalPickUp(me);
+            const opportunisticPickUp = findBestLocalPickUp(mePos);
             if (opportunisticPickUp) {
                 console.log(
                     `[deliberation] On a sparse spawner but visible parcel is reachable, ` +
@@ -383,7 +384,7 @@ export function getBestIntention() {
             }
 
             // Dwell only on the committed patrol target.
-            if (sameTile(me, _roamTarget)) {
+            if (sameTile(mePos, _roamTarget)) {
                 const now = Date.now();
                 if (!_roamArrivalTs) _roamArrivalTs = now;
                 if (now - _roamArrivalTs < SPAWNER_DWELL_MS) {
@@ -395,11 +396,11 @@ export function getBestIntention() {
 
         // Advance the patrol pointer.
         if (onIdx !== -1) {
-            _roamIndex = nextReachableSpawnerIndex(me, spawners, onIdx + 1);
+            _roamIndex = nextReachableSpawnerIndex(mePos, spawners, onIdx + 1);
         } else if (_roamIndex !== null) {
-            _roamIndex = nextReachableSpawnerIndex(me, spawners, _roamIndex);
+            _roamIndex = nextReachableSpawnerIndex(mePos, spawners, _roamIndex);
         } else {
-            const best = findBestReachable(me, spawners);
+            const best = findBestReachable(mePos, spawners);
             _roamIndex = best ? spawners.indexOf(best.tile) : -1;
         }
 
@@ -427,10 +428,10 @@ export function getBestIntention() {
     }
 
     // Frequent spawns: camp the nearest in-zone spawner.
-    const spawner = findBestReachableSpawnerTile(me, spawners);
+    const spawner = findBestReachableSpawnerTile(mePos, spawners);
     if (spawner) {
-        if (manhattanDistance(me, spawner) < 1) {
-            const opportunisticPickUp = findBestLocalPickUp(me);
+        if (manhattanDistance(mePos, spawner) < 1) {
+            const opportunisticPickUp = findBestLocalPickUp(mePos);
             if (opportunisticPickUp) {
                 console.log(
                     `[deliberation] On a spawner but visible parcel is reachable, ` +
