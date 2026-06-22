@@ -204,6 +204,11 @@ export function updateBeliefs(sensedParcels, sensedAgents, sensedCrates = []) {
     }
 }
 
+/**
+ * Suppresses a parcel claimed by another agent so we stop chasing it.
+ * @param {string} parcelId id of the parcel to suppress
+ * @param {number} [ttlMs] how long the suppression lasts, in ms
+ */
 export function suppressClaimedParcel(parcelId, ttlMs = beliefs.config.CLAIMED_PARCEL_SUPPRESS_MS) {
     if (!parcelId) return;
     claimedParcelSuppressions.set(parcelId, Date.now() + ttlMs);
@@ -221,15 +226,27 @@ export function suppressHandoffDrop(parcelId, ttlMs = beliefs.config.CLAIMED_PAR
     beliefs.parcels.delete(parcelId);
 }
 
+/**
+ * Clears active parcel suppressions so parcels can be considered again.
+ * @param {{ includeHandoffDrops?: boolean }} [options] whether to also clear our own handoff drops
+ */
 export function clearParcelSuppressions({ includeHandoffDrops = false } = {}) {
     claimedParcelSuppressions.clear();
+    // Optionally also drop our own handoff drops.
     if (includeHandoffDrops) handoffDroppedParcels.clear();
 }
 
+/**
+ * Tells whether a parcel is currently suppressed and should be ignored.
+ * @param {string} parcelId id of the parcel to check
+ * @param {number} [now] reference timestamp in ms
+ * @returns {boolean} true while the suppression is still active
+ */
 function isParcelSuppressed(parcelId, now = Date.now()) {
     if (isHandoffDropSuppressed(parcelId, now)) return true;
     const expiresAt = claimedParcelSuppressions.get(parcelId);
     if (!expiresAt) return false;
+    // Expired suppression: drop it and treat the parcel as available again.
     if (expiresAt <= now) {
         claimedParcelSuppressions.delete(parcelId);
         return false;
@@ -237,9 +254,16 @@ function isParcelSuppressed(parcelId, now = Date.now()) {
     return true;
 }
 
+/**
+ * Tells whether a parcel is suppressed because we dropped it for a handoff.
+ * @param {string} parcelId id of the parcel to check
+ * @param {number} [now] reference timestamp in ms
+ * @returns {boolean} true while the handoff-drop suppression is still active
+ */
 function isHandoffDropSuppressed(parcelId, now = Date.now()) {
     const expiresAt = handoffDroppedParcels.get(parcelId);
     if (!expiresAt) return false;
+    // Expired: clear it and the matching claimed-suppression entry.
     if (expiresAt <= now) {
         handoffDroppedParcels.delete(parcelId);
         if (claimedParcelSuppressions.get(parcelId) === expiresAt) {
@@ -259,7 +283,9 @@ function pruneClaimedParcelSuppressions(now = Date.now()) {
     }
 }
 
-/** Decays each parcel by one reward point. */
+/**
+ * Decays each free parcel by one reward point, removing those that hit zero.
+ */
 export function decayParcelsReward() {
     for (const [id, p] of beliefs.parcels) {
         if (p.carriedBy !== null) continue; // carried parcels aren't decayed locally
@@ -271,28 +297,6 @@ export function decayParcelsReward() {
         }
     }
 }
-
-/**
- * Converts a Deliveroo clock-event value into milliseconds.
- *
- * @param {string|number|null|undefined} event
- * @returns {number|null} interval in ms, or null if it is not a parseable duration.
- */
-export function clockEventToMs(event) {
-    if (event == null) return null;
-    if (typeof event === 'number') return Number.isFinite(event) ? event : null;
-    if (event === 'frame') return 40;
-
-    const match = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m)?\s*$/.exec(event);
-    if (!match) return null;
-
-    const value = parseFloat(match[1]);
-    const unit = match[2] ?? 's';
-    const factor = unit === 'ms' ? 1 : unit === 'm' ? 60_000 : 1000;
-    return value * factor;
-}
-
-// Cells avoided by pathfinding and movement checks.
 
 /** @param {number} x
  * @param {number} y
@@ -314,6 +318,7 @@ export function blacklistCellTemporary(x, y, ttlMs = 5000) {
 }
 
 /**
+ * Removes a cell from the permanent blacklist.
  * @param {number} x
  * @param {number} y
  */
@@ -321,7 +326,9 @@ export function unblacklistCell(x, y) {
     beliefs.blacklist.delete(`${x},${y}`);
 }
 
-/** @param {number} x
+/**
+ * Tells whether a cell is blacklisted, permanently or temporarily.
+ * @param {number} x
  * @param {number} y
  * @returns {boolean}
  */
@@ -333,6 +340,7 @@ export function isBlacklisted(x, y) {
     const expiresAt = beliefs.temporaryBlacklist.get(key);
     if (!expiresAt) return false;
 
+    // Expired temporary entry: drop it and treat the cell as free.
     if (Date.now() > expiresAt) {
         beliefs.temporaryBlacklist.delete(key);
         return false;
@@ -341,6 +349,9 @@ export function isBlacklisted(x, y) {
     return true;
 }
 
+/**
+ * Clears all blacklisted cells, both permanent and temporary.
+ */
 export function clearBlacklist() {
     beliefs.blacklist.clear();
     beliefs.temporaryBlacklist.clear();

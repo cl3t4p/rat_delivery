@@ -148,9 +148,8 @@ export function startMultiAgent({ role, token }) {
     });
 
     socket.onConfig((config) => {
-        applyConfig(tag, config)
+        applyConfig(tag, config);
     });
-
 
     startExecutor(socket);
 
