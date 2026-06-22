@@ -47,12 +47,13 @@ export function applyConfig(tag, config) {
     beliefs.config.MS_PER_STEP = config?.GAME?.player?.movement_duration ?? 500;
 
     console.log(`[${tag}] Config:`, beliefs.config);
-    console.log(`[${tag}] Decay interval: ${beliefs.config.PARCEL_DECADING_INTERVAL}ms`);
 }
 
-/** Starts local parcel reward decay. */
-export function startDecayLoop() {
-    setInterval(() => decayParcelsReward(), 1000);
+/** Starts local parcel reward decay. 
+ * @param {number} decay
+*/
+export function startDecayLoop(decay) {
+    setInterval(() => decayParcelsReward(), decay);
 }
 
 /** Logs the known grid as an ASCII map. */

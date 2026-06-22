@@ -37,7 +37,8 @@ export const beliefs = {
         PARCEL_DECADING_INTERVAL: null,
         PARCEL_GENERATION_INTERVAL: null,
         OBSERVATION_DISTANCE: null,
-        MAX_PARCELS: 5,
+        MS_PER_STEP: 500,
+        MAX_PARCELS: 1,
         PARCEL_FORGET_MS: 5000,
         AGENT_STALE_MS: 3000,
         CLAIMED_PARCEL_SUPPRESS_MS: 8000,
@@ -262,21 +263,11 @@ function pruneClaimedParcelSuppressions(now = Date.now()) {
     }
 }
 
+/** Decays each parcel by one reward point. */
 export function decayParcelsReward() {
-    // Track fractional decay when the decay interval is longer than 1s.
-    const interval = beliefs.config?.PARCEL_DECADING_INTERVAL;
-    if (!interval || interval <= 0) return;
-
-    beliefs.config._decayAccumulatedMs = (beliefs.config._decayAccumulatedMs ?? 0) + 1000;
-
-    const steps = Math.floor(beliefs.config._decayAccumulatedMs / interval);
-    if (steps === 0) return;
-
-    beliefs.config._decayAccumulatedMs -= steps * interval;
-
     for (const [id, p] of beliefs.parcels) {
         if (p.carriedBy !== null) continue; // carried parcels aren't decayed locally
-        const newReward = p.reward - steps;
+        const newReward = p.reward - 1;
         if (newReward <= 0) {
             beliefs.parcels.delete(id);
         } else {

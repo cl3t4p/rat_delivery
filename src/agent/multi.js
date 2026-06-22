@@ -147,9 +147,12 @@ export function startMultiAgent({ role, token }) {
         logState();
     });
 
-    socket.onConfig((config) => applyConfig(tag, config));
+    socket.onConfig((config) => {
+        applyConfig(tag, config)
+        startDecayLoop(beliefs.config.PARCEL_DECADING_INTERVAL);
+    });
 
-    startDecayLoop();
+
     startExecutor(socket);
 
     // Agent B receives natural-language objectives over chat.
