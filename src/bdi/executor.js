@@ -99,6 +99,11 @@ async function safeSocketAction(label, action) {
     }
 }
 
+/**
+ * Installs connect/disconnect hooks once to track transport availability.
+ *
+ * @param {import('@unitn-asa/deliveroo-js-sdk/client').DjsClientSocket} socket - Client socket to observe.
+ */
 function setupSocketLifecycle(socket) {
     if (_socketHooksInstalled) return;
     _socketHooksInstalled = true;
@@ -264,10 +269,11 @@ async function stepTowardsTarget(socket, intention) {
 
     // Remember crate pushes before sensing catches up.
     const delta = DIR_DELTA[dir];
-    const crateKey =
-        delta && beliefs.crates.has(`${fxBefore + delta.dx},${fyBefore + delta.dy}`)
-            ? `${fxBefore + delta.dx},${fyBefore + delta.dy}`
-            : null;
+    let crateKey = null;
+    if (delta) {
+        const aheadKey = `${fxBefore + delta.dx},${fyBefore + delta.dy}`;
+        if (beliefs.crates.has(aheadKey)) crateKey = aheadKey;
+    }
 
     const moved = await safeSocketAction(`move ${dir}`, () => socket.emitMove(dir));
 
