@@ -198,8 +198,7 @@ export function getBestIntention() {
 
         if (target) {
             // Exact stack targets should not be exceeded.
-            const _atStackTarget =
-                _stackTarget !== null && me.carrying.length >= _stackTarget;
+            const _atStackTarget = _stackTarget !== null && me.carrying.length >= _stackTarget;
             const pickUp = _atStackTarget ? null : findBestPickUp(mePos, { log: false });
             if (pickUp) {
                 const parcel = beliefs.parcels.get(pickUp.parcelId);
@@ -217,12 +216,7 @@ export function getBestIntention() {
                             y: parcel.y,
                         });
                         if (parcelDelivery) {
-                            const gain = detourValue(
-                                parcel,
-                                mePos,
-                                me.carrying,
-                                parcelDelivery
-                            );
+                            const gain = detourValue(parcel, mePos, me.carrying, parcelDelivery);
                             const detour = evaluateDetour(
                                 mePos,
                                 parcel,
@@ -232,11 +226,7 @@ export function getBestIntention() {
                             );
 
                             if (detour?.accepted) {
-                                const deliveryScore = deliveryValue(
-                                    me.carrying,
-                                    mePos,
-                                    target
-                                );
+                                const deliveryScore = deliveryValue(me.carrying, mePos, target);
                                 pickUp.score = deliveryScore + detour.effectiveGain;
 
                                 console.log(
