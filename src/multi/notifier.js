@@ -29,7 +29,7 @@ export function enableNotifier() {
 }
 
 /**
- * Broadcasts own-state changes.
+ * Broadcasts own-state changes. each sensing
  */
 export function tickBeliefDelta() {
     if (!commsReady) return;
@@ -61,9 +61,10 @@ export function broadcastIntention(intention) {
     if (!commsReady) return;
     if (!intention) return;
 
-    const tp = intention.targetPos
-        ? `${Math.round(intention.targetPos.x)},${Math.round(intention.targetPos.y)}`
-        : '';
+    let tp = '';
+    if (intention.targetPos) {
+        tp = `${Math.round(intention.targetPos.x)},${Math.round(intention.targetPos.y)}`;
+    }
     const key = `${intention.type}|${intention.parcelId ?? ''}|${intention.status}|${tp}`;
     if (key === snapshot.intentionKey) return;
     snapshot.intentionKey = key;

@@ -25,12 +25,16 @@ export function hasKnownPosition(pos) {
  * @property {{ type: string, parcelId: string|null, targetPos: Position|null, status: string, ts: number } | null} intention
  */
 export const state = {
+    // Known peers, keyed by agent id.
     /** @type {Map<string, PeerRecord>} */
     peers: new Map(),
+    // Parcels claimed by a peer, keyed by parcel id.
     /** @type {Map<string, { peerId: string, ts: number, status: string }>} */
     reservations: new Map(),
+    // Parcels this agent yielded, keyed by parcel id, with an expiry.
     /** @type {Map<string, { peerId: string|null, expiresAt: number }>} */
     yieldedParcels: new Map(),
+    // In-flight outgoing requests awaiting a reply, keyed by message ts.
     /** @type {Map<number, { resolve: Function, reject: Function, timer: any }>} */
     pendingRequests: new Map(),
 };
@@ -126,7 +130,7 @@ function rememberYieldedParcel(parcelId, peerId) {
 }
 
 /**
- * True when the peer claim should win locally.
+ * True when this agent should give up the parcel and let the peer take it.
  */
 export function shouldYieldParcel(parcelId, myPos) {
     if (!hasKnownPosition(myPos)) return false;
@@ -137,14 +141,17 @@ export function shouldYieldParcel(parcelId, myPos) {
         state.yieldedParcels.delete(parcelId);
     }
 
+    // No peer claim: take it.
     if (!isParcelClaimedByPeer(parcelId)) return false;
     const peerDist = peerDistanceToParcel(parcelId);
+    // Peer claim but distance unknown: can't compare, play safe and yield.
     if (peerDist === null) {
         rememberYieldedParcel(parcelId, null);
         return true;
     }
     const parcel = beliefs.parcels.get(parcelId);
     if (!parcel) return false;
+    // Peer claim with known distance: yield only if the peer is closer.
     const myDist = manhattanDistance(myPos, { x: parcel.x, y: parcel.y });
     const shouldYield = peerDist < myDist + CLAIM_MARGIN;
     if (shouldYield) {

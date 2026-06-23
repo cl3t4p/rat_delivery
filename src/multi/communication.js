@@ -77,6 +77,7 @@ export async function sendBroadcast(type, payload) {
     const peers = getPeers();
 
     if (peers.length === 0) {
+        //Don't broadcast anything other than HELLO
         if (type !== MSG_TYPE.HELLO) {
             return null;
         }
@@ -128,6 +129,8 @@ export async function sendDirect(toId, type, payload) {
 
 /**
  * Builds a request before sending, so the reply handler can be registered first.
+ *
+ * Sometimes the handoff let's a few message pass and get's buggy
  *
  * @param {string} toId
  * @param {MsgType} type

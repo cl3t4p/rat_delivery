@@ -854,13 +854,9 @@ function buildUserContent(me) {
         missionBlock = `Special missions (index: text):\n${lines}\n\n`;
     }
 
-    let objectiveBlock = '';
-    if (llmMemory.objective) objectiveBlock = `Operator objective: ${llmMemory.objective}\n\n`;
-
     return (
         reachedBlock +
         missionBlock +
-        objectiveBlock +
         `Map (legend in the system prompt):\n${buildGridMap()}\n\n` +
         `State:\n${JSON.stringify(snapshot)}`
     );

@@ -59,11 +59,9 @@ export function initLlmAgent(onObjectiveChange) {
  * Shared state read by intentionAgent.js.
  */
 export const llmMemory = {
-    /** @type {string|null} */
-    objective: null,
     /** @type {{text: string, from: string|null, ts: number}[]} */
     missions: [],
-    /** @type {Map<number, number>} Stack size -> reward multiplier. */
+    /** @type {Map<number, number>}  */
     stackRules: new Map(),
     /** @type {number|null} */
     maxPickupReward: null,
@@ -86,6 +84,7 @@ export const llmMemory = {
 export async function setObjective(text, from = null) {
     const sanitized = String(text ?? '')
         .slice(0, MAX_OBJECTIVE_LENGTH)
+        //Sanitize
         .replace(/[\x00-\x1F\x7F]/g, ' ')
         .trim();
 
@@ -175,7 +174,8 @@ export function notifyMissionsChanged(prevLen, newLen) {
 export async function callLLM(messages, { temperature = 0 } = {}) {
     if (!llmClient) throw new Error('LLM client not initialised (missing API key)');
     if (isLlmCircuitOpen()) {
-        throw new Error(`LLM temporarily disabled (${llmCooldownSeconds()}s cooldown remaining)`);
+        let llmCooldownSeconds = Math.max(0, Math.ceil((_llmDisabledUntil - Date.now()) / 1000));
+        throw new Error(`LLM temporarily disabled (${llmCooldownSeconds}s cooldown remaining)`);
     }
 
     try {
@@ -200,10 +200,6 @@ function isLlmCircuitOpen() {
     _llmFailures = 0;
     console.log('[llmAgent] LLM cooldown expired; trying LLM again');
     return false;
-}
-
-function llmCooldownSeconds() {
-    return Math.max(0, Math.ceil((_llmDisabledUntil - Date.now()) / 1000));
 }
 
 function recordLlmSuccess() {
