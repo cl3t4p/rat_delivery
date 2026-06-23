@@ -129,8 +129,8 @@ label(116, Y_B - 10.5, "empty / 5s timeout", color=DIM, fontsize=5.8)
 
 
 os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
-fig.savefig(OUT_PATH, transparent=True, bbox_inches="tight", pad_inches=0.06)
+fig.savefig(OUT_PATH, transparent=True, bbox_inches="tight", pad_inches=0)
 print("wrote", os.path.normpath(OUT_PATH))
 
 # Verification PNG on a dark backdrop (not committed).
-fig.savefig("/tmp/pddl-flow.png", facecolor="#1a1816", bbox_inches="tight", pad_inches=0.2, dpi=130)
+fig.savefig("/tmp/pddl-flow.png", facecolor="#1a1816", bbox_inches="tight", pad_inches=0, dpi=130)
