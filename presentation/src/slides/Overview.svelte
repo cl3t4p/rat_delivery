@@ -18,7 +18,7 @@
     <ul>
       <li><strong>Single agent</strong> — deterministic BDI with A* pathfinding</li>
       <li><strong>Multi-agent</strong> — two cooperative agents sharing zones and handoff</li>
-      <li><strong>PDDL</strong> — symbolic planning with Sokoban-style crate pushing</li>
+      <li><strong>PDDL</strong> — symbolic planning with crate pushing</li>
     </ul>
   </div>
   <div class="card green-border">
