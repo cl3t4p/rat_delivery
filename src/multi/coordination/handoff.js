@@ -92,7 +92,11 @@ function directionTo(from, to) {
     if (!from || !to) return null;
     const dx = Math.round(to.x) - Math.round(from.x);
     const dy = Math.round(to.y) - Math.round(from.y);
-    return Object.entries(DIR_DELTA_COORD).find(([, d]) => d.dx === dx && d.dy === dy)?.[0] ?? null;
+    // Reverse lookup: find the direction name whose delta matches (dx, dy).
+    for (const [name, delta] of Object.entries(DIR_DELTA_COORD)) {
+        if (delta.dx === dx && delta.dy === dy) return name;
+    }
+    return null;
 }
 
 /**
@@ -142,6 +146,7 @@ export function evaluateHandoff() {
     const peers = getPeers();
     const peer = peers[0] ?? null;
     if (!peer || peer.x === null || peer.y === null) return null;
+    if (peer.x === null || peer.y === null) return null;
 
     const posA = { x: beliefs.me.x, y: beliefs.me.y };
     const posB = { x: peer.x, y: peer.y };
@@ -158,35 +163,39 @@ export function evaluateHandoff() {
     const distMeetDel = manhattanDistance(meetTile, delivery);
 
     // Bonus handoffs can accept smaller step savings.
-    const gainThreshold = beliefs.me.handoffBonusActive
-        ? 0
-        : Math.max(HANDOFF_GAIN_MIN, Math.round(distADel * HANDOFF_GAIN_FRACTION));
+    let gainThreshold = 0;
+    if (!beliefs.me.handoffBonusActive) {
+        gainThreshold = Math.max(HANDOFF_GAIN_MIN, Math.round(distADel * HANDOFF_GAIN_FRACTION));
+    }
     const savedASteps = distADel - distAMeet;
     const condition1 = savedASteps > gainThreshold;
 
     // If B is idle, compare against A delivering alone.
-    const peerTarget =
+    let peerTarget = null;
+    if (
         peer.intention?.status === 'active' &&
         (peer.intention.type === 'go_pick_up' || peer.intention.type === 'go_deliver') &&
         peer.intention.targetPos
-            ? peer.intention.targetPos
-            : null;
+    ) {
+        peerTarget = peer.intention.targetPos;
+    }
     const distBCurrent = peerTarget ? manhattanDistance(posB, peerTarget) : distADel;
     const condition2 = distBMeet + distMeetDel < distBCurrent;
 
     const valueAAlone = deliveryValue(beliefs.me.carrying, posA, delivery);
     const handoffSteps = distAMeet + distMeetDel;
-    const valueHandoff = beliefs.me.carrying.reduce((total, id) => {
+    let bonus = 0;
+    if (beliefs.me.handoffBonusActive) bonus = HANDOFF_DELIVERY_BONUS;
+    let valueHandoff = 0;
+    for (const id of beliefs.me.carrying) {
         const parcel = beliefs.parcels.get(id);
-        if (!parcel) return total;
-        return (
-            total +
-            estimatedRewardAtDelivery(parcel.reward, handoffSteps) +
-            (beliefs.me.handoffBonusActive ? HANDOFF_DELIVERY_BONUS : 0)
-        );
-    }, 0);
-    const conditionValue =
-        savedASteps > gainThreshold && valueHandoff + HANDOFF_MAX_REWARD_LOSS >= valueAAlone;
+        if (!parcel) continue;
+        valueHandoff += estimatedRewardAtDelivery(parcel.reward, handoffSteps) + bonus;
+    }
+    let conditionValue = false;
+    if (savedASteps > gainThreshold && valueHandoff + HANDOFF_MAX_REWARD_LOSS >= valueAAlone) {
+        conditionValue = true;
+    }
 
     if (!condition1 || !condition2 || !conditionValue) {
         if (condition1 && condition2) {
@@ -269,38 +278,42 @@ function abandonHandoffRetryWait() {
  * then commits go_handoff on acceptance
  */
 export function proposeHandoff(handoff, attempt = 0) {
-    if (beliefs.me.carrying.length < 1) {
+    // Nothing to hand off anymore: drop the plan and re-deliberate now.
+    if (beliefs.me.carrying.length === 0) {
         _requestRevision(true);
         return;
     }
 
+    // Park on a placeholder wait intention while negotiating with the peer.
     let current = _getCurrentIntention();
     if (!current || current.status === 'failed' || current.status === 'done') {
-        const hold = createIntention(
-            'wait',
-            null,
-            beliefs.me.x !== null && beliefs.me.y !== null
-                ? { x: Math.round(beliefs.me.x), y: Math.round(beliefs.me.y) }
-                : null,
-            0
-        );
+        // Hold position at the current tile, or null if it is unknown.
+        let holdPos = null;
+        if (beliefs.me.x !== null && beliefs.me.y !== null) {
+            holdPos = { x: Math.round(beliefs.me.x), y: Math.round(beliefs.me.y) };
+        }
+        const hold = createIntention('wait', null, holdPos, 0);
         hold._handoffRetry = true;
         hold._handoffRetryPeerId = handoff.peerId;
         _commitIntention(hold);
         current = _getCurrentIntention();
     } else if (!isHandoffRetryWait(current)) {
+        // Busy with a real intention, not a handoff wait: don't interrupt it.
         return;
     }
 
+    // Refresh the timestamp so the wait intention is not pruned as stale.
     if (current) current.createdAt = Date.now();
 
     console.log(`[coord] Proposing handoff to ${handoff.peerId}`);
     requestHandoff(handoff.meetTile, handoff.peerId)
         .then((res) => {
             if (res.accepted) {
+                // Bail if the agent moved off the handoff wait while we waited.
                 const live = _getCurrentIntention();
                 if (live && !isHandoffRetryWait(live)) return;
                 console.log(`[coord] Handoff accepted, go_handoff`);
+                // Commit the real go_handoff and attach peer tracking data.
                 const intention = createIntention('go_handoff', null, handoff.meetTile, 0);
                 intention._peerStagingTile = res.stagingTile ?? null;
                 intention._peerId = handoff.peerId;
@@ -311,8 +324,10 @@ export function proposeHandoff(handoff, attempt = 0) {
             }
 
             if (res.reason === 'busy') {
+                // Peer is busy: bail if we left the wait, else schedule a retry.
                 const live = _getCurrentIntention();
                 if (live && !isHandoffRetryWait(live)) return;
+                // Fast retries first, then back off to the slow interval.
                 const delay =
                     attempt < HANDOFF_BUSY_FAST_RETRIES
                         ? HANDOFF_BUSY_RETRY_MS
@@ -325,10 +340,12 @@ export function proposeHandoff(handoff, attempt = 0) {
                 return;
             }
 
+            // Refused for any other reason: drop the wait and re-deliberate.
             abandonHandoffRetryWait();
             _requestRevision(true);
         })
         .catch(() => {
+            // Request timed out or failed to send: drop the wait and re-deliberate.
             abandonHandoffRetryWait();
             _requestRevision(true);
         });
@@ -338,6 +355,7 @@ export function proposeHandoff(handoff, attempt = 0) {
  * Offers the load to an empty teammate blocking a delivery path.
  */
 export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blockerCarryCount) {
+    // Only applies when delivering and an empty peer is blocking the path.
     if (
         intention.type !== 'go_deliver' ||
         beliefs.me.carrying.length === 0 ||
@@ -348,12 +366,14 @@ export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blocke
         return false;
     }
 
+    // Throttle: skip if a handoff is in flight or the cooldown has not elapsed.
     const now = Date.now();
     if (_blockedHandoffInFlight || now - _lastBlockedHandoffAt < BLOCKED_HANDOFF_COOLDOWN_MS) {
         await sleep(250);
         return true;
     }
 
+    // Hand off right where we stand, on the blocked delivery tile.
     const meetTile = {
         x: Math.round(beliefs.me.x),
         y: Math.round(beliefs.me.y),
@@ -367,12 +387,14 @@ export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blocke
     );
 
     try {
+        // Ask the blocker to take the load.
         const res = await requestHandoff(meetTile, blockingAgent.id);
         if (!res.accepted) {
             console.log(
                 `[coord] Blocked delivery handoff refused by ${blockingAgent.id} ` +
                     `(${res.reason ?? 'unknown'})`
             );
+            // Busy: hold briefly and signal a retry; otherwise give up.
             if (res.reason === 'busy') {
                 await sleep(300);
                 return true;
@@ -380,9 +402,11 @@ export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blocke
             return false;
         }
 
+        // Accepted: commit go_handoff and attach peer tracking data.
         const handoff = createIntention('go_handoff', null, meetTile, 0);
         handoff._peerId = blockingAgent.id;
         handoff._peerCarryBefore = blockerCarryCount;
+        // Stage the peer on its own tile when it offered no staging tile.
         handoff._peerStagingTile = res.stagingTile ?? {
             x: Math.round(blockingAgent.x),
             y: Math.round(blockingAgent.y),
@@ -394,6 +418,7 @@ export async function tryBlockedDeliveryHandoff(intention, blockingAgent, blocke
         _forceIntention(handoff);
         return true;
     } catch (err) {
+        // Request timed out or failed to send.
         console.log(`[coord] Blocked delivery handoff failed: ${err?.message ?? err}`);
         return false;
     } finally {
@@ -483,16 +508,20 @@ async function waitForHandoffReceiver(intention) {
  * After pickup the normal BDI loop takes over and produces go_deliver
  */
 async function executeHandoffReceive(socket, intention, execCtx) {
+    // The tile where the parcels will actually be dropped for pickup.
     const meetTile = intention._meetTile ?? intention.targetPos;
 
+    // Not at the target yet: keep stepping toward it.
     if (!isAtTile(intention.targetPos)) {
         await execCtx.stepTowardsTarget(socket, intention);
         return;
     }
 
+    // At the staging tile, waiting for the sender to drop on the meet tile.
     if (intention._meetTile && !isAtTile(meetTile)) {
         clearParcelSuppressions();
 
+        // Have the dropped parcels appeared on the meet tile yet?
         const parcelReady = [...beliefs.parcels.values()].some(
             (parcel) =>
                 !parcel.carriedBy &&
@@ -501,6 +530,7 @@ async function executeHandoffReceive(socket, intention, execCtx) {
         );
 
         if (!parcelReady) {
+            // Count this wait tick and fail once the budget runs out.
             intention._stagingWait = (intention._stagingWait ?? 0) + 1;
             if (intention._stagingWait >= HANDOFF_STAGING_MAX_WAIT) {
                 console.log('[coord] Handoff receive: timed out waiting at staging tile, failing');
@@ -515,17 +545,21 @@ async function executeHandoffReceive(socket, intention, execCtx) {
             return;
         }
 
+        // Parcels are ready: retarget onto the meet tile to go pick them up.
         intention.targetPos = meetTile;
         intention._pickupAttempts = 0;
         return;
     }
 
+    // On the meet tile: try to pick up the dropped parcels.
     intention._pickupAttempts = (intention._pickupAttempts ?? 0) + 1;
 
     const picked = await execCtx.safeSocketAction('handoff pickup', () => socket.emitPickup());
+    // Socket action failed: retry on a later tick.
     if (picked === null) return;
 
     if (!picked || picked.length === 0) {
+        // Nothing picked up: fail after the attempt budget, else wait and retry.
         if (intention._pickupAttempts >= HANDOFF_RECEIVE_MAX_PICKUP_ATTEMPTS) {
             console.log('[coord] Handoff receive: no parcels after max attempts, failing');
             notifyActionFailed('pickup_empty');
@@ -538,6 +572,7 @@ async function executeHandoffReceive(socket, intention, execCtx) {
         return;
     }
 
+    // Record each picked parcel as carried and flag it for the delivery bonus.
     for (const p of picked) {
         const id = p.id;
         const parcel = beliefs.parcels.get(id);

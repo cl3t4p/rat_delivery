@@ -422,20 +422,24 @@ export function initZoneAssignHandler() {
     onMessage(MSG_TYPE.ZONE_ASSIGN, (envelope) => {
         const { targetId, center, score: payloadScore, totalReward } = envelope.payload ?? {};
 
+        // Only act on assignments addressed to this agent, with a target tile.
         if (targetId !== beliefs.me.id) return;
         if (!center) return;
 
+        // Score of the assigned zone, falling back to total reward then 0.
         const score = payloadScore ?? totalReward ?? 0;
 
         const current = _getCurrentIntention();
         const currentScore = current?.score ?? 0;
         const currentType = current?.type ?? null;
 
+        // Never interrupt an in-progress handoff.
         if (currentType === 'go_handoff' || currentType === 'go_handoff_receive') {
             console.log(`[coord] Zone assign ignored: handoff in progress (${currentType})`);
             return;
         }
 
+        // Idle/cheap intentions are safe to replace; real work is not.
         const isLowValueIntention =
             !current ||
             currentType === 'wait' ||
@@ -445,6 +449,7 @@ export function initZoneAssignHandler() {
         const hasImportantIntention =
             current && current.status === 'active' && !isLowValueIntention;
 
+        // Already heading somewhere close to the assigned tile: nothing to do.
         if (
             current?.targetPos &&
             manhattanDistance(current.targetPos, center) <= SAME_ZONE_TARGET_DISTANCE
@@ -462,6 +467,7 @@ export function initZoneAssignHandler() {
                 ? { x: beliefs.me.x, y: beliefs.me.y }
                 : null;
 
+        // If the zone centre is unreachable, fall back to a reachable zone tile.
         let target = center;
         if (myPos && !aStar(myPos, target, { avoidAgents: false })) {
             const zoneName = envelope.payload?.zone ?? null;
@@ -473,6 +479,7 @@ export function initZoneAssignHandler() {
                 );
                 target = alternative;
             } else {
+                // Nothing in the zone is reachable: drop the assignment.
                 console.log(
                     `[coord] Zone assign ignored: no reachable target in zone` +
                         ` (centre=(${center.x},${center.y}))`
@@ -481,6 +488,7 @@ export function initZoneAssignHandler() {
             }
         }
 
+        // Keep important work unless the new zone is clearly better.
         if (hasImportantIntention && score - currentScore <= IMPROVEMENT_THRESHOLD) {
             console.log(
                 `[coord] Zone assign ignored: ` +
@@ -491,13 +499,16 @@ export function initZoneAssignHandler() {
             return;
         }
 
+        // Restrict deliberation to the assigned zone.
         if (envelope.payload?.zone) setZoneConstraint(envelope.payload.zone);
 
+        // Constraint-only refresh: update the zone but don't move.
         if (envelope.payload?.forceNavigation === false) {
             console.log(`[coord] Zone assign refreshed constraint only: ${envelope.payload.zone}`);
             return;
         }
 
+        // Commit navigation to the assigned target.
         const intention = createIntention('go_to', null, target, score);
         console.log(`[coord] Zone assign accepted, go_to (${target.x},${target.y}) score=${score}`);
 

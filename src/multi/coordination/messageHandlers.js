@@ -6,6 +6,8 @@ import { touchPeer, isSelfMessage, state } from './peerState.js';
 import { runHeuristicZoneAssignment, getNearestReachableZoneTarget } from './zoneAssignment.js';
 import { handleHandoffRequest, DIR_DELTA_COORD } from './handoff.js';
 
+/** @typedef {import('../../shared/types.js').Envelope} Envelope */
+
 // Set when Agent B pauses this agent.
 let _pausedByPeer = false;
 
@@ -118,7 +120,14 @@ export function clearPendingYield() {
     _pendingYield = null;
 }
 
-// Updates peer state from a belief_update message.
+/**
+ * Updates peer state from a belief_update message.
+ *
+ * @param {Envelope} envelope
+ * @param {string} senderId
+ * @param {string} [senderName]
+ * @returns {void}
+ */
 function handleBeliefUpdate(envelope, senderId, senderName) {
     const wasPositionUnknown = (state.peers.get(senderId)?.x ?? null) === null;
     const peer = touchPeer(senderId, senderName);
@@ -136,7 +145,14 @@ function handleBeliefUpdate(envelope, senderId, senderName) {
     }
 }
 
-// Updates the peer intention and reservation table.
+/**
+ * Updates the peer intention and reservation table.
+ *
+ * @param {Envelope} envelope
+ * @param {string} senderId
+ * @param {string} [senderName]
+ * @returns {void}
+ */
 function handleIntentionUpdate(envelope, senderId, senderName) {
     const peer = touchPeer(senderId, senderName);
     if (!peer) return;
@@ -169,7 +185,14 @@ function handleIntentionUpdate(envelope, senderId, senderName) {
     }
 }
 
-// Handles a peer request to take over a parcel.
+/**
+ * Handles a peer request to take over a parcel.
+ *
+ * @param {Envelope} envelope
+ * @param {string} senderId
+ * @param {string} [senderName]
+ * @returns {void}
+ */
 function handleRequest(envelope, senderId, senderName) {
     if (!touchPeer(senderId, senderName)) return;
     const { action, parcelId } = envelope.payload ?? {};
@@ -187,7 +210,13 @@ function handleRequest(envelope, senderId, senderName) {
     replyTo(envelope, false, 'unknown');
 }
 
-// Resolves an outbound request.
+/**
+ * Resolves an outbound request.
+ *
+ * @param {Envelope} envelope
+ * @param {string} senderId
+ * @returns {void}
+ */
 function handleResponse(envelope, senderId) {
     const { requestId, accepted, reason, ...extraPayload } = envelope.payload ?? {};
     const pending = state.pendingRequests.get(requestId);
@@ -203,7 +232,14 @@ function handleResponse(envelope, senderId) {
     }
 }
 
-// Drops a local pickup if the peer already claimed it.
+/**
+ * Drops a local pickup if the peer already claimed it.
+ *
+ * @param {Envelope} envelope
+ * @param {string} senderId
+ * @param {string} [senderName]
+ * @returns {void}
+ */
 function handleParcelClaimed(envelope, senderId, senderName) {
     if (!touchPeer(senderId, senderName)) return;
     const parcelId = envelope.payload?.parcelId;
@@ -222,7 +258,13 @@ function handleParcelClaimed(envelope, senderId, senderName) {
     }
 }
 
-// Handles peer control commands from Agent B.
+/**
+ * Handles peer control commands from Agent B.
+ *
+ * @param {Envelope} envelope
+ * @param {string} senderId
+ * @returns {void}
+ */
 function handlePeerCommand(envelope, senderId) {
     const { action, x, y } = envelope.payload ?? {};
     if (action === 'pause') {
@@ -256,19 +298,28 @@ function handlePeerCommand(envelope, senderId) {
  * Handles a blocked-at signal from a peer: if we are the blocker, we yield
  * by stepping perpendicular or backing off.
  * Includes push-chain detection to escape narrow corridors after repeated backoffs
+ *
+ * @param {Envelope} envelope
+ * @param {string} senderId
+ * @returns {void}
  */
 function handleBlockedAt(envelope, senderId) {
+    // Ignore our own broadcast.
     if (isSelfMessage(envelope, senderId)) return;
 
+    // Need a blocked tile and a direction to act on.
     const { x: bx, y: by, direction: blockedDir, carrying } = envelope.payload ?? {};
     if (bx === undefined || by === undefined || !blockedDir) return;
 
+    // Only respond if we are actually standing on the blocked tile.
     const myX = Math.round(beliefs.me.x ?? -1);
     const myY = Math.round(beliefs.me.y ?? -1);
     if (myX !== bx || myY !== by) return;
 
+    // A yield move is already queued; don't stack another.
     if (_pendingYield) return;
 
+    // Right-of-way: the agent carrying more parcels keeps the tile.
     const requesterCarry = Number.isFinite(carrying)
         ? carrying
         : (state.peers.get(senderId)?.carrying ?? 0);
@@ -281,6 +332,7 @@ function handleBlockedAt(envelope, senderId) {
         return;
     }
 
+    // Prefer stepping sideways (perpendicular) to clear the corridor.
     const candidates = PERP_DIRS[blockedDir] ?? [];
     for (const dir of candidates) {
         const { dx, dy } = DIR_DELTA_COORD[dir];
@@ -293,10 +345,12 @@ function handleBlockedAt(envelope, senderId) {
         }
     }
 
+    // No sideways exit: consider backing off along the blocked direction.
     const { dx: bfDx, dy: bfDy } = DIR_DELTA_COORD[blockedDir] ?? {};
     const fallbackX = myX + (bfDx ?? 0);
     const fallbackY = myY + (bfDy ?? 0);
     const fallbackTile = beliefs.grid.get(`${fallbackX},${fallbackY}`);
+    // Don't retreat onto a delivery tile while empty-handed.
     const wouldRetreatIntoDelivery = fallbackTile?.type === '2' && beliefs.me.carrying.length === 0;
 
     if (
@@ -304,6 +358,7 @@ function handleBlockedAt(envelope, senderId) {
         !wouldRetreatIntoDelivery &&
         canEnter(myX, myY, fallbackX, fallbackY)
     ) {
+        // Track repeated backoffs in the same direction within a time window.
         const now = Date.now();
         if (_pushChainDir === blockedDir && now - _pushChainTs < PUSH_CHAIN_WINDOW_MS) {
             _pushChainCount++;
@@ -313,6 +368,7 @@ function handleBlockedAt(envelope, senderId) {
         }
         _pushChainTs = now;
 
+        // Too many backoffs: break the loop by heading to a fresh zone target.
         if (_pushChainCount >= PUSH_CHAIN_THRESHOLD) {
             _pushChainCount = 0;
             _pushChainDir = null;
@@ -331,11 +387,13 @@ function handleBlockedAt(envelope, senderId) {
             return;
         }
 
+        // Otherwise queue a single backoff step in the blocked direction.
         _pendingYield = blockedDir;
         console.log(`[coord] Right-of-way: backing off ${blockedDir} from (${myX},${myY})`);
         return;
     }
 
+    // Backoff would land on a delivery tile while empty: stay put instead.
     if (wouldRetreatIntoDelivery) {
         console.log(
             `[coord] Right-of-way: not backing off ${blockedDir} into delivery ` +
@@ -344,6 +402,7 @@ function handleBlockedAt(envelope, senderId) {
         return;
     }
 
+    // No perpendicular and no backoff available: hold position.
     console.log(`[coord] Right-of-way: no free direction at (${myX},${myY}), staying`);
 }
 
