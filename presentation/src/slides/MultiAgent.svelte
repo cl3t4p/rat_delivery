@@ -43,7 +43,6 @@
     <h3>Handoff — carrier A farther than empty B</h3>
     <ul>
       <li>A drops at a <strong>meet tile</strong>, B picks up and delivers <span class="mono">(see diagram)</span></li>
-      <li>Gated: steps A saves &gt; threshold <em>and</em> reward lost &#8804; 2; <strong>+200</strong> bonus per parcel B delivers. Re-checked after each pickup and on <span class="mono">BLOCKED_AT</span></li>
     </ul>
   </div>
 </div>

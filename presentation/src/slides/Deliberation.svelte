@@ -31,7 +31,6 @@
       <h3>Reward for deviation &amp; detour cache</h3>
       <ul>
         <li><span class="mono">detourValue</span> = reward of grabbing one more − reward of delivering now (carried parcels keep decaying)</li>
-        <li>Pay for the route: <span class="mono">effectiveGain = gain − extraSteps</span>. Accept <span class="mono">≤ 3 &amp; gain &gt; 0</span>, or <span class="mono">≤ 8 &amp; effectiveGain ≥ 10</span></li>
         <li><strong>Detour cache</strong> per parcel, tied to the current tile, cleared on move; caches <span class="mono">null</span> legs too — dead routes are costly to recheck</li>
       </ul>
     </div>
@@ -42,7 +41,6 @@
       <ul>
         <li>No parcel worth taking &#8594; roam toward spawners</li>
         <li><strong>Frequent spawns:</strong> camp the nearest spawner. <strong>Sparse / rare</strong> (≥ <span class="mono">5s</span> or out of view): patrol in stable order, dwell <span class="mono">300ms</span>, persistent index</li>
-        <li>Always opportunistic — grab a parcel ≤ <span class="mono">3</span> tiles even while parked</li>
       </ul>
     </div>
   </div>
