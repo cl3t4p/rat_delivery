@@ -20,6 +20,7 @@ const LLM_MAX_RETRIES = Number(process.env.LLM_MAX_RETRIES) || 1;
 // Keep the prompt small: only the most recent missions are retained.
 const MAX_MISSIONS = 5;
 const MAX_OBJECTIVE_LENGTH = 500;
+const MAX_EXECUTOR_FEEDBACK = 3;
 
 /** @type {OpenAI|null} */
 let llmClient = null;
@@ -67,6 +68,8 @@ export const llmMemory = {
     maxPickupReward: null,
     /** @type {Record<string, number>} */
     deliveryRewards: {},
+    /** @type {{reason: string, intentionType: string|null, target: {x: number, y: number}|null, ts: number}[]} */
+    executorFeedback: [],
     /** @type {object|null} */
     environmentSnapshot: null,
     /** @type {((text: string, to?: 'peer'|'all') => void) | null} */
@@ -74,6 +77,35 @@ export const llmMemory = {
     /** @type {((prevLen: number, newLen: number) => void) | null} */
     onMissionsChanged: null,
 };
+
+/**
+ * Stores an executor failure/result for the next LLM prompt.
+ *
+ * @param {string} reason
+ * @param {import('../shared/types.js').Intention|null} [intention]
+ */
+export function recordExecutorFeedback(reason, intention = null) {
+    llmMemory.executorFeedback.push({
+        reason: String(reason ?? 'unknown'),
+        intentionType: intention?.type ?? null,
+        target: intention?.targetPos ? { x: intention.targetPos.x, y: intention.targetPos.y } : null,
+        ts: Date.now(),
+    });
+    while (llmMemory.executorFeedback.length > MAX_EXECUTOR_FEEDBACK) {
+        llmMemory.executorFeedback.shift();
+    }
+}
+
+/**
+ * Returns and clears pending executor feedback.
+ *
+ * @returns {typeof llmMemory.executorFeedback}
+ */
+export function consumeExecutorFeedback() {
+    const feedback = [...llmMemory.executorFeedback];
+    llmMemory.executorFeedback.length = 0;
+    return feedback;
+}
 
 /**
  * Stores a chat mission for the next LLM deliberation.

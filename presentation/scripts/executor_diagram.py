@@ -17,6 +17,8 @@ matplotlib.use("svg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 
+matplotlib.rcParams["svg.hashsalt"] = "rat-delivery-executor-diagram"
+
 # Deck theme (mirrors src/app.css variables).
 HEADING = "#fff7eb"
 MUTED = "#a89f94"
@@ -101,7 +103,13 @@ def new_ax(w, h, xlim, ylim):
 def save(fig, basename):
     svg_path = os.path.join(ASSETS, basename + ".svg")
     os.makedirs(ASSETS, exist_ok=True)
-    fig.savefig(svg_path, transparent=True, bbox_inches="tight", pad_inches=0.06)
+    fig.savefig(
+        svg_path,
+        transparent=True,
+        bbox_inches="tight",
+        pad_inches=0.08,
+        metadata={"Date": None},
+    )
     print("wrote", os.path.normpath(svg_path))
     preview = os.environ.get("PREVIEW_DIR")
     if preview:
@@ -119,7 +127,7 @@ def save(fig, basename):
 # Panel A: the per-tick guard gauntlet (a polling loop).
 # ---------------------------------------------------------------------------
 def build_loop():
-    fig, ax = new_ax(5.6, 7.2, (0, 112), (0, 152))
+    fig, ax = new_ax(5.6, 6.35, (0, 112), (23, 158))
 
     SX, SW, SH = 40, 54, 13
     RAIL_X = 102
@@ -169,7 +177,7 @@ def build_loop():
 
     # Return rail: up the right side and back into the first guard ("next tick").
     arrow(ax, RAIL_X, dispatch_y - 1, RAIL_X, 150, color=DIM, style="-")
-    arrow(ax, RAIL_X, 150, SX, 150, color=DIM)
+    arrow(ax, RAIL_X, 150, SX, 150, color=DIM, style="-")
     arrow(ax, SX, 150, SX, rows[0] + SH / 2, color=DIM)
     label(ax, (SX + RAIL_X) / 2, 153, "next tick  (loop)", color=DIM, fontsize=7.0)
 
@@ -180,7 +188,7 @@ def build_loop():
 # Panel B: stepTowardsTarget - the move-or-resolve ladder.
 # ---------------------------------------------------------------------------
 def build_step():
-    fig, ax = new_ax(6.6, 7.0, (0, 124), (0, 150))
+    fig, ax = new_ax(6.6, 7.0, (0, 126), (2, 162))
 
     SX, SW, SH = 30, 46, 13
     OX = 92

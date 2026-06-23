@@ -9,8 +9,8 @@
 
 <!-- diagram: the hybrid gate and the persistent llmMemory loop (scripts/llm_flow_diagram.py) -->
 <div class="diagram-panel">
-  <span class="panel-tag mono">hybrid gate &amp; persistent rules</span>
-  <img class="flow-img" src={flowImg} alt="LLM data flow: a mission gate routes to BDI deliberation with zero latency when no mission is pending, otherwise to LLM tool rounds; flow tools act through the executor while config tools persist rules into llmMemory, which BDI re-reads every tick; a circuit breaker suspends the LLM after 3 failures" />
+  <span class="panel-tag mono">generateBestIntention()</span>
+  <img class="flow-img" src={flowImg} alt="LLM data flow: a mission gate routes to BDI deliberation with zero latency when no mission is pending, otherwise to LLM tool rounds; flow tools act through the executor and executor results feed back as retry hints, while config tools persist rules into llmMemory, which BDI re-reads every tick" />
 </div>
 
 <!-- 2 x 2 grid of the four reasoning pieces -->
@@ -39,9 +39,9 @@
   </div>
 
   <div class="card red-border">
-    <h3>Feedback on errors with hints</h3>
+    <h3>Executor feedback</h3>
     <ul>
-      <li>When an agent or tool call fails, the result is fed back with a <strong>targeted hint</strong> (e.g. cell occupied by the peer, not carrying any parcel) so the LLM retries with a different action instead of abandoning the mission</li>
+      <li>Tool failures and executor outcomes feed the next LLM round/revision with <strong>targeted hints</strong> (e.g. occupied cell, no parcel carried, no path), so the mission can retry with a different action</li>
     </ul>
   </div>
 </div>

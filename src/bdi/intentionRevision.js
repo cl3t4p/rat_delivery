@@ -16,6 +16,7 @@ import {
 } from './coordination.js';
 
 import { USE_PDDL, manhattanDistance } from './helper.js';
+import { recordExecutorFeedback } from '../llm/llmAgent.js';
 
 import { findNearestSpawnerTile } from './components/tilesearch.js';
 
@@ -99,6 +100,7 @@ export function getCurrentIntention() {
  */
 export function notifyActionFailed(reason) {
     console.log(`[intentionRevision] Failed: ${reason}, re-evaluating`);
+    if (USE_LLM) recordExecutorFeedback(reason, currentIntention);
     if (currentIntention) {
         currentIntention.status = 'failed';
         broadcastIntention(currentIntention);

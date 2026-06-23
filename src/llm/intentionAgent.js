@@ -15,6 +15,7 @@ import {
     notifyMissionsChanged,
     getStackMultiplier,
     getBestStackTarget,
+    consumeExecutorFeedback,
 } from './llmAgent.js';
 import { pickupValue, deliveryValue } from '../bdi/scoring.js';
 import { sendBroadcast, MSG_TYPE } from '../multi/communication.js';
@@ -840,13 +841,25 @@ function buildStateSnapshot(me) {
  * side-effect tools can change memory between rounds.
  *
  * @param {Position} me
+ * @param {{reason: string, intentionType: string|null, target: {x: number, y: number}|null}[]} [executorFeedback]
  * @returns {string}
  */
-function buildUserContent(me) {
+function buildUserContent(me, executorFeedback = []) {
     const snapshot = buildStateSnapshot(me);
 
     let reachedBlock = '';
     if (_reachedNote) reachedBlock = `${_reachedNote}\n\n`;
+
+    let feedbackBlock = '';
+    if (executorFeedback.length > 0) {
+        const lines = executorFeedback.map((f) => {
+            const target = f.target ? ` target=(${f.target.x},${f.target.y})` : '';
+            return `- ${f.reason} while executing ${f.intentionType ?? 'unknown'}${target}`;
+        });
+        feedbackBlock =
+            `Recent executor feedback:\n${lines.join('\n')}\n` +
+            `Use this to choose a different valid tool/target; do not abandon a worthwhile mission only because the last attempt failed.\n\n`;
+    }
 
     let missionBlock = '';
     if (llmMemory.missions.length > 0) {
@@ -856,6 +869,7 @@ function buildUserContent(me) {
 
     return (
         reachedBlock +
+        feedbackBlock +
         missionBlock +
         `Map (legend in the system prompt):\n${buildGridMap()}\n\n` +
         `State:\n${JSON.stringify(snapshot)}`
@@ -892,9 +906,10 @@ export async function generateBestIntention() {
         _lastGoToTarget = null;
     }
 
+    const executorFeedback = consumeExecutorFeedback();
     const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserContent(me) },
+        { role: 'user', content: buildUserContent(me, executorFeedback) },
     ];
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
