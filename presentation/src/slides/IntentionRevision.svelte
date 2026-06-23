@@ -1,8 +1,8 @@
 <script>
 </script>
 
-<h2>Intention Revision: commit, but not blindly</h2>
-<p class="subtitle" style="font-size: 1rem;">
+<h2 style="font-size: 1.7rem; margin-bottom: 0.15em;">Intention Revision: commit, but not blindly</h2>
+<p class="subtitle" style="font-size: 0.92rem; margin-top: 0.2em;">
   Before each revision the active intention is re-validated, then replaced only if the gain is real — and never if it is a bilateral commitment.
 </p>
 
@@ -41,7 +41,7 @@
   </div>
 </div>
 
-<div class="card purple-border" style="max-width: 920px; margin-top: 18px;">
+<div class="card purple-border" style="max-width: 920px; margin-top: 18px; flex: none;">
   <h3>Protected from preemption &amp; <span class="mono">interruptForRevision()</span></h3>
   <ul>
     <li><strong>Bilateral commitments</strong> — an in-progress handoff and peer-commanded moves are never interrupted by a higher-scoring intention</li>

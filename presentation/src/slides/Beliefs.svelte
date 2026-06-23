@@ -1,8 +1,8 @@
 <script>
 </script>
 
-<h2>Beliefs: what we remember and why</h2>
-<p class="subtitle" style="font-size: 1rem;">
+<h2 style="font-size: 1.7rem; margin-bottom: 0.15em;">Beliefs: what we remember and why</h2>
+<p class="subtitle" style="font-size: 0.92rem; margin-top: 0.2em;">
   The belief store holds the world model plus the assumptions that keep decisions stable between sensing events.
 </p>
 

@@ -40,7 +40,7 @@
   <div class="flow-box blue">Executor<small>action</small></div>
 </div>
 
-<div class="card purple-border" style="max-width: 920px; margin-top: 20px;">
+<div class="card purple-border" style="max-width: 920px; margin-top: 20px; flex: none;">
   <h3>Optional LLM integration</h3>
   <p style="color: var(--text-muted);">
     The model <strong style="color:var(--heading)">replaces BDI deliberation</strong> only to handle missions written in natural language.

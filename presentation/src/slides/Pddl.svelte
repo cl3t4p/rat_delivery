@@ -2,8 +2,8 @@
   import flowImg from '../assets/pddl-flow.svg'
 </script>
 
-<h2>PDDL mode: planning <em>through</em> obstacles</h2>
-<p class="subtitle" style="font-size: 0.95rem;">
+<h2 style="font-size: 1.7rem; margin-bottom: 0.15em;">PDDL mode: planning <em>through</em> obstacles</h2>
+<p class="subtitle" style="font-size: 0.92rem; margin-top: 0.2em;">
   Same BDI loop — A* is swapped for a symbolic solver run as a service. Each intention regenerates a PDDL problem from current beliefs.
 </p>
 
