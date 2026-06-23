@@ -2,9 +2,14 @@
 """
 Renders the LLM-over-BDI data flow for the LLM integration slide.
 
-Shows the hybrid gate (mission? -> BDI vs LLM) and the key loop: config
-tools persist rules into llmMemory, which BDI re-reads every tick. Outputs
-a transparent SVG that sits on the slide's dark panel. Run:
+The story this version tells: a pending chat mission acts as a LOCK. The gate
+is re-checked every tick and reads llmMemory.missions; while that list is
+non-empty the agent is held in the LLM branch (re-deliberating each tick,
+<= 4 rounds/tick). It is RELEASED back to BDI only when the mission is
+completed (a flow tool finishes it) or discarded (resolve_mission), which
+empties the list. The circuit breaker is a separate escape hatch.
+
+Outputs a transparent SVG that sits on the slide's dark panel. Run:
     python3 scripts/llm_flow_diagram.py
 """
 
@@ -31,9 +36,9 @@ OUT_PATH = os.path.join(
     os.path.dirname(__file__), "..", "src", "assets", "llm-flow.svg"
 )
 
-fig, ax = plt.subplots(figsize=(7.2, 3.5))
-ax.set_xlim(0, 156)
-ax.set_ylim(0, 76)
+fig, ax = plt.subplots(figsize=(7.2, 4.3))
+ax.set_xlim(0, 150)
+ax.set_ylim(0, 80)
 ax.axis("off")
 fig.patch.set_alpha(0)
 ax.patch.set_alpha(0)
@@ -53,7 +58,7 @@ def node(cx, cy, w, h, title, color, subtitle=None, title_color=HEADING):
     ax.add_patch(box)
     if subtitle:
         ax.text(cx, cy + 2.4, title, ha="center", va="center", fontsize=8.4, color=title_color)
-        ax.text(cx, cy - 3.2, subtitle, ha="center", va="center", fontsize=5.6, color=MUTED)
+        ax.text(cx, cy - 3.2, subtitle, ha="center", va="center", fontsize=5.4, color=MUTED)
     else:
         ax.text(cx, cy, title, ha="center", va="center", fontsize=8.4, color=title_color)
 
@@ -75,41 +80,56 @@ def arrow(x1, y1, x2, y2, color=MUTED, lw=1.3, dashed=False, conn=None):
     )
 
 
-def label(x, y, text, color=MUTED, fontsize=6.6, ha="center"):
-    ax.text(x, y, text, ha=ha, va="center", fontsize=fontsize, color=color)
+def label(x, y, text, color=MUTED, fontsize=6.6, ha="center", weight="normal"):
+    ax.text(x, y, text, ha=ha, va="center", fontsize=fontsize, color=color, weight=weight)
 
 
-# The hybrid gate (left), the LLM tool path (top), the persistent loop (bottom).
-node(18, 58, 26, 15, "mission?", BLUE, subtitle="pending in chat")
-node(58, 58, 30, 15, "LLM rounds", PURPLE, subtitle="≤ 4 · T=0 · required")
-node(108, 58, 44, 15, "flow tools", PURPLE, subtitle="go_pick_up · go_to · drop_at")
-node(108, 34, 44, 15, "config tools", ORANGE, subtitle="set_* · blacklist · command_peer")
-node(108, 12, 44, 14, "llmMemory", ORANGE, subtitle="stackRules · maxPickup · rewards")
-node(18, 12, 26, 15, "BDI", GREEN, subtitle="deliberation")
+# ---- Nodes ---------------------------------------------------------------
+# Left: the per-tick lock gate and the BDI fall-through.
+node(24, 56, 32, 16, "mission pending?", BLUE, subtitle="gate — checked every tick")
+node(24, 14, 32, 16, "BDI", GREEN, subtitle="deliberation")
+# Center/top: the LLM control branch.
+node(70, 56, 30, 15, "LLM rounds", PURPLE, subtitle="T=0 \u00b7 tool_choice=required")
+node(120, 56, 40, 15, "flow tools", PURPLE, subtitle="go_pick_up \u00b7 go_to \u00b7 drop_at")
+node(120, 33, 40, 15, "config tools", ORANGE, subtitle="set_* \u00b7 blacklist \u00b7 command_peer")
+node(120, 11, 40, 15, "llmMemory", ORANGE, subtitle="missions \u00b7 rules \u00b7 rewards")
 
-# Hybrid gate branches.
-arrow(18 + 26 / 2, 58, 58 - 30 / 2, 58, color=PURPLE)
-label(36, 62, "yes", color=PURPLE, fontsize=6.4)
-arrow(18, 58 - 15 / 2, 18, 12 + 15 / 2, color=GREEN)
-label(21, 35, "no — zero latency", color=GREEN, fontsize=6.0, ha="left")
 
-# LLM -> tools (flow tools act now; config tools persist rules).
-arrow(58 + 30 / 2, 58, 108 - 44 / 2, 58, color=PURPLE, lw=1.2)
-arrow(58 + 30 / 2, 54, 108 - 44 / 2, 36, color=ORANGE, lw=1.2)
+# Gate -> LLM while a mission is pending (the forward lock edge).
+arrow(24 + 32 / 2, 56, 70 - 30 / 2, 56, color=PURPLE, lw=1.6)
 
-# config tools -> llmMemory -> BDI (the persistent loop, the key edge).
-arrow(108, 34 - 15 / 2, 108, 12 + 14 / 2, color=ORANGE, lw=1.2)
-label(112, 23, "persist", color=ORANGE, fontsize=6.0, ha="left")
-arrow(108 - 44 / 2, 12, 18 + 26 / 2, 12, color=ORANGE, lw=1.5)
-label(63, 15.5, "read every tick", color=ORANGE, fontsize=6.6)
+# Relock arc: each tick the LLM yields, but the unresolved mission still sits in
+# llmMemory.missions, so the gate re-fires and routes back here. This loop is
+# the lock: the agent cannot leave the LLM branch until the mission is resolved.
+# Anchored to the box tops with a wide upward bow so it reads as a return loop.
+arrow(70, 56 + 15 / 2, 24, 56 + 16 / 2, color=RED, lw=1.4,
+      conn="arc3,rad=0.2")
+label(47, 73, "held till a mission is cleared", color=RED, fontsize=7.8)
 
-# Both producers reach the executor (labelled, no converging node).
-label(108 + 44 / 2 + 2, 58, "→ executor", color=MUTED, fontsize=6.4, ha="left")
-label(18, 12 - 9.5, "→ executor", color=MUTED, fontsize=6.4)
+# ---- Release back to BDI -------------------------------------------------
+arrow(24, 56 - 16 / 2, 24, 14 + 16 / 2, color=GREEN, lw=1.5)
+label(27, 41, "no \u00b7 zero latency", color=GREEN, fontsize=6.2, ha="left")
+label(27, 36.8, "RELEASE when missions empty:", color=RED, fontsize=5.9, ha="left", weight="bold")
+label(27, 33, "\u2022 completed (flow tool finishes)", color=DIM, fontsize=5.7, ha="left")
+label(27, 29.6, "\u2022 discarded (resolve_mission)", color=DIM, fontsize=5.7, ha="left")
 
-# Circuit breaker note (under the LLM round box).
-label(58, 46, "circuit breaker", color=RED, fontsize=6.4)
-label(58, 41.5, "3 fails → suspend 2 min → BDI", color=DIM, fontsize=6.0)
+# ---- LLM -> tools --------------------------------------------------------
+arrow(70 + 30 / 2, 56, 120 - 40 / 2, 56, color=PURPLE, lw=1.2)
+label(97, 59.5, "1 tool / round", color=DIM, fontsize=6.0)
+arrow(70 + 30 / 2, 53, 120 - 40 / 2, 35, color=ORANGE, lw=1.2)
+
+# ---- Persistent rule loop ------------------------------------------------
+arrow(120, 33 - 15 / 2, 120, 11 + 15 / 2, color=ORANGE, lw=1.2)
+label(124, 22, "persist", color=ORANGE, fontsize=6.0, ha="left")
+# llmMemory rules feed BDI deliberation every tick (the config-application loop,
+# distinct from the mission lock above).
+arrow(120 - 40 / 2, 11, 24 + 32 / 2, 14, color=ORANGE, lw=1.5)
+label(72, 16.5, "rules: read every tick", color=ORANGE, fontsize=6.4)
+
+# ---- Executor sinks ------------------------------------------------------
+label(120 + 40 / 2 + 2, 56, "\u2192 executor", color=MUTED, fontsize=6.4, ha="left")
+label(24, 14 - 9.5, "\u2192 executor", color=MUTED, fontsize=6.4)
+
 
 os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
 fig.savefig(OUT_PATH, transparent=True, bbox_inches="tight", pad_inches=0.06)

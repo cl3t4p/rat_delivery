@@ -87,8 +87,10 @@ async function solveProblem(intention, options) {
  * @returns {string|null}
  */
 function buildProblem(intention, { pushCrates = true, allowFallback = true } = {}) {
+    //Do I even have somewhere to go? No target, no plan.
     if (!intention?.targetPos) return null;
 
+    //Do I know where I am? If I'm lost there's no tile to plan from.
     const me = beliefs.me;
     if (me.x === null || me.y === null) return null;
 
@@ -96,7 +98,7 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
     const mx = Math.round(me.x);
     const my = Math.round(me.y);
 
-    // Crates stay in the tile set only when the PDDL domain is allowed to push them.
+    //Get tiles blocked by other agents
     const blocked = blockedTiles();
     const crateKeys = new Set(beliefs.crates.keys());
     const tiles = new Set();
@@ -104,13 +106,15 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
 
     for (const [key] of beliefs.grid) {
         if (blocked.has(key)) continue;
-        if (!pushCrates && crateKeys.has(key)) continue; // crate treated as a wall
+
+        //If I can't push, should I treat this crate as a wall and leave its tile out?
+        if (!pushCrates && crateKeys.has(key)) continue;
         const [x, y] = key.split(',').map(Number);
         if (!isWalkable(x, y, false)) continue;
         tiles.add(key);
     }
 
-    // Pushable crate objects.
+    //Am I allowed to push crates? Then which ones can I actually shove around?
     const crates = [];
     if (pushCrates) {
         for (const key of beliefs.crates.keys()) {
@@ -136,11 +140,11 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         init.push(`(tile ${tName})`);
         const tile = beliefs.grid.get(key);
         if (tile?.delivery) init.push(`(delivery ${tName})`);
-        // Crates may only stop on crate-slot tiles.
+        //Where can a crate I push come to rest? Only on crate-slot tiles.
         if (tile?.type === '5' || tile?.type === '5!') init.push(`(crate-slot ${tName})`);
     }
 
-    // Movement facts already include one-way tile constraints.
+    //From each tile, which way can I actually step? One-way constraints are baked in here.
     for (const key of tiles) {
         const [x, y] = key.split(',').map(Number);
         const from = `t_${x}_${y}`;
@@ -151,7 +155,7 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         addEdge(init, from, x, y, x, y - 1, 'down', tiles);
     }
 
-    // Occupied crate tiles must be pushed through, not walked through.
+    //Which tiles have a crate on them that I must push through, not walk through?
     for (const c of crates) {
         const tName = `t_${c.x}_${c.y}`;
         init.push(`(crate ${c.name})`);
@@ -164,7 +168,7 @@ function buildProblem(intention, { pushCrates = true, allowFallback = true } = {
         init.push(`(carrying ${agentName} p_${id})`);
     }
 
-    // Invalid pickup targets fall back to exploration unless the caller disabled it.
+    //Is my target bogus or unreachable? Then should I fall back to just exploring?
     let goal = goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames);
     if (!goal) {
         if (!allowFallback) return null;
@@ -215,18 +219,17 @@ function goalForIntention(intention, agentName, mx, my, tiles, init, parcelNames
         const drops = beliefs.me.carrying.map((id) => `(not (carrying ${agentName} p_${id}))`);
         return drops.length === 1 ? drops[0] : `(and ${drops.join(' ')})`;
     }
-    if (intention.type === 'explore' || intention.type === 'go_to' || intention.type === 'drop') {
+    if (
+        intention.type === 'explore' ||
+        intention.type === 'go_to' ||
+        intention.type === 'drop' ||
+        intention.type === 'go_handoff' ||
+        intention.type === 'go_handoff_receive'
+    ) {
         const t = intention.targetPos;
         const tx = Math.round(t.x),
             ty = Math.round(t.y);
-        if (!tiles.has(`${tx},${ty}`)) return null;
-        return `(at ${agentName} t_${tx}_${ty})`;
-    }
-    if (intention.type === 'go_handoff' || intention.type === 'go_handoff_receive') {
-        const t = intention.targetPos;
-        if (!t) return null;
-        const tx = Math.round(t.x),
-            ty = Math.round(t.y);
+        //Can I even stand on that tile? If it's not reachable, give up.
         if (!tiles.has(`${tx},${ty}`)) return null;
         return `(at ${agentName} t_${tx}_${ty})`;
     }

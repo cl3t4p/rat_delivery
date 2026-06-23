@@ -4,7 +4,7 @@
 
 <h2 style="font-size: 1.7rem; margin-bottom: 0.15em;">Deliberation: one scored intention per tick</h2>
 <p class="subtitle" style="font-size: 0.92rem; margin-top: 0.2em;">
-  <span class="mono">getBestIntention()</span> reduces the whole belief store to a single best action. For the solo BDI it is pure utility math — no rules, no LLM.
+  <span class="mono">getBestIntention()</span> reduces the whole belief store to a single best action.
 </p>
 
 <div class="delib-grid">
@@ -52,10 +52,10 @@
 <style>
   .delib-grid {
     display: grid;
-    grid-template-columns: minmax(300px, 400px) minmax(420px, 1fr);
+    grid-template-columns: minmax(360px, 480px) minmax(380px, 1fr);
     gap: 24px;
     width: 100%;
-    max-width: 1080px;
+    max-width: 1160px;
     margin-top: 10px;
     align-items: center;
   }
@@ -84,8 +84,8 @@
   .flow-img {
     display: block;
     max-width: 100%;
-    max-height: 58vh;
-    width: auto;
+    max-height: 66vh;
+    width: 100%;
     height: auto;
     margin: 0 auto;
   }
